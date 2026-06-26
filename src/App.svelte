@@ -17,6 +17,7 @@
   import CategoryTabs from "./lib/CategoryTabs.svelte";
   import PromptList from "./lib/PromptList.svelte";
   import Editor from "./lib/Editor.svelte";
+  import Settings from "./lib/Settings.svelte";
 
   let config: AppConfig | null = null;
   let allPrompts: Prompt[] = $state([]);
@@ -34,6 +35,7 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let copiedFlash = $state(false);
+  let settingsOpen = $state(false);
 
   // 选中项
   let selectedPrompt = $derived(
@@ -73,6 +75,17 @@
     if (!selectedPath && visiblePrompts.length > 0) {
       selectedPath = visiblePrompts[0].path;
     }
+  }
+
+  // 设置界面切换数据目录后：更新配置、重置选中、重新扫描
+  async function onConfigChanged(newConfig: AppConfig) {
+    config = newConfig;
+    selectedPath = null;
+    lastLoadedPath = null;
+    selectedCategory = "__all__";
+    query = "";
+    await refresh();
+    settingsOpen = false;
   }
 
   // 选中变化时加载内容
@@ -238,6 +251,14 @@
           spellcheck="false"
         />
         <button class="new-btn" onclick={doCreate} title="新建 (Ctrl+N)">+</button>
+        <button
+          class="new-btn"
+          onclick={() => (settingsOpen = true)}
+          title="设置"
+          aria-label="设置"
+        >
+          ⚙
+        </button>
       </div>
     </header>
 
@@ -285,6 +306,8 @@
         ✓ 已复制，回到原应用粘贴
       </div>
     {/if}
+
+    <Settings bind:open={settingsOpen} onchanged={onConfigChanged} />
   {/if}
 </div>
 

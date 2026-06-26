@@ -11,6 +11,26 @@ export async function initApp(): Promise<AppConfig> {
   return invoke<AppConfig>("init_app");
 }
 
+/** 读取当前配置（设置界面用） */
+export async function getConfig(): Promise<AppConfig> {
+  return invoke<AppConfig>("get_config");
+}
+
+/** 设置数据目录并持久化，返回更新后的配置 */
+export async function setDataDir(path: string): Promise<AppConfig> {
+  return invoke<AppConfig>("set_data_dir", { path });
+}
+
+/** 弹出系统目录选择器，返回用户选的路径（取消则 null） */
+export async function pickDataDir(): Promise<string | null> {
+  return invoke<string | null>("pick_data_dir");
+}
+
+/** 在系统文件管理器中打开数据目录 */
+export async function openDataDir(): Promise<void> {
+  return invoke<void>("open_data_dir");
+}
+
 /** 扫描所有 prompt，返回列表与分类计数 */
 export async function scanPrompts(): Promise<ScanResult> {
   return invoke<ScanResult>("scan_prompts");

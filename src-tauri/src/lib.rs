@@ -1,12 +1,13 @@
 // Prompt Pocket — Tauri 应用入口
 //
 // 职责：
-// 1. 注册并暴露 9 个 #[tauri::command] 给前端 invoke
+// 1. 注册并暴露 #[tauri::command] 给前端 invoke
 // 2. 注册全局快捷键 Ctrl+Alt+P，唤出/隐藏 spotlight 窗口
 // 3. 窗口失焦自动隐藏（spotlight 体验）
-// 4. 初始化数据目录（默认放在用户文档目录下的 PromptPocket/）
+// 4. 数据目录可配置、持久化（config.json），支持运行时切换（云同步用）
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tauri::{Manager, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
@@ -19,10 +20,63 @@ use crate::store::{
 };
 
 // ────────────────────────────────────────────────────────────
-// 数据目录解析：首次启动在「文档/PromptPocket」下建库
+// 配置持久化：config.json 存在 %APPDATA%/prompt-pocket/ 下
 // ────────────────────────────────────────────────────────────
-fn resolve_data_dir() -> PathBuf {
-    // 文档目录是最适合做云盘同步的默认位置（OneDrive/iCloud 常接管此目录）
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+struct PersistedConfig {
+    /// 用户选择的数据目录；None 时回退到默认（~/Documents/PromptPocket）
+    data_dir: Option<String>,
+}
+
+/// 运行时配置：可被设置界面动态修改，用 Mutex 保护
+#[derive(Clone)]
+struct RuntimeConfig {
+    data_dir: PathBuf,
+}
+
+struct AppState {
+    config: Mutex<RuntimeConfig>,
+    config_file: PathBuf,
+}
+
+impl AppState {
+    /// 读取当前数据目录（加锁）
+    fn data_dir(&self) -> PathBuf {
+        self.config.lock().unwrap().data_dir.clone()
+    }
+
+    /// 修改数据目录并持久化
+    fn set_data_dir(&self, new_dir: PathBuf) -> Result<(), String> {
+        {
+            let mut cfg = self.config.lock().unwrap();
+            cfg.data_dir = new_dir.clone();
+        }
+        self.persist(PersistedConfig {
+            data_dir: Some(new_dir.to_string_lossy().to_string()),
+        })
+    }
+
+    fn persist(&self, cfg: PersistedConfig) -> Result<(), String> {
+        if let Some(parent) = self.config_file.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+        std::fs::write(&self.config_file, json).map_err(|e| e.to_string())
+    }
+}
+
+/// 配置文件路径：%APPDATA%/prompt-pocket/config.json
+fn resolve_config_file(app: &tauri::AppHandle) -> PathBuf {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    dir.join("config.json")
+}
+
+/// 默认数据目录：~/Documents/PromptPocket（云盘常接管此目录）
+fn default_data_dir() -> PathBuf {
     let base = dirs::document_dir().unwrap_or_else(|| {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -31,27 +85,29 @@ fn resolve_data_dir() -> PathBuf {
     base.join("PromptPocket")
 }
 
-/// 状态：保存数据目录绝对路径，供命令复用
-#[derive(Clone)]
-struct AppState {
-    data_dir: PathBuf,
+/// 启动时加载配置：读 config.json，没有则用默认目录
+fn load_config(config_file: &Path) -> RuntimeConfig {
+    let data_dir = std::fs::read_to_string(config_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<PersistedConfig>(&s).ok())
+        .and_then(|c| c.data_dir)
+        .map(PathBuf::from)
+        .unwrap_or_else(default_data_dir);
+    RuntimeConfig { data_dir }
 }
 
 // ────────────────────────────────────────────────────────────
 // Tauri 命令
 // ────────────────────────────────────────────────────────────
 
-/// 初始化：确保数据目录存在（含 prompts/ 子目录），返回配置
+/// 初始化：确保数据目录存在，首次启动写入示例 prompt，返回配置
 #[tauri::command]
 fn init_app(state: tauri::State<'_, AppState>) -> Result<AppConfig, String> {
-    let data_dir = state.data_dir.clone();
+    let data_dir = state.data_dir();
     std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
 
-    // 首次启动写入示例 prompt，让用户立刻看到效果（若目录为空）
-    let any_md = std::fs::read_dir(&data_dir)
-        .map_err(|e| e.to_string())?
-        .filter_map(|e| e.ok())
-        .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"));
+    // 首次启动写入示例 prompt（仅当目录里还没有任何 .md）
+    let any_md = walkdir_has_md(&data_dir);
     if !any_md {
         seed_sample_prompts(&data_dir);
     }
@@ -62,17 +118,104 @@ fn init_app(state: tauri::State<'_, AppState>) -> Result<AppConfig, String> {
     })
 }
 
+fn walkdir_has_md(dir: &Path) -> bool {
+    for entry in walkdir::WalkDir::new(dir).min_depth(1).into_iter().flatten() {
+        if entry.path().extension().and_then(|e| e.to_str()) == Some("md") {
+            return true;
+        }
+    }
+    false
+}
+
+/// 读取当前配置（设置界面用）
+#[tauri::command]
+fn get_config(state: tauri::State<'_, AppState>) -> Result<AppConfig, String> {
+    let data_dir = state.data_dir();
+    Ok(AppConfig {
+        data_dir: data_dir.to_string_lossy().to_string(),
+        hotkey: "Ctrl+Alt+P".to_string(),
+    })
+}
+
+/// 直接设置数据目录（设置界面用）
+#[tauri::command]
+fn set_data_dir(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<AppConfig, String> {
+    let new_dir = PathBuf::from(&path);
+    if !new_dir.exists() {
+        return Err(format!("目录不存在: {path}"));
+    }
+    state.set_data_dir(new_dir)?;
+    // 确保新目录存在（若用户选了空目录，自动建 prompts 子结构）
+    std::fs::create_dir_all(state.data_dir()).map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir();
+    Ok(AppConfig {
+        data_dir: data_dir.to_string_lossy().to_string(),
+        hotkey: "Ctrl+Alt+P".to_string(),
+    })
+}
+
+/// 弹出系统目录选择器，返回用户选的路径（取消则 None）
+#[tauri::command]
+async fn pick_data_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel::<Option<PathBuf>>();
+    app.dialog()
+        .file()
+        .set_title("选择提示词存储目录")
+        .pick_folder(move |path| {
+            let p = path.and_then(|p| p.as_path().map(|p| p.to_path_buf()));
+            let _ = tx.send(p);
+        });
+    // pick_folder 是异步回调，这里等待结果
+    let result = rx.recv().map_err(|e| e.to_string())?;
+    Ok(result.map(|p| p.to_string_lossy().to_string()))
+}
+
+/// 在系统文件管理器中打开数据目录
+#[tauri::command]
+fn open_data_dir(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let dir = state.data_dir();
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&dir)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// 扫描所有 prompt，返回列表 + 分类计数
 #[tauri::command]
 fn scan_prompts(state: tauri::State<'_, AppState>) -> Result<ScanResult, String> {
-    let root = &state.data_dir;
-    scan_disk(root).map_err(|e| e.to_string())
+    let root = state.data_dir();
+    scan_disk(&root).map_err(|e| e.to_string())
 }
 
 /// 读取单条 prompt 全文：(frontmatter 原文, 正文)
 #[tauri::command]
-fn read_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<(String, String), String> {
-    let abs = resolve_abs(&state.data_dir, &path);
+fn read_prompt(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(String, String), String> {
+    let abs = resolve_abs(&state.data_dir(), &path);
     read_prompt_disk(&abs).map_err(|e| e.to_string())
 }
 
@@ -83,10 +226,10 @@ fn save_prompt(
     content: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
-    let abs = resolve_abs(&state.data_dir, &path);
+    let root = state.data_dir();
+    let abs = resolve_abs(&root, &path);
     save_prompt_disk(&abs, &content).map_err(|e| e.to_string())?;
-    // 返回最新元信息，方便前端同步
-    scan_disk(&state.data_dir)
+    scan_disk(&root)
         .map_err(|e| e.to_string())?
         .prompts
         .into_iter()
@@ -101,12 +244,11 @@ fn create_prompt(
     title: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
-    let abs = create_prompt_disk(&state.data_dir, &category, &title)
-        .map_err(|e| e.to_string())?;
-    let rel = abs.strip_prefix(&state.data_dir).unwrap_or(&abs);
+    let root = state.data_dir();
+    let abs = create_prompt_disk(&root, &category, &title).map_err(|e| e.to_string())?;
+    let rel = abs.strip_prefix(&root).unwrap_or(&abs);
     let rel_unix = store::path_to_unix(rel);
-    // 复用 scan 后查找，确保元数据一致
-    scan_disk(&state.data_dir)
+    scan_disk(&root)
         .map_err(|e| e.to_string())?
         .prompts
         .into_iter()
@@ -117,16 +259,14 @@ fn create_prompt(
 /// 删除 prompt
 #[tauri::command]
 fn delete_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs = resolve_abs(&state.data_dir, &path);
+    let abs = resolve_abs(&state.data_dir(), &path);
     delete_prompt_disk(&abs).map_err(|e| e.to_string())
 }
 
 /// 复制文本到剪贴板（纯文本）
 #[tauri::command]
 async fn copy_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
-    app.clipboard()
-        .write_text(text)
-        .map_err(|e| e.to_string())
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
 /// 隐藏主窗口（复制后调用，让用户回到原应用粘贴）
@@ -141,7 +281,7 @@ fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
 /// 在系统文件管理器中显示该文件（便于用 VSCode/Typora 编辑）
 #[tauri::command]
 fn reveal_in_finder(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs = resolve_abs(&state.data_dir, &path);
+    let abs = resolve_abs(&state.data_dir(), &path);
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
@@ -171,10 +311,7 @@ fn reveal_in_finder(path: String, state: tauri::State<'_, AppState>) -> Result<(
 // 辅助：把前端传来的相对路径解析为绝对路径，禁止越界
 // ────────────────────────────────────────────────────────────
 fn resolve_abs(root: &Path, rel: &str) -> PathBuf {
-    // 规范化：前端传的是 unix 风格相对路径，可能含 ../，这里做一次安全拼接
     let joined = root.join(rel);
-    // 防止路径穿越：canonicalize 后检查是否仍在 root 下
-    // （若文件不存在 canonicalize 会失败，此时退回直接 join）
     match std::fs::canonicalize(&joined) {
         Ok(canon) => {
             if canon.starts_with(root) {
@@ -227,7 +364,6 @@ fn toggle_main_window(app: &tauri::AppHandle) {
             let _ = win.hide();
         }
         _ => {
-            // 显示前先居中，保证每次都出现在屏幕中部（spotlight 感）
             let _ = win.center();
             let _ = win.show();
             let _ = win.set_focus();
@@ -241,28 +377,33 @@ fn toggle_main_window(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let data_dir = resolve_data_dir();
     let hotkey = "Ctrl+Alt+P";
 
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .manage(AppState { data_dir })
         .setup(move |app| {
-            // 注册全局快捷键 Ctrl+Alt+P
-            let shortcut: Shortcut = hotkey
-                .parse()
-                .expect("无效的全局快捷键");
-            let app_handle = app.handle().clone();
-            app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-                // ShortcutState::Pressed 仅在按下时触发，避免松开时重复
-                if event.state == ShortcutState::Pressed {
-                    toggle_main_window(&app_handle);
-                }
-            })
-            .map_err(|e| format!("注册快捷键失败: {e}"))?;
+            // 加载持久化配置
+            let config_file = resolve_config_file(app.handle());
+            let runtime_config = load_config(&config_file);
+            app.manage(AppState {
+                config: Mutex::new(runtime_config),
+                config_file,
+            });
 
-            // 默认隐藏窗口（等快捷键唤出）；dev 首次启动让它显示，便于调试
+            // 注册全局快捷键 Ctrl+Alt+P
+            let shortcut: Shortcut = hotkey.parse().expect("无效的全局快捷键");
+            let app_handle = app.handle().clone();
+            app.global_shortcut()
+                .on_shortcut(shortcut, move |_app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        toggle_main_window(&app_handle);
+                    }
+                })
+                .map_err(|e| format!("注册快捷键失败: {e}"))?;
+
+            // dev 模式显示窗口便于调试；release 启动隐藏等快捷键
             if let Some(win) = app.get_webview_window("main") {
                 #[cfg(debug_assertions)]
                 {
@@ -278,22 +419,24 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 失焦自动隐藏：spotlight 体验（仅在 release 下生效，debug 保留方便调试）
             if let WindowEvent::Focused(false) = event {
                 #[cfg(not(debug_assertions))]
                 {
-                    // release 下 window 被使用；debug 下该分支被 cfg 排除，故 allow
                     #[allow(unused_variables)]
                     let _ = window.hide();
                 }
                 #[cfg(debug_assertions)]
                 {
-                    let _ = window; // 显式标记 debug 下不使用
+                    let _ = window;
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
             init_app,
+            get_config,
+            set_data_dir,
+            pick_data_dir,
+            open_data_dir,
             scan_prompts,
             read_prompt,
             save_prompt,
