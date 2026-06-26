@@ -1,0 +1,49 @@
+// prompt 数据结构，与 Rust 端 Prompt struct 一一对应（serde 自动转 camelCase）
+export interface PromptMeta {
+  /** 标题，缺省时取文件名（去扩展名） */
+  title: string;
+  /** 标签数组，可为空 */
+  tags: string[];
+  /** 复制时是否先转纯文本：markdown 渲染成纯文本 / 原样 */
+  copy_mode: "markdown" | "plain";
+  /** 是否置顶 */
+  pinned?: boolean;
+  /** 创建时间 ISO 字符串 */
+  created: string;
+  /** 更新时间 ISO 字符串 */
+  updated: string;
+}
+
+export interface Prompt {
+  /** 相对于仓库根的稳定 id（无扩展名路径，正斜杠分隔） */
+  id: string;
+  /** 显示标题 */
+  title: string;
+  /** 所属分类（即父文件夹名，根目录则为 "未分类"） */
+  category: string;
+  /** 文件相对路径，正斜杠分隔，含 .md */
+  path: string;
+  /** 绝对路径（系统相关分隔符） */
+  abs_path: string;
+  /** frontmatter 元数据 */
+  meta: PromptMeta;
+}
+
+/** 扫描结果：prompt 列表 + 分类汇总 */
+export interface ScanResult {
+  prompts: Prompt[];
+  categories: CategoryCount[];
+}
+
+export interface CategoryCount {
+  name: string;
+  count: number;
+}
+
+/** 配置（_config.json） */
+export interface AppConfig {
+  /** prompt 根目录绝对路径 */
+  data_dir: string;
+  /** 全局快捷键，默认 Alt+Space */
+  hotkey: string;
+}

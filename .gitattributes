@@ -1,0 +1,8 @@
+# 强制文本文件使用 LF 换行，避免 Windows 上 CRLF 污染提交
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.ico binary
+*.icns binary
+*.lock text eol=lf

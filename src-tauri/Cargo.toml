@@ -1,0 +1,36 @@
+[package]
+name = "prompt-pocket"
+version = "0.1.0"
+description = "轻量级提示词管理工具"
+authors = ["you"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "prompt_pocket_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-clipboard-manager = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# YAML frontmatter 解析
+serde_yaml = "0.9"
+# 递归目录扫描
+walkdir = "2"
+# 文件名非法字符清理
+sanitize-filename = "0.5"
+# 系统默认数据目录
+dirs = "5"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.DS_Store
+
+# Tauri / Rust
+src-tauri/target/
+src-tauri/gen/
+
+# 编辑器
+.vscode/
+.idea/
+*.iml
+
+# 本地数据（开发时若放仓库内）
+PromptPocket-Data/
