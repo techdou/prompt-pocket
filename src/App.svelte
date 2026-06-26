@@ -1,14 +1,16 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
-  import type { AppConfig, CategoryCount, Prompt } from "./lib/types";
+  import type { AppConfig, CategoryCount, Prompt, PromptMeta } from "./lib/types";
   import {
     copyText,
+    createCategory,
     createPrompt,
     deletePrompt,
     hideWindow,
     initApp,
     readPrompt,
+    renamePrompt,
     revealInFinder,
     savePrompt,
     scanPrompts,
@@ -18,6 +20,7 @@
   import PromptList from "./lib/PromptList.svelte";
   import Editor from "./lib/Editor.svelte";
   import Settings from "./lib/Settings.svelte";
+  import ContextMenu from "./lib/ContextMenu.svelte";
 
   let config: AppConfig | null = null;
   let allPrompts: Prompt[] = $state([]);
@@ -27,34 +30,44 @@
   let query = $state("");
   let selectedPath = $state<string | null>(null);
 
-  // 编辑器状态
+  // 编辑器状态（结构化字段，双向绑定到 Editor）
   let editorMode = $state<"view" | "edit">("view");
   let editingBody = $state("");
-  let editingMeta = $state("");
+  let editingTitle = $state("");
+  let editingTags = $state<string[]>([]);
+  let editingCategory = $state("");
+  let editingPinned = $state(false);
+  let editingCopyMode = $state<"markdown" | "plain">("markdown");
 
   let loading = $state(true);
   let error = $state<string | null>(null);
   let copiedFlash = $state(false);
   let settingsOpen = $state(false);
 
-  // 选中项
+  // 右键菜单 + 重命名对话框
+  let contextMenu = $state({ open: false, x: 0, y: 0, prompt: null as Prompt | null });
+  let renameDialog = $state({
+    open: false,
+    path: "",
+    title: "",
+    category: "",
+  });
+
   let selectedPrompt = $derived(
     allPrompts.find((p) => p.path === selectedPath) ?? null,
   );
 
-  // 分类过滤
   let categoryFiltered = $derived(
     selectedCategory === "__all__"
       ? allPrompts
       : allPrompts.filter((p) => p.category === selectedCategory),
   );
 
-  // 搜索过滤后的最终列表
   let visiblePrompts = $derived(filterPrompts(categoryFiltered, query));
 
-  // 列表项 DOM，键盘滚动跟随
-  let listRefs: HTMLLIElement[] = $state([]);
   let selectedIndex = $state(0);
+  // PromptList 上报的滚动函数（键盘导航用）
+  let scrollToIndexFn: ((i: number) => void) | null = null;
 
   async function bootstrap() {
     try {
@@ -72,9 +85,6 @@
     const res = await scanPrompts();
     allPrompts = res.prompts;
     categories = res.categories;
-    if (!selectedPath && visiblePrompts.length > 0) {
-      selectedPath = visiblePrompts[0].path;
-    }
   }
 
   // 设置界面切换数据目录后：更新配置、重置选中、重新扫描
@@ -99,49 +109,99 @@
 
   async function loadPromptContent(path: string) {
     try {
-      const { meta_raw, body } = await readPrompt(path);
-      editingMeta = meta_raw;
+      const { meta, body } = await readPrompt(path);
+      applyMetaToEditFields(meta);
       editingBody = body;
       editorMode = "view";
     } catch (e) {
-      error = String(e);
+      const msg = String(e);
+      if (msg.includes("FILE_NOT_FOUND")) {
+        // 问题1：文件被外部删除 → 从列表移除，不报错卡死
+        removePromptFromList(path);
+      } else {
+        error = msg;
+      }
     }
+  }
+
+  function applyMetaToEditFields(meta: PromptMeta) {
+    editingTitle = meta.title;
+    editingTags = [...meta.tags];
+    editingCategory = selectedPrompt?.category ?? "未分类";
+    editingPinned = meta.pinned;
+    editingCopyMode = (meta.copy_mode === "plain" ? "plain" : "markdown");
+  }
+
+  // 问题1：从列表移除已删除的 prompt，自动选中相邻项
+  function removePromptFromList(path: string) {
+    const idx = allPrompts.findIndex((p) => p.path === path);
+    if (idx >= 0) {
+      allPrompts = allPrompts.filter((p) => p.path !== path);
+      // 重新选相邻项
+      const next = allPrompts[Math.min(idx, allPrompts.length - 1)];
+      if (next) {
+        selectedPath = next.path;
+        lastLoadedPath = null; // 强制重新加载
+      } else {
+        selectedPath = null;
+        lastLoadedPath = null;
+      }
+    }
+    // 刷新分类计数
+    void refresh();
   }
 
   async function doCopy(mode: "markdown" | "plain") {
     if (!selectedPrompt) return;
-    const text = editingBody; // MVP：markdown/plain 都复制正文（plain 后续可去格式）
     try {
-      await copyText(text);
+      await copyText(editingBody);
       copiedFlash = true;
       setTimeout(() => (copiedFlash = false), 800);
-      await hideWindow(); // 复制后隐藏，回到原应用粘贴
+      await hideWindow();
     } catch (e) {
       error = String(e);
     }
   }
 
+  // 问题5修复：保存用结构化字段，Rust 端规范序列化
   async function doSave() {
     if (!selectedPrompt) return;
     try {
-      const full = `---\n${editingMeta.trim()}\n---\n\n${editingBody}`;
-      await savePrompt(selectedPrompt.path, full);
+      await savePrompt(selectedPrompt.path, {
+        title: editingTitle.trim() || "未命名",
+        tags: editingTags,
+        copy_mode: editingCopyMode,
+        pinned: editingPinned,
+        body: editingBody,
+      });
       await refresh();
+      lastLoadedPath = selectedPath; // 避免立即重载覆盖
       editorMode = "view";
     } catch (e) {
-      error = String(e);
+      const msg = String(e);
+      if (msg.includes("FILE_NOT_FOUND")) {
+        removePromptFromList(selectedPrompt.path);
+      } else {
+        error = msg;
+      }
     }
   }
 
   async function doCreate() {
-    const cat =
-      selectedCategory === "__all__" ? "未分类" : selectedCategory;
-    const title = `新提示词`;
+    const cat = selectedCategory === "__all__" ? "未分类" : selectedCategory;
     try {
-      const p = await createPrompt(cat, title);
+      const p = await createPrompt(cat, "新提示词");
       await refresh();
       selectedPath = p.path;
+      lastLoadedPath = null;
       query = "";
+      // 进入编辑，字段初始化
+      editingTitle = "新提示词";
+      editingTags = [];
+      editingCategory = cat;
+      editingPinned = false;
+      editingCopyMode = "markdown";
+      editingBody = "";
       editorMode = "edit";
     } catch (e) {
       error = String(e);
@@ -154,13 +214,102 @@
     try {
       await deletePrompt(selectedPrompt.path);
       selectedPath = null;
+      lastLoadedPath = null;
       await refresh();
     } catch (e) {
       error = String(e);
     }
   }
 
-  // 键盘导航：selectedIndex 跟随 visiblePrompts
+  // 问题2：右键菜单操作
+  function openContextMenu(prompt: Prompt, x: number, y: number) {
+    contextMenu = { open: true, x, y, prompt };
+  }
+
+  function onCtxRename() {
+    if (!contextMenu.prompt) return;
+    renameDialog = {
+      open: true,
+      path: contextMenu.prompt.path,
+      title: contextMenu.prompt.title,
+      category: contextMenu.prompt.category,
+    };
+  }
+
+  async function onCtxMove(category: string) {
+    if (!contextMenu.prompt) return;
+    try {
+      await renamePrompt(
+        contextMenu.prompt.path,
+        contextMenu.prompt.title,
+        category,
+      );
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function onCtxTogglePin() {
+    if (!contextMenu.prompt) return;
+    const p = contextMenu.prompt;
+    try {
+      await savePrompt(p.path, {
+        title: p.meta.title,
+        tags: p.meta.tags,
+        copy_mode: (p.meta.copy_mode === "plain" ? "plain" : "markdown"),
+        pinned: !p.meta.pinned,
+        body: editingBody,
+      });
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function onCtxDelete() {
+    if (!contextMenu.prompt) return;
+    const p = contextMenu.prompt;
+    if (!confirm(`确定删除「${p.title}」？此操作不可撤销。`)) return;
+    deletePrompt(p.path)
+      .then(() => {
+        if (selectedPath === p.path) {
+          selectedPath = null;
+          lastLoadedPath = null;
+        }
+        return refresh();
+      })
+      .catch((e) => (error = String(e)));
+  }
+
+  // 重命名对话框提交
+  async function submitRename() {
+    try {
+      const newPrompt = await renamePrompt(
+        renameDialog.path,
+        renameDialog.title.trim() || "未命名",
+        renameDialog.category,
+      );
+      await refresh();
+      selectedPath = newPrompt.path;
+      lastLoadedPath = null;
+      renameDialog.open = false;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // 问题3：新建分类
+  async function onCreateCategory(name: string) {
+    try {
+      await createCategory(name);
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // 键盘导航
   $effect(() => {
     if (visiblePrompts.length === 0) {
       if (selectedIndex !== 0) selectedIndex = 0;
@@ -177,6 +326,18 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
+      if (contextMenu.open) {
+        contextMenu.open = false;
+        return;
+      }
+      if (renameDialog.open) {
+        renameDialog.open = false;
+        return;
+      }
+      if (settingsOpen) {
+        settingsOpen = false;
+        return;
+      }
       e.preventDefault();
       void hideWindow();
       return;
@@ -188,15 +349,12 @@
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
       e.preventDefault();
-      const el = document.querySelector<HTMLInputElement>("#search-input");
-      el?.focus();
-      el?.select();
+      document.querySelector<HTMLInputElement>("#search-input")?.focus();
       return;
     }
 
     const tag = (e.target as HTMLElement)?.tagName;
-    const inEditor =
-      tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT";
+    const inEditor = tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT";
     if (inEditor) return;
 
     if (e.key === "ArrowDown") {
@@ -217,14 +375,14 @@
 
   function scrollIntoView() {
     queueMicrotask(() => {
-      listRefs[selectedIndex]?.scrollIntoView({ block: "nearest" });
+      scrollToIndexFn?.(selectedIndex);
     });
   }
 
   onMount(bootstrap);
 </script>
 
-<svelte:window on:keydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="app" role="application" aria-label="Prompt Pocket">
   {#if loading}
@@ -236,9 +394,9 @@
     <div class="state error">
       <strong>出错了</strong>
       <pre>{error}</pre>
+      <button class="ghost" onclick={() => (error = null)}>关闭</button>
     </div>
   {:else}
-    <!-- 顶栏：搜索框（极简单行，左侧放大镜） -->
     <header class="topbar" data-tauri-drag-region>
       <div class="search-wrap">
         <span class="icon">⌕</span>
@@ -262,42 +420,54 @@
       </div>
     </header>
 
-    <!-- 横向分类 Tab -->
     <nav class="tabs" data-tauri-drag-region>
       <CategoryTabs
         {categories}
         total={allPrompts.length}
         bind:selected={selectedCategory}
+        oncreate={onCreateCategory}
       />
     </nav>
 
-    <!-- 主体：左列表 + 右内容 -->
     <main class="body">
       <PromptList
         prompts={visiblePrompts}
         {selectedPath}
         {selectedIndex}
-        bind:listRefs
+        onmounted={(fn) => (scrollToIndexFn = fn)}
         onselect={(path) => {
           selectedPath = path;
           selectedIndex = visiblePrompts.findIndex((p) => p.path === path);
         }}
+        oncontextmenu={openContextMenu}
       />
 
       <Editor
         prompt={selectedPrompt}
         mode={editorMode}
         bind:body={editingBody}
-        bind:meta={editingMeta}
+        bind:title={editingTitle}
+        bind:tags={editingTags}
+        bind:category={editingCategory}
+        bind:pinned={editingPinned}
+        bind:copyMode={editingCopyMode}
+        {categories}
         oncopy={(m) => doCopy(m)}
         onsave={doSave}
         oncancel={() => {
-          if (selectedPath) void loadPromptContent(selectedPath);
+          if (selectedPath) {
+            lastLoadedPath = null;
+            void loadPromptContent(selectedPath);
+          }
         }}
-        onedit={() => (editorMode = "edit")}
-        onreveal={() =>
-          selectedPrompt && void revealInFinder(selectedPrompt.path)}
+        onedit={() => {
+          // 进入编辑前，把当前 prompt 的分类同步到编辑字段
+          if (selectedPrompt) editingCategory = selectedPrompt.category;
+          editorMode = "edit";
+        }}
+        onreveal={() => selectedPrompt && void revealInFinder(selectedPrompt.path)}
         ondelete={doDelete}
+        oncreatecategory={onCreateCategory}
       />
     </main>
 
@@ -308,6 +478,54 @@
     {/if}
 
     <Settings bind:open={settingsOpen} onchanged={onConfigChanged} />
+
+    <ContextMenu
+      bind:open={contextMenu.open}
+      prompt={contextMenu.prompt}
+      x={contextMenu.x}
+      y={contextMenu.y}
+      {categories}
+      onrename={onCtxRename}
+      onmove={onCtxMove}
+      ontogglepin={onCtxTogglePin}
+      ondelete={onCtxDelete}
+      onclose={() => (contextMenu.prompt = null)}
+    />
+
+    {#if renameDialog.open}
+      <div
+        class="backdrop"
+        transition:fly={{ duration: 100 }}
+        onclick={(e) => {
+          if (e.target === e.currentTarget) renameDialog.open = false;
+        }}
+        onkeydown={(e) => e.key === "Escape" && (renameDialog.open = false)}
+        role="presentation"
+      >
+        <div class="dialog" transition:fly={{ y: -10, duration: 120 }}>
+          <h3>重命名 / 移动分类</h3>
+          <div class="dialog-row">
+            <label for="rn-title">标题</label>
+            <input id="rn-title" type="text" bind:value={renameDialog.title} />
+          </div>
+          <div class="dialog-row">
+            <label for="rn-cat">分类</label>
+            <select id="rn-cat" bind:value={renameDialog.category}>
+              <option value={"未分类"}>未分类</option>
+              {#each categories as c}
+                <option value={c.name}>{c.name}</option>
+              {/each}
+            </select>
+          </div>
+          <div class="dialog-actions">
+            <button class="ghost" onclick={() => (renameDialog.open = false)}>
+              取消
+            </button>
+            <button class="primary" onclick={submitRename}>确定</button>
+          </div>
+        </div>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -321,7 +539,6 @@
     font-size: 14px;
   }
 
-  /* 顶栏：单行搜索 */
   .topbar {
     flex-shrink: 0;
     padding: 12px 16px 10px;
@@ -379,7 +596,6 @@
     color: var(--bg);
   }
 
-  /* 主体 */
   .body {
     flex: 1;
     display: grid;
@@ -387,12 +603,12 @@
     min-height: 0;
   }
 
-  /* 横向分类 Tab 栏 */
   .tabs {
     flex-shrink: 0;
     height: 40px;
     border-bottom: 1px solid var(--border);
     background: var(--bg);
+    padding: 0 16px;
   }
 
   .state {
@@ -440,40 +656,62 @@
     z-index: 100;
   }
 
-  :global(button) {
-    cursor: pointer;
-    font-family: inherit;
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+    backdrop-filter: blur(2px);
   }
-  :global(.ghost) {
-    background: transparent;
-    border: 1px solid var(--border-strong);
+  .dialog {
+    width: 380px;
+    max-width: 90vw;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .dialog h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .dialog-row {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .dialog-row label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .dialog-row input,
+  .dialog-row select {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
     color: var(--fg);
     border-radius: 6px;
-    padding: 5px 12px;
+    padding: 7px 10px;
     font-size: 13px;
-    transition: all 0.12s;
+    outline: none;
   }
-  :global(.ghost:hover) {
-    background: var(--bg-hover);
+  .dialog-row input:focus,
+  .dialog-row select:focus {
     border-color: var(--fg);
   }
-  :global(.primary) {
-    background: var(--fg);
-    border: 1px solid var(--fg);
-    color: var(--bg);
-    border-radius: 6px;
-    padding: 5px 14px;
-    font-size: 13px;
-  }
-  :global(.primary:hover) {
-    opacity: 0.85;
-  }
-  :global(.danger) {
-    background: transparent;
-    border: 1px solid var(--danger);
-    color: var(--danger);
-    border-radius: 6px;
-    padding: 5px 12px;
-    font-size: 13px;
+  .dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
   }
 </style>

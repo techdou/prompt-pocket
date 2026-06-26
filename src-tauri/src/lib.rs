@@ -14,9 +14,10 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 mod store;
 use crate::store::{
-    create_prompt as create_prompt_disk, delete_prompt as delete_prompt_disk,
-    read_prompt as read_prompt_disk, save_prompt as save_prompt_disk, scan_prompts as scan_disk,
-    AppConfig, Prompt, ScanResult,
+    create_category as create_category_disk, create_prompt as create_prompt_disk,
+    delete_prompt as delete_prompt_disk, read_prompt as read_prompt_disk,
+    rename_prompt as rename_prompt_disk, save_prompt as save_prompt_disk,
+    scan_prompts as scan_disk, AppConfig, Prompt, PromptContent, SaveRequest, ScanResult,
 };
 
 // ────────────────────────────────────────────────────────────
@@ -214,27 +215,78 @@ fn scan_prompts(state: tauri::State<'_, AppState>) -> Result<ScanResult, String>
 fn read_prompt(
     path: String,
     state: tauri::State<'_, AppState>,
-) -> Result<(String, String), String> {
+) -> Result<PromptContent, String> {
     let abs = resolve_abs(&state.data_dir(), &path);
-    read_prompt_disk(&abs).map_err(|e| e.to_string())
+    read_prompt_disk(&abs).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // 带标记，前端识别后从列表移除（问题1）
+            "FILE_NOT_FOUND".to_string()
+        } else {
+            e.to_string()
+        }
+    })
 }
 
-/// 保存 prompt（前端已拼好 frontmatter + 正文），返回刷新后的 prompt
+/// 保存 prompt（接收结构化字段，Rust 端规范序列化 frontmatter）
 #[tauri::command]
 fn save_prompt(
     path: String,
-    content: String,
+    req: SaveRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
     let root = state.data_dir();
     let abs = resolve_abs(&root, &path);
-    save_prompt_disk(&abs, &content).map_err(|e| e.to_string())?;
+    save_prompt_disk(&abs, &req).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "FILE_NOT_FOUND".to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
     scan_disk(&root)
         .map_err(|e| e.to_string())?
         .prompts
         .into_iter()
         .find(|p| p.abs_path == abs.to_string_lossy().to_string())
         .ok_or_else(|| "保存后未能重新定位该提示词".to_string())
+}
+
+/// 重命名 + 移动分类（问题2），返回新 prompt
+#[tauri::command]
+fn rename_prompt(
+    path: String,
+    new_title: String,
+    new_category: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Prompt, String> {
+    let root = state.data_dir();
+    let old_abs = resolve_abs(&root, &path);
+    let new_abs =
+        rename_prompt_disk(&root, &old_abs, &new_title, &new_category).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "FILE_NOT_FOUND".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
+    // 用新路径定位返回的 prompt
+    scan_disk(&root)
+        .map_err(|e| e.to_string())?
+        .prompts
+        .into_iter()
+        .find(|p| p.abs_path == new_abs.to_string_lossy().to_string())
+        .ok_or_else(|| "重命名后未能定位该提示词".to_string())
+}
+
+/// 新建分类（问题3）
+#[tauri::command]
+fn create_category(
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let root = state.data_dir();
+    create_category_disk(&root, &name).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 新建 prompt：在指定分类下创建文件，返回新 prompt
@@ -440,6 +492,8 @@ pub fn run() {
             scan_prompts,
             read_prompt,
             save_prompt,
+            rename_prompt,
+            create_category,
             create_prompt,
             delete_prompt,
             copy_text,

@@ -1,37 +1,75 @@
 <script lang="ts">
-  import type { Prompt } from "./types";
+  import type { CategoryCount, Prompt } from "./types";
 
   let {
     prompt,
     mode,
     body = $bindable(""),
-    meta = $bindable(""),
+    // 结构化编辑字段（双向绑定）
+    title = $bindable(""),
+    tags = $bindable([]),
+    category = $bindable(""),
+    pinned = $bindable(false),
+    copyMode = $bindable<"markdown" | "plain">("markdown"),
+    // 分类列表（编辑模式下的下拉选项）
+    categories = [],
     oncopy,
     onsave,
     oncancel,
     onedit,
     onreveal,
     ondelete,
+    oncreatecategory,
   }: {
     prompt: Prompt | null;
     mode: "view" | "edit";
     body: string;
-    meta: string;
+    title: string;
+    tags: string[];
+    category: string;
+    pinned: boolean;
+    copyMode: "markdown" | "plain";
+    categories: CategoryCount[];
     oncopy: (mode: "markdown" | "plain") => void;
     onsave: () => void;
     oncancel: () => void;
     onedit: () => void;
     onreveal: () => void;
     ondelete: () => void;
+    oncreatecategory: (name: string) => void;
   } = $props();
 
-  // 极简 Markdown → HTML 渲染，仅处理标题/粗体/列表/代码块/行内代码
+  // 标签输入：用逗号分隔的字符串展示，双向同步到数组
+  let tagsInput = $derived(tags.join(", "));
+  function onTagsInput(e: Event) {
+    const v = (e.target as HTMLInputElement).value;
+    tags = v
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+  }
+
+  // 分类下拉里加一个"未分类"选项（根目录）
+  let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name)]);
+
+  // 新建分类输入态
+  let newCategoryName = $state("");
+  let addingCategory = $state(false);
+
+  function addCategory() {
+    const name = newCategoryName.trim();
+    if (!name) return;
+    oncreatecategory(name);
+    category = name;
+    addingCategory = false;
+    newCategoryName = "";
+  }
+
+  // 极简 Markdown → HTML 渲染
   function renderMarkdown(src: string): string {
+    if (!src || !src.trim()) return '<p class="empty-body">（无内容）</p>';
     const esc = (s: string) =>
-      s
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
     const lines = esc(src).split("\n");
     let html = "";
@@ -51,7 +89,6 @@
     };
 
     for (const line of lines) {
-      // 代码围栏
       if (line.trim().startsWith("```")) {
         closeList();
         if (inCode) {
@@ -67,17 +104,13 @@
         html += line + "\n";
         continue;
       }
-
-      // 标题
       const h = line.match(/^(#{1,4})\s+(.*)$/);
       if (h) {
         closeList();
-        const level = h[1].length + 1; // h2..h5，避免与页面 h1 冲突
+        const level = h[1].length + 1;
         html += `<h${level}>${inline(h[2])}</h${level}>`;
         continue;
       }
-
-      // 有序列表
       if (/^\d+\.\s+/.test(line)) {
         if (!inOrder) {
           closeList();
@@ -87,7 +120,6 @@
         html += `<li>${inline(line.replace(/^\d+\.\s+/, ""))}</li>`;
         continue;
       }
-      // 无序列表
       if (/^[-*]\s+/.test(line)) {
         if (!inList) {
           closeList();
@@ -97,12 +129,8 @@
         html += `<li>${inline(line.replace(/^[-*]\s+/, ""))}</li>`;
         continue;
       }
-
-      // 普通段落
       closeList();
-      if (line.trim() === "") {
-        html += "";
-      } else {
+      if (line.trim() !== "") {
         html += `<p>${inline(line)}</p>`;
       }
     }
@@ -135,8 +163,8 @@
   <section class="editor">
     <header class="editor-head">
       <div class="title-block">
-        {#if prompt.meta.pinned}<span class="pin">★</span>{/if}
-        <h2 class="title">{prompt.title}</h2>
+        {#if pinned}<span class="pin">★</span>{/if}
+        <h2 class="title">{title || prompt.title}</h2>
       </div>
       <div class="actions">
         {#if mode === "view"}
@@ -179,23 +207,97 @@
         </span>
       </footer>
     {:else}
-      <!-- 编辑：frontmatter + 正文 -->
+      <!-- 填空式表单：结构化字段，用户完全不碰 YAML -->
       <div class="edit-area">
-        <span class="fm-label">元数据 (YAML frontmatter)</span>
-        <textarea
-          class="fm-input"
-          bind:value={meta}
-          spellcheck="false"
-          rows="6"
-          placeholder="title: 标题&#10;tags: [标签1, 标签2]&#10;copy_mode: markdown"
-        ></textarea>
-        <span class="fm-label">正文 (Markdown)</span>
-        <textarea
-          class="body-input"
-          bind:value={body}
-          spellcheck="false"
-          placeholder="在这里写提示词内容…"
-        ></textarea>
+        <div class="form-row">
+          <label class="form-label" for="f-title">标题</label>
+          <input
+            id="f-title"
+            class="form-input"
+            type="text"
+            bind:value={title}
+            placeholder="给这条提示词起个名字"
+          />
+        </div>
+
+        <div class="form-row form-row-2">
+          <div>
+            <label class="form-label" for="f-category">分类</label>
+            <select
+              id="f-category"
+              class="form-input"
+              bind:value={category}
+            >
+              {#each categoryOptions as c}
+                <option value={c}>{c}</option>
+              {/each}
+            </select>
+          </div>
+          <div>
+            <label class="form-label" for="f-tags">标签</label>
+            <input
+              id="f-tags"
+              class="form-input"
+              type="text"
+              value={tagsInput}
+              oninput={onTagsInput}
+              placeholder="逗号分隔，如：写作, 润色"
+            />
+          </div>
+        </div>
+
+        {#if addingCategory}
+          <div class="form-row new-cat-row">
+            <input
+              class="form-input"
+              type="text"
+              bind:value={newCategoryName}
+              placeholder="新分类名"
+              onkeydown={(e) => e.key === "Enter" && addCategory()}
+            />
+            <button class="ghost" onclick={addCategory}>添加</button>
+            <button
+              class="ghost"
+              onclick={() => {
+                addingCategory = false;
+                newCategoryName = "";
+              }}
+            >
+              取消
+            </button>
+          </div>
+        {:else}
+          <button class="link-btn" onclick={() => (addingCategory = true)}>
+            + 新建分类
+          </button>
+        {/if}
+
+        <div class="form-row form-row-2">
+          <div>
+            <span class="form-label">复制模式</span>
+            <select class="form-input" bind:value={copyMode}>
+              <option value={"markdown"}>Markdown（保留格式）</option>
+              <option value={"plain"}>纯文本</option>
+            </select>
+          </div>
+          <div class="checkbox-cell">
+            <label class="checkbox-wrap">
+              <input type="checkbox" bind:checked={pinned} />
+              <span>置顶</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-row form-row-body">
+          <label class="form-label" for="f-body">正文</label>
+          <textarea
+            id="f-body"
+            class="body-input"
+            bind:value={body}
+            spellcheck="false"
+            placeholder="在这里写提示词内容…支持 Markdown 语法"
+          ></textarea>
+        </div>
       </div>
     {/if}
   </section>
@@ -271,6 +373,10 @@
     line-height: 1.75;
     color: var(--fg);
   }
+  .preview :global(.empty-body) {
+    color: var(--muted);
+    font-style: italic;
+  }
 
   .editor-foot {
     display: flex;
@@ -297,41 +403,112 @@
     color: var(--muted);
   }
 
+  /* ── 填空式表单 ── */
   .edit-area {
     flex: 1;
+    overflow-y: auto;
+    padding: 18px 24px;
     display: flex;
     flex-direction: column;
-    padding: 12px 16px;
-    gap: 6px;
+    gap: 14px;
     min-height: 0;
   }
-  .fm-label {
+  .form-row {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .form-row-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .form-row-2 > div {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .form-label {
     font-size: 11px;
+    font-weight: 600;
     color: var(--muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
-  .fm-input,
-  .body-input {
+  .form-input {
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     color: var(--fg);
     border-radius: 6px;
-    padding: 8px 10px;
-    font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+    padding: 7px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .form-input:focus {
+    border-color: var(--fg);
+  }
+  select.form-input {
+    cursor: pointer;
+  }
+  .checkbox-cell {
+    justify-content: flex-end;
+    padding-top: 18px;
+  }
+  .checkbox-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .checkbox-wrap input {
+    width: 15px;
+    height: 15px;
+    cursor: pointer;
+  }
+
+  .new-cat-row {
+    flex-direction: row;
+    gap: 6px;
+    align-items: center;
+  }
+  .link-btn {
+    align-self: flex-start;
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 2px 0;
+    cursor: pointer;
+  }
+  .link-btn:hover {
+    color: var(--fg);
+  }
+
+  .form-row-body {
+    flex: 1;
+    min-height: 180px;
+  }
+  .body-input {
+    flex: 1;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 13px;
     line-height: 1.6;
     resize: none;
     outline: none;
-    flex-shrink: 0;
+    min-height: 160px;
   }
-  .fm-input:focus,
   .body-input:focus {
-    border-color: var(--accent);
-  }
-  .body-input {
-    flex: 1;
-    min-height: 200px;
+    border-color: var(--fg);
   }
 
   .placeholder {
@@ -372,7 +549,7 @@
     background: var(--bg-elevated);
     padding: 1px 5px;
     border-radius: 4px;
-    font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 12.5px;
   }
   .prose :global(pre) {

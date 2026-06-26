@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppConfig, Prompt, ScanResult } from "./types";
+import type { AppConfig, Prompt, PromptContent, SaveRequest, ScanResult } from "./types";
 
 /**
  * 前端 → Rust 后端的命令桥。
@@ -36,19 +36,32 @@ export async function scanPrompts(): Promise<ScanResult> {
   return invoke<ScanResult>("scan_prompts");
 }
 
-/** 读取单个 prompt 的完整内容（frontmatter + 正文） */
-export async function readPrompt(
-  path: string,
-): Promise<{ meta_raw: string; body: string }> {
-  return invoke<{ meta_raw: string; body: string }>("read_prompt", { path });
+/** 读取单个 prompt 的完整内容（结构化元数据 + 正文） */
+export async function readPrompt(path: string): Promise<PromptContent> {
+  return invoke<PromptContent>("read_prompt", { path });
 }
 
-/** 保存 prompt（写回文件，自动刷新 updated 时间戳） */
-export async function savePrompt(
+/** 保存 prompt（结构化字段，Rust 端规范序列化 frontmatter） */
+export async function savePrompt(path: string, req: SaveRequest): Promise<Prompt> {
+  return invoke<Prompt>("save_prompt", { path, req });
+}
+
+/** 重命名 + 移动分类，返回新 prompt */
+export async function renamePrompt(
   path: string,
-  content: string,
+  newTitle: string,
+  newCategory: string,
 ): Promise<Prompt> {
-  return invoke<Prompt>("save_prompt", { path, content });
+  return invoke<Prompt>("rename_prompt", {
+    path,
+    newTitle,
+    newCategory,
+  });
+}
+
+/** 新建分类（文件夹） */
+export async function createCategory(name: string): Promise<void> {
+  return invoke<void>("create_category", { name });
 }
 
 /** 新建 prompt：在指定分类下创建文件，返回新 prompt */

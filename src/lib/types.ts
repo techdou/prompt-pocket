@@ -47,3 +47,18 @@ export interface AppConfig {
   /** 全局快捷键，默认 Alt+Space */
   hotkey: string;
 }
+
+/** read_prompt 返回：结构化元数据 + 正文 */
+export interface PromptContent {
+  meta: PromptMeta;
+  body: string;
+}
+
+/** save_prompt 接收的结构化保存请求（前端表单直接构造） */
+export interface SaveRequest {
+  title: string;
+  tags: string[];
+  copy_mode: "markdown" | "plain";
+  pinned: boolean;
+  body: string;
+}

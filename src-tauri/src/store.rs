@@ -1,9 +1,14 @@
 // 数据存储层：一 prompt 一 Markdown 文件 + YAML frontmatter。
 // 不引入数据库，靠文件系统 + 云盘客户端做同步。
+//
+// 关键设计（修复"保存后内容不可见"）：
+// 不再让前端拼接裸 frontmatter 文本往返，而是 read/save 都走结构化元数据对象。
+// 写文件时由 serde_yaml 规范序列化 frontmatter，杜绝多次保存后格式漂移。
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -78,30 +83,58 @@ pub struct ScanResult {
     pub categories: Vec<CategoryCount>,
 }
 
-/// 解析单个 .md 文件：返回 (frontmatter 原文, 正文, 解析后的元数据)
-pub fn parse_markdown(content: &str) -> (String, String, PromptMeta) {
+/// read_prompt 的返回：结构化元数据 + 正文
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptContent {
+    pub meta: PromptMeta,
+    pub body: String,
+}
+
+/// save_prompt 接收的结构化参数（前端表单直接传）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveRequest {
+    pub title: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_copy_mode")]
+    pub copy_mode: String,
+    #[serde(default)]
+    pub pinned: bool,
+    pub body: String,
+}
+
+/// ────────────────────────────────────────────────
+/// 解析：把 .md 文件内容拆成 (结构化元数据, 正文)
+/// ────────────────────────────────────────────────
+pub fn parse_markdown(content: &str) -> (PromptMeta, String) {
     let trimmed = content.trim_start_matches('\u{feff}');
-    let body_start = trimmed.strip_prefix("---\n").or_else(|| trimmed.strip_prefix("---\r\n"));
+    let body_start = trimmed
+        .strip_prefix("---\n")
+        .or_else(|| trimmed.strip_prefix("---\r\n"));
 
     if let Some(rest) = body_start {
-        // 寻找闭合的 ---
         if let Some(end) = find_frontmatter_end(rest) {
-            let fm_raw = rest[..end].to_string();
+            let fm_raw = &rest[..end];
             let body = rest[end..]
                 .trim_start_matches("---")
                 .trim_start_matches(['\n', '\r', ' '])
                 .to_string();
-            let meta = parse_yaml_frontmatter(&fm_raw);
-            return (fm_raw, body, meta);
+            let mut meta = parse_yaml_frontmatter(fm_raw);
+            // 保留原始 created（解析到的），updated 留待保存时刷新
+            if meta.created.is_empty() {
+                meta.created = now_iso();
+            }
+            return (meta, body);
         }
     }
 
     // 没有 frontmatter，整体当正文
-    (String::new(), trimmed.to_string(), PromptMeta::default())
+    (PromptMeta::default(), trimmed.to_string())
 }
 
 /// 在 frontmatter 内容中寻找闭合分隔符 `---` 所在的字符偏移。
-/// frontmatter 可能含 `---` 开头的元素（如 yaml 文档标记），这里只认行首。
 fn find_frontmatter_end(s: &str) -> Option<usize> {
     let mut pos = 0;
     for line in s.split_inclusive('\n') {
@@ -115,11 +148,10 @@ fn find_frontmatter_end(s: &str) -> Option<usize> {
 }
 
 fn parse_yaml_frontmatter(fm_raw: &str) -> PromptMeta {
-    // 尝试用结构化解析；失败则退回默认值（容错：用户手写 yaml 可能格式不对）
     match serde_yaml::from_str::<PromptMeta>(fm_raw) {
         Ok(m) => m,
         Err(_) => {
-            // 尝试解析为通用 map，至少把 title/tags 救回来
+            // 容错：解析失败时退回默认值，至少尝试救回 title/tags
             if let Ok(generic) = serde_yaml::from_str::<serde_yaml::Value>(fm_raw) {
                 let mut meta = PromptMeta::default();
                 if let Some(map) = generic.as_mapping() {
@@ -145,8 +177,19 @@ fn parse_yaml_frontmatter(fm_raw: &str) -> PromptMeta {
     }
 }
 
-/// 扫描根目录下所有 .md 文件，构建 prompt 列表 + 分类计数
-pub fn scan_prompts(root: &Path) -> std::io::Result<ScanResult> {
+/// 把结构化元数据序列化成规范的 frontmatter 文本块（不含外层 ---）
+fn serialize_frontmatter(meta: &PromptMeta) -> String {
+    // 用 serde_yaml 序列化，保证格式规范、不漂移
+    match serde_yaml::to_string(meta) {
+        Ok(yaml) => yaml.trim_end().to_string(),
+        Err(_) => format!("title: {}\n", meta.title), // 极端兜底
+    }
+}
+
+/// ────────────────────────────────────────────────
+/// 扫描：构建 prompt 列表 + 分类计数
+/// ────────────────────────────────────────────────
+pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
     let mut prompts: Vec<Prompt> = Vec::new();
     let mut cat_counts: BTreeMap<String, usize> = BTreeMap::new();
 
@@ -162,7 +205,6 @@ pub fn scan_prompts(root: &Path) -> std::io::Result<ScanResult> {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
-        // 跳过隐藏文件（以 . 开头）和临时文件
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if name.starts_with('.') || name.starts_with('~') {
                 continue;
@@ -175,7 +217,6 @@ pub fn scan_prompts(root: &Path) -> std::io::Result<ScanResult> {
         }
     }
 
-    // 排序：置顶优先，再按更新时间倒序
     prompts.sort_by(|a, b| {
         b.meta
             .pinned
@@ -193,7 +234,7 @@ pub fn scan_prompts(root: &Path) -> std::io::Result<ScanResult> {
 
 fn build_prompt(root: &Path, abs: &Path) -> Option<Prompt> {
     let content = fs::read_to_string(abs).ok()?;
-    let (_fm_raw, _body, mut meta) = parse_markdown(&content);
+    let (mut meta, _body) = parse_markdown(&content);
 
     let rel = abs.strip_prefix(root).ok()?;
     let rel_str = path_to_unix(rel);
@@ -203,12 +244,10 @@ fn build_prompt(root: &Path, abs: &Path) -> Option<Prompt> {
         .unwrap_or("untitled")
         .to_string();
 
-    // title 缺省取文件名
     if meta.title.is_empty() {
         meta.title = file_stem.clone();
     }
 
-    // category 取父目录名；根目录下则归为"未分类"
     let category = rel
         .parent()
         .and_then(|p| p.to_str())
@@ -216,7 +255,6 @@ fn build_prompt(root: &Path, abs: &Path) -> Option<Prompt> {
         .unwrap_or("未分类")
         .to_string();
 
-    // id = 去扩展名的相对路径
     let id = rel_str.trim_end_matches(".md").to_string();
 
     Some(Prompt {
@@ -229,15 +267,43 @@ fn build_prompt(root: &Path, abs: &Path) -> Option<Prompt> {
     })
 }
 
-/// 读取 prompt 全文：返回 (frontmatter 原文, 正文)
-pub fn read_prompt(abs: &Path) -> std::io::Result<(String, String)> {
+/// ────────────────────────────────────────────────
+/// 读取单条 prompt：返回结构化元数据 + 正文
+/// ────────────────────────────────────────────────
+pub fn read_prompt(abs: &Path) -> io::Result<PromptContent> {
     let content = fs::read_to_string(abs)?;
-    let (fm, body, _meta) = parse_markdown(&content);
-    Ok((fm, body))
+    let (meta, body) = parse_markdown(&content);
+    Ok(PromptContent {
+        meta,
+        // trim 尾部换行，避免 save 时附加的 \n 在多次 round-trip 后累积
+        body: body.trim_end_matches(['\n', '\r']).to_string(),
+    })
 }
 
-/// 保存 prompt 全文（前端已拼好 frontmatter + 正文）
-pub fn save_prompt(abs: &Path, content: &str) -> std::io::Result<()> {
+/// ────────────────────────────────────────────────
+/// 保存：接收结构化字段，用 serde_yaml 规范序列化 frontmatter
+/// 关键：杜绝裸文本往返导致的格式漂移
+/// ────────────────────────────────────────────────
+pub fn save_prompt(abs: &Path, req: &SaveRequest) -> io::Result<()> {
+    // 读取旧文件以保留 created 时间戳
+    let old_created = fs::read_to_string(abs)
+        .ok()
+        .map(|c| parse_markdown(&c).0.created)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(now_iso);
+
+    let meta = PromptMeta {
+        title: req.title.clone(),
+        tags: req.tags.clone(),
+        copy_mode: req.copy_mode.clone(),
+        pinned: req.pinned,
+        created: old_created,
+        updated: now_iso(),
+    };
+
+    let fm = serialize_frontmatter(&meta);
+    let content = format!("---\n{}\n---\n\n{}\n", fm, req.body);
+
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -245,7 +311,7 @@ pub fn save_prompt(abs: &Path, content: &str) -> std::io::Result<()> {
 }
 
 /// 新建 prompt 文件，返回其绝对路径
-pub fn create_prompt(root: &Path, category: &str, title: &str) -> std::io::Result<PathBuf> {
+pub fn create_prompt(root: &Path, category: &str, title: &str) -> io::Result<PathBuf> {
     let safe_cat = sanitize_filename::sanitize(category);
     let safe_title = sanitize_filename::sanitize(title);
     let dir = if safe_cat.is_empty() || safe_cat == "未分类" {
@@ -255,7 +321,6 @@ pub fn create_prompt(root: &Path, category: &str, title: &str) -> std::io::Resul
     };
     fs::create_dir_all(&dir)?;
 
-    // 避免重名：若存在则追加数字
     let mut file_name = format!("{}.md", safe_title);
     let mut n = 1;
     while dir.join(&file_name).exists() {
@@ -265,15 +330,80 @@ pub fn create_prompt(root: &Path, category: &str, title: &str) -> std::io::Resul
 
     let path = dir.join(&file_name);
     let now = now_iso();
-    let content = format!(
-        "---\ntitle: {}\ntags: []\ncopy_mode: markdown\ncreated: {}\nupdated: {}\n---\n\n在这里写提示词内容…\n",
-        title, now, now
-    );
+    let meta = PromptMeta {
+        title: title.to_string(),
+        tags: vec![],
+        copy_mode: default_copy_mode(),
+        pinned: false,
+        created: now.clone(),
+        updated: now,
+    };
+    let fm = serialize_frontmatter(&meta);
+    let content = format!("---\n{}\n---\n\n\n", fm);
     fs::write(&path, content)?;
     Ok(path)
 }
 
-pub fn delete_prompt(abs: &Path) -> std::io::Result<()> {
+/// ────────────────────────────────────────────────
+/// 重命名 + 移动分类（问题2）
+/// 改文件名（sanitize）+ 移动到新分类目录 + 更新 frontmatter title
+/// ────────────────────────────────────────────────
+pub fn rename_prompt(
+    root: &Path,
+    old_abs: &Path,
+    new_title: &str,
+    new_category: &str,
+) -> io::Result<PathBuf> {
+    let safe_cat = sanitize_filename::sanitize(new_category);
+    let safe_title = sanitize_filename::sanitize(new_title);
+    let new_dir = if safe_cat.is_empty() || safe_cat == "未分类" {
+        root.to_path_buf()
+    } else {
+        root.join(&safe_cat)
+    };
+    fs::create_dir_all(&new_dir)?;
+
+    // 目标文件名，避免重名
+    let mut file_name = format!("{}.md", safe_title);
+    let mut n = 1;
+    while new_dir.join(&file_name).exists() && new_dir.join(&file_name) != old_abs {
+        file_name = format!("{}-{}.md", safe_title, n);
+        n += 1;
+    }
+    let new_abs = new_dir.join(&file_name);
+
+    // 重写 frontmatter 的 title（保留其余字段 + 正文）
+    let (mut meta, body) = {
+        let content = fs::read_to_string(old_abs)?;
+        parse_markdown(&content)
+    };
+    meta.title = new_title.to_string();
+    meta.updated = now_iso();
+    let fm = serialize_frontmatter(&meta);
+    let content = format!("---\n{}\n---\n\n{}\n", fm, body);
+
+    fs::write(&new_abs, &content)?;
+
+    // 如果路径变了，删除旧文件
+    if new_abs != old_abs {
+        let _ = fs::remove_file(old_abs);
+    }
+
+    Ok(new_abs)
+}
+
+/// 新建分类（即创建文件夹）（问题3）
+pub fn create_category(root: &Path, name: &str) -> io::Result<PathBuf> {
+    let safe = sanitize_filename::sanitize(name);
+    if safe.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "分类名无效"));
+    }
+    let dir = root.join(&safe);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+pub fn delete_prompt(abs: &Path) -> io::Result<()> {
     fs::remove_file(abs)
 }
 
@@ -284,8 +414,6 @@ pub fn path_to_unix(p: &Path) -> String {
 
 pub fn now_iso() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    // 简单 RFC3339 近似：用秒级时间戳生成 ISO 字符串
-    // 注：本地时区转换略复杂，这里用 UTC，前端展示时再格式化
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -294,7 +422,6 @@ pub fn now_iso() -> String {
 }
 
 fn format_iso_utc(secs: u64) -> String {
-    // 基于 epoch 秒数算出 UTC 年月日时分秒（不引入 chrono，保持依赖最小）
     let days = secs / 86400;
     let rem = secs % 86400;
     let h = rem / 3600;
@@ -321,3 +448,106 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 问题5核心验证：save → read round-trip，body 必须完整保留
+    #[test]
+    fn save_read_roundtrip_preserves_body() {
+        let dir = std::env::temp_dir().join("pp_test_roundtrip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 先用 create_prompt 建一个
+        let abs = create_prompt(&dir, "测试", "我的提示词").unwrap();
+
+        // 用 save_prompt 写入结构化内容（模拟前端 doSave）
+        let req = SaveRequest {
+            title: "改过的标题".into(),
+            tags: vec!["标签1".into(), "标签2".into()],
+            copy_mode: "markdown".into(),
+            pinned: true,
+            body: "这是正文内容\n\n## 第二段\n\n- 列表项1\n- 列表项2".into(),
+        };
+        save_prompt(&abs, &req).unwrap();
+
+        // 读回，验证 body 完整
+        let content = read_prompt(&abs).unwrap();
+        assert_eq!(content.meta.title, "改过的标题");
+        assert_eq!(content.meta.tags, vec!["标签1", "标签2"]);
+        assert!(content.meta.pinned);
+        assert!(
+            content.body.contains("这是正文内容"),
+            "body 应包含正文，实际: {}",
+            content.body
+        );
+        assert!(content.body.contains("列表项1"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 多次保存后格式不漂移（问题5的根因场景）
+    #[test]
+    fn multiple_saves_stay_consistent() {
+        let dir = std::env::temp_dir().join("pp_test_multi");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let abs = create_prompt(&dir, "未分类", "多次保存").unwrap();
+
+        // 连续保存 3 次，每次改 body
+        for i in 0..3 {
+            let body = format!("第 {} 次的内容", i);
+            let req = SaveRequest {
+                title: format!("标题{}", i),
+                tags: vec![format!("tag{}", i)],
+                copy_mode: "markdown".into(),
+                pinned: false,
+                body: body.clone(),
+            };
+            save_prompt(&abs, &req).unwrap();
+
+            let content = read_prompt(&abs).unwrap();
+            assert_eq!(content.meta.title, format!("标题{}", i));
+            assert_eq!(content.body, body, "第 {} 次保存后 body 不一致", i);
+        }
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 验证 frontmatter 解析容错：tags 用旧的内联格式 [a, b] 也能解析
+    #[test]
+    fn parse_legacy_inline_tags() {
+        let content = "---\ntitle: 旧格式\ntags: [a, b]\n---\n\n正文";
+        let (meta, body) = parse_markdown(content);
+        assert_eq!(meta.title, "旧格式");
+        assert_eq!(meta.tags, vec!["a", "b"]);
+        assert_eq!(body, "正文");
+    }
+
+    /// 验证 rename_prompt：改标题 + 移动分类
+    #[test]
+    fn rename_and_move_category() {
+        let dir = std::env::temp_dir().join("pp_test_rename");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let abs = create_prompt(&dir, "旧分类", "旧标题").unwrap();
+        let new_abs = rename_prompt(&dir, &abs, "新标题", "新分类").unwrap();
+
+        // 旧文件应不存在
+        assert!(!abs.exists(), "旧文件应已移动");
+        // 新文件应在 新分类 目录下
+        assert!(new_abs.to_string_lossy().contains("新分类"));
+        assert!(new_abs.exists());
+
+        // 内容正确
+        let content = read_prompt(&new_abs).unwrap();
+        assert_eq!(content.meta.title, "新标题");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
