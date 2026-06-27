@@ -7,7 +7,6 @@
     body = $bindable(""),
     // 结构化编辑字段（双向绑定）
     title = $bindable(""),
-    tags = $bindable([]),
     category = $bindable(""),
     pinned = $bindable(false),
     copyMode = $bindable<"markdown" | "plain">("markdown"),
@@ -25,7 +24,6 @@
     mode: "view" | "edit";
     body: string;
     title: string;
-    tags: string[];
     category: string;
     pinned: boolean;
     copyMode: "markdown" | "plain";
@@ -38,16 +36,6 @@
     ondelete: () => void;
     oncreatecategory: (name: string) => void;
   } = $props();
-
-  // 标签输入：用逗号分隔的字符串展示，双向同步到数组
-  let tagsInput = $derived(tags.join(", "));
-  function onTagsInput(e: Event) {
-    const v = (e.target as HTMLInputElement).value;
-    tags = v
-      .split(",")
-      .map((t) => t.trim())
-      .filter((t) => t.length > 0);
-  }
 
   // 分类下拉里加一个"未分类"选项（根目录）
   let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name)]);
@@ -196,14 +184,8 @@
           复制
           <kbd>Enter</kbd>
         </button>
-        <button class="ghost" onclick={() => oncopy("plain")}>
-          复制纯文本
-        </button>
         <span class="meta-info">
           {prompt.category}
-          {#if prompt.meta.tags.length > 0}
-            · {prompt.meta.tags.map((t) => "#" + t).join(" ")}
-          {/if}
         </span>
       </footer>
     {:else}
@@ -220,30 +202,17 @@
           />
         </div>
 
-        <div class="form-row form-row-2">
-          <div>
-            <label class="form-label" for="f-category">分类</label>
-            <select
-              id="f-category"
-              class="form-input"
-              bind:value={category}
-            >
-              {#each categoryOptions as c}
-                <option value={c}>{c}</option>
-              {/each}
-            </select>
-          </div>
-          <div>
-            <label class="form-label" for="f-tags">标签</label>
-            <input
-              id="f-tags"
-              class="form-input"
-              type="text"
-              value={tagsInput}
-              oninput={onTagsInput}
-              placeholder="逗号分隔，如：写作, 润色"
-            />
-          </div>
+        <div class="form-row">
+          <label class="form-label" for="f-category">分类</label>
+          <select
+            id="f-category"
+            class="form-input"
+            bind:value={category}
+          >
+            {#each categoryOptions as c}
+              <option value={c}>{c}</option>
+            {/each}
+          </select>
         </div>
 
         {#if addingCategory}
@@ -272,20 +241,11 @@
           </button>
         {/if}
 
-        <div class="form-row form-row-2">
-          <div>
-            <span class="form-label">复制模式</span>
-            <select class="form-input" bind:value={copyMode}>
-              <option value={"markdown"}>Markdown（保留格式）</option>
-              <option value={"plain"}>纯文本</option>
-            </select>
-          </div>
-          <div class="checkbox-cell">
-            <label class="checkbox-wrap">
-              <input type="checkbox" bind:checked={pinned} />
-              <span>置顶</span>
-            </label>
-          </div>
+        <div class="form-row">
+          <label class="checkbox-wrap">
+            <input type="checkbox" bind:checked={pinned} />
+            <span>置顶（显示在列表顶部）</span>
+          </label>
         </div>
 
         <div class="form-row form-row-body">
@@ -418,16 +378,6 @@
     flex-direction: column;
     gap: 5px;
   }
-  .form-row-2 {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-  }
-  .form-row-2 > div {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }
   .form-label {
     font-size: 11px;
     font-weight: 600;
@@ -452,10 +402,6 @@
   }
   select.form-input {
     cursor: pointer;
-  }
-  .checkbox-cell {
-    justify-content: flex-end;
-    padding-top: 18px;
   }
   .checkbox-wrap {
     display: inline-flex;

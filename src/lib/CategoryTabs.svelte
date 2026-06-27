@@ -6,11 +6,15 @@
     total,
     selected = $bindable("__all__"),
     oncreate,
+    onrename,
+    oncontextmenu,
   }: {
     categories: CategoryCount[];
     total: number;
     selected: string;
     oncreate: (name: string) => void;
+    onrename: (oldName: string) => void;
+    oncontextmenu: (name: string, x: number, y: number) => void;
   } = $props();
 
   function pick(name: string) {
@@ -45,6 +49,10 @@
         class="tab"
         class:active={selected === cat.name}
         onclick={() => pick(cat.name)}
+        oncontextmenu={(e) => {
+          e.preventDefault();
+          oncontextmenu(cat.name, e.clientX, e.clientY);
+        }}
         title={cat.name}
       >
         <span class="name">{cat.name}</span><span class="num">{cat.count}</span>

@@ -11,6 +11,7 @@
     initApp,
     readPrompt,
     renamePrompt,
+    renameCategory,
     revealInFinder,
     savePrompt,
     scanPrompts,
@@ -34,7 +35,6 @@
   let editorMode = $state<"view" | "edit">("view");
   let editingBody = $state("");
   let editingTitle = $state("");
-  let editingTags = $state<string[]>([]);
   let editingCategory = $state("");
   let editingPinned = $state(false);
   let editingCopyMode = $state<"markdown" | "plain">("markdown");
@@ -52,6 +52,10 @@
     title: "",
     category: "",
   });
+
+  // 分类右键菜单 + 分类重命名
+  let catContextMenu = $state({ open: false, x: 0, y: 0, name: "" });
+  let catRenameDialog = $state({ open: false, oldName: "", newName: "" });
 
   let selectedPrompt = $derived(
     allPrompts.find((p) => p.path === selectedPath) ?? null,
@@ -126,7 +130,6 @@
 
   function applyMetaToEditFields(meta: PromptMeta) {
     editingTitle = meta.title;
-    editingTags = [...meta.tags];
     editingCategory = selectedPrompt?.category ?? "未分类";
     editingPinned = meta.pinned;
     editingCopyMode = (meta.copy_mode === "plain" ? "plain" : "markdown");
@@ -169,7 +172,6 @@
     try {
       await savePrompt(selectedPrompt.path, {
         title: editingTitle.trim() || "未命名",
-        tags: editingTags,
         copy_mode: editingCopyMode,
         pinned: editingPinned,
         body: editingBody,
@@ -197,7 +199,6 @@
       query = "";
       // 进入编辑，字段初始化
       editingTitle = "新提示词";
-      editingTags = [];
       editingCategory = cat;
       editingPinned = false;
       editingCopyMode = "markdown";
@@ -256,7 +257,6 @@
     try {
       await savePrompt(p.path, {
         title: p.meta.title,
-        tags: p.meta.tags,
         copy_mode: (p.meta.copy_mode === "plain" ? "plain" : "markdown"),
         pinned: !p.meta.pinned,
         body: editingBody,
@@ -304,6 +304,34 @@
     try {
       await createCategory(name);
       await refresh();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // 优化3：分类右键菜单
+  function onCatContextMenu(name: string, x: number, y: number) {
+    catContextMenu = { open: true, x, y, name };
+  }
+
+  // 优化3：重命名分类
+  async function onRenameCategory(oldName: string) {
+    catRenameDialog = { open: true, oldName, newName: oldName };
+  }
+
+  async function submitCatRename() {
+    const newName = catRenameDialog.newName.trim();
+    if (!newName || newName === catRenameDialog.oldName) {
+      catRenameDialog.open = false;
+      return;
+    }
+    try {
+      await renameCategory(catRenameDialog.oldName, newName);
+      if (selectedCategory === catRenameDialog.oldName) {
+        selectedCategory = newName;
+      }
+      await refresh();
+      catRenameDialog.open = false;
     } catch (e) {
       error = String(e);
     }
@@ -426,6 +454,8 @@
         total={allPrompts.length}
         bind:selected={selectedCategory}
         oncreate={onCreateCategory}
+        onrename={onRenameCategory}
+        oncontextmenu={onCatContextMenu}
       />
     </nav>
 
@@ -447,7 +477,6 @@
         mode={editorMode}
         bind:body={editingBody}
         bind:title={editingTitle}
-        bind:tags={editingTags}
         bind:category={editingCategory}
         bind:pinned={editingPinned}
         bind:copyMode={editingCopyMode}
@@ -522,6 +551,66 @@
               取消
             </button>
             <button class="primary" onclick={submitRename}>确定</button>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if catContextMenu.open}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="backdrop"
+        onclick={() => (catContextMenu.open = false)}
+        oncontextmenu={(e) => {
+          e.preventDefault();
+          catContextMenu.open = false;
+        }}
+        transition:fly={{ duration: 80 }}
+      ></div>
+      <div
+        class="cat-menu"
+        style="left: {catContextMenu.x}px; top: {catContextMenu.y}px;"
+        transition:fly={{ y: -4, duration: 100 }}
+      >
+        <button
+          class="cat-menu-item"
+          onclick={() => {
+            onRenameCategory(catContextMenu.name);
+            catContextMenu.open = false;
+          }}
+        >
+          <span class="ico">✎</span> 重命名分类
+        </button>
+      </div>
+    {/if}
+
+    {#if catRenameDialog.open}
+      <div
+        class="backdrop"
+        transition:fly={{ duration: 100 }}
+        onclick={(e) => {
+          if (e.target === e.currentTarget) catRenameDialog.open = false;
+        }}
+        onkeydown={(e) => e.key === "Escape" && (catRenameDialog.open = false)}
+        role="presentation"
+      >
+        <div class="dialog" transition:fly={{ y: -10, duration: 120 }}>
+          <h3>重命名分类</h3>
+          <div class="dialog-row">
+            <label for="cat-rn">新分类名</label>
+            <input
+              id="cat-rn"
+              type="text"
+              bind:value={catRenameDialog.newName}
+              onkeydown={(e) => e.key === "Enter" && submitCatRename()}
+            />
+          </div>
+          <div class="dialog-actions">
+            <button class="ghost" onclick={() => (catRenameDialog.open = false)}>
+              取消
+            </button>
+            <button class="primary" onclick={submitCatRename}>确定</button>
           </div>
         </div>
       </div>
@@ -713,5 +802,39 @@
     display: flex;
     justify-content: flex-end;
     gap: 8px;
+  }
+
+  .cat-menu {
+    position: fixed;
+    z-index: 160;
+    min-width: 140px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+    padding: 4px;
+  }
+  .cat-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--fg);
+    font-size: 13px;
+    padding: 7px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+  }
+  .cat-menu-item:hover {
+    background: var(--bg-hover);
+  }
+  .cat-menu-item .ico {
+    width: 16px;
+    text-align: center;
+    opacity: 0.8;
   }
 </style>

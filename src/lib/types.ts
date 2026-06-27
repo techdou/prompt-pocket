@@ -2,8 +2,6 @@
 export interface PromptMeta {
   /** 标题，缺省时取文件名（去扩展名） */
   title: string;
-  /** 标签数组，可为空 */
-  tags: string[];
   /** 复制时是否先转纯文本：markdown 渲染成纯文本 / 原样 */
   copy_mode: "markdown" | "plain";
   /** 是否置顶 */
@@ -57,7 +55,6 @@ export interface PromptContent {
 /** save_prompt 接收的结构化保存请求（前端表单直接构造） */
 export interface SaveRequest {
   title: string;
-  tags: string[];
   copy_mode: "markdown" | "plain";
   pinned: boolean;
   body: string;

@@ -18,8 +18,6 @@ use walkdir::WalkDir;
 pub struct PromptMeta {
     #[serde(default)]
     pub title: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
     #[serde(default = "default_copy_mode")]
     pub copy_mode: String,
     #[serde(default)]
@@ -39,7 +37,6 @@ impl Default for PromptMeta {
         let now = now_iso();
         Self {
             title: String::new(),
-            tags: vec![],
             copy_mode: default_copy_mode(),
             pinned: false,
             created: now.clone(),
@@ -96,8 +93,6 @@ pub struct PromptContent {
 #[serde(rename_all = "camelCase")]
 pub struct SaveRequest {
     pub title: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
     #[serde(default = "default_copy_mode")]
     pub copy_mode: String,
     #[serde(default)]
@@ -151,21 +146,13 @@ fn parse_yaml_frontmatter(fm_raw: &str) -> PromptMeta {
     match serde_yaml::from_str::<PromptMeta>(fm_raw) {
         Ok(m) => m,
         Err(_) => {
-            // 容错：解析失败时退回默认值，至少尝试救回 title/tags
+            // 容错：解析失败时退回默认值，至少尝试救回 title
             if let Ok(generic) = serde_yaml::from_str::<serde_yaml::Value>(fm_raw) {
                 let mut meta = PromptMeta::default();
                 if let Some(map) = generic.as_mapping() {
                     if let Some(t) = map.get(&serde_yaml::Value::String("title".into())) {
                         if let Some(s) = t.as_str() {
                             meta.title = s.to_string();
-                        }
-                    }
-                    if let Some(t) = map.get(&serde_yaml::Value::String("tags".into())) {
-                        if let Some(seq) = t.as_sequence() {
-                            meta.tags = seq
-                                .iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect();
                         }
                     }
                 }
@@ -188,11 +175,28 @@ fn serialize_frontmatter(meta: &PromptMeta) -> String {
 
 /// ────────────────────────────────────────────────
 /// 扫描：构建 prompt 列表 + 分类计数
+/// 关键修复（Bug1）：先扫描所有一级子目录作为分类（含空目录），
+/// 再统计每个分类下的 .md 文件数。这样新建空分类也能立刻显示。
 /// ────────────────────────────────────────────────
 pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
     let mut prompts: Vec<Prompt> = Vec::new();
     let mut cat_counts: BTreeMap<String, usize> = BTreeMap::new();
 
+    // 先把所有一级子目录登记为分类（count=0），含空目录
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if !name.starts_with('.') && !name.starts_with('~') {
+                        cat_counts.entry(name.to_string()).or_insert(0);
+                    }
+                }
+            }
+        }
+    }
+
+    // 扫描所有 .md 文件
     for entry in WalkDir::new(root)
         .min_depth(1)
         .into_iter()
@@ -294,7 +298,6 @@ pub fn save_prompt(abs: &Path, req: &SaveRequest) -> io::Result<()> {
 
     let meta = PromptMeta {
         title: req.title.clone(),
-        tags: req.tags.clone(),
         copy_mode: req.copy_mode.clone(),
         pinned: req.pinned,
         created: old_created,
@@ -332,7 +335,6 @@ pub fn create_prompt(root: &Path, category: &str, title: &str) -> io::Result<Pat
     let now = now_iso();
     let meta = PromptMeta {
         title: title.to_string(),
-        tags: vec![],
         copy_mode: default_copy_mode(),
         pinned: false,
         created: now.clone(),
@@ -403,6 +405,43 @@ pub fn create_category(root: &Path, name: &str) -> io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// 重命名分类（优化3）：重命名文件夹，内部所有 .md 文件随之移动
+/// 返回受影响的 .md 文件新路径列表
+pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Result<()> {
+    let safe_old = sanitize_filename::sanitize(old_name);
+    let safe_new = sanitize_filename::sanitize(new_name);
+    if safe_new.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "新分类名无效"));
+    }
+    let old_dir = root.join(&safe_old);
+    let new_dir = root.join(&safe_new);
+
+    if !old_dir.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "原分类文件夹不存在",
+        ));
+    }
+
+    // 目标已存在：合并（移动所有文件过去），否则重命名
+    if new_dir.exists() {
+        for entry in fs::read_dir(&old_dir)? {
+            let entry = entry?;
+            let from = entry.path();
+            let to = new_dir.join(entry.file_name());
+            if from != to {
+                // 若目标已存在同名文件，覆盖
+                let _ = fs::remove_file(&to);
+                fs::rename(&from, &to)?;
+            }
+        }
+        fs::remove_dir(&old_dir)?;
+    } else {
+        fs::rename(&old_dir, &new_dir)?;
+    }
+    Ok(())
+}
+
 pub fn delete_prompt(abs: &Path) -> io::Result<()> {
     fs::remove_file(abs)
 }
@@ -466,7 +505,6 @@ mod tests {
         // 用 save_prompt 写入结构化内容（模拟前端 doSave）
         let req = SaveRequest {
             title: "改过的标题".into(),
-            tags: vec!["标签1".into(), "标签2".into()],
             copy_mode: "markdown".into(),
             pinned: true,
             body: "这是正文内容\n\n## 第二段\n\n- 列表项1\n- 列表项2".into(),
@@ -476,7 +514,6 @@ mod tests {
         // 读回，验证 body 完整
         let content = read_prompt(&abs).unwrap();
         assert_eq!(content.meta.title, "改过的标题");
-        assert_eq!(content.meta.tags, vec!["标签1", "标签2"]);
         assert!(content.meta.pinned);
         assert!(
             content.body.contains("这是正文内容"),
@@ -502,7 +539,6 @@ mod tests {
             let body = format!("第 {} 次的内容", i);
             let req = SaveRequest {
                 title: format!("标题{}", i),
-                tags: vec![format!("tag{}", i)],
                 copy_mode: "markdown".into(),
                 pinned: false,
                 body: body.clone(),
@@ -517,13 +553,58 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// 验证 frontmatter 解析容错：tags 用旧的内联格式 [a, b] 也能解析
+    /// Bug1 验证：新建空分类后 scan 能看到它（count=0）
     #[test]
-    fn parse_legacy_inline_tags() {
+    fn empty_category_appears_in_scan() {
+        let dir = std::env::temp_dir().join("pp_test_empty_cat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 创建一个空分类（只建文件夹，无 .md）
+        create_category(&dir, "空分类").unwrap();
+
+        // 扫描，空分类应该出现
+        let res = scan_prompts(&dir).unwrap();
+        assert!(
+            res.categories.iter().any(|c| c.name == "空分类" && c.count == 0),
+            "空分类应出现在列表中，实际分类: {:?}",
+            res.categories
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 验证 rename_category：重命名文件夹
+    #[test]
+    fn rename_category_moves_files() {
+        let dir = std::env::temp_dir().join("pp_test_rename_cat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 在旧分类下建一个 prompt
+        create_prompt(&dir, "旧分类", "测试").unwrap();
+        assert!(dir.join("旧分类").exists());
+
+        // 重命名分类
+        rename_category(&dir, "旧分类", "新分类").unwrap();
+
+        // 旧目录应消失，新目录存在且含文件
+        assert!(!dir.join("旧分类").exists(), "旧目录应已重命名");
+        assert!(dir.join("新分类").exists());
+
+        let res = scan_prompts(&dir).unwrap();
+        assert!(res.categories.iter().any(|c| c.name == "新分类"));
+        assert!(res.prompts.iter().any(|p| p.category == "新分类"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 验证 frontmatter 解析容错：旧文件含 tags 字段也能正常解析（tags 被忽略）
+    #[test]
+    fn parse_legacy_with_tags_field() {
         let content = "---\ntitle: 旧格式\ntags: [a, b]\n---\n\n正文";
         let (meta, body) = parse_markdown(content);
         assert_eq!(meta.title, "旧格式");
-        assert_eq!(meta.tags, vec!["a", "b"]);
         assert_eq!(body, "正文");
     }
 

@@ -59,9 +59,6 @@
         </div>
         <div class="sub">
           <span class="cat">{p.category}</span>
-          {#if p.meta.tags.length > 0}
-            <span class="tags">{p.meta.tags.map((t) => "#" + t).join(" ")}</span>
-          {/if}
         </div>
       </div>
       <button
@@ -145,11 +142,6 @@
   }
   .cat {
     flex-shrink: 0;
-  }
-  .tags {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .more-btn {

@@ -16,8 +16,9 @@ mod store;
 use crate::store::{
     create_category as create_category_disk, create_prompt as create_prompt_disk,
     delete_prompt as delete_prompt_disk, read_prompt as read_prompt_disk,
-    rename_prompt as rename_prompt_disk, save_prompt as save_prompt_disk,
-    scan_prompts as scan_disk, AppConfig, Prompt, PromptContent, SaveRequest, ScanResult,
+    rename_category as rename_category_disk, rename_prompt as rename_prompt_disk,
+    save_prompt as save_prompt_disk, scan_prompts as scan_disk, AppConfig, Prompt,
+    PromptContent, SaveRequest, ScanResult,
 };
 
 // ────────────────────────────────────────────────────────────
@@ -289,6 +290,18 @@ fn create_category(
     Ok(())
 }
 
+/// 重命名分类（优化3）：重命名文件夹，内部文件随之移动
+#[tauri::command]
+fn rename_category(
+    old_name: String,
+    new_name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let root = state.data_dir();
+    rename_category_disk(&root, &old_name, &new_name).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 新建 prompt：在指定分类下创建文件，返回新 prompt
 #[tauri::command]
 fn create_prompt(
@@ -366,14 +379,32 @@ fn resolve_abs(root: &Path, rel: &str) -> PathBuf {
     let joined = root.join(rel);
     match std::fs::canonicalize(&joined) {
         Ok(canon) => {
-            if canon.starts_with(root) {
-                canon
+            // Bug2 修复：canonicalize 在 Windows 加 `\\?\` 前缀，需剥离以匹配 scan 的路径
+            let stripped = strip_unc_prefix(&canon);
+            if stripped.starts_with(root) {
+                stripped
             } else {
                 joined
             }
         }
         Err(_) => joined,
     }
+}
+
+/// 剥离 Windows canonicalize 加上的 `\\?\` 前缀
+#[cfg(windows)]
+fn strip_unc_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_unc_prefix(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 /// 首次启动写入示例 prompt，演示格式与分类
@@ -493,6 +524,7 @@ pub fn run() {
             read_prompt,
             save_prompt,
             rename_prompt,
+            rename_category,
             create_category,
             create_prompt,
             delete_prompt,

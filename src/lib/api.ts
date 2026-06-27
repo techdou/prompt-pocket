@@ -64,6 +64,11 @@ export async function createCategory(name: string): Promise<void> {
   return invoke<void>("create_category", { name });
 }
 
+/** 重命名分类（重命名文件夹，内部文件随之移动） */
+export async function renameCategory(oldName: string, newName: string): Promise<void> {
+  return invoke<void>("rename_category", { oldName, newName });
+}
+
 /** 新建 prompt：在指定分类下创建文件，返回新 prompt */
 export async function createPrompt(
   category: string,
