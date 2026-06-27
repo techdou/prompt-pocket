@@ -65,14 +65,6 @@ pub struct CategoryCount {
     pub count: usize,
 }
 
-/// 应用配置（init_app 返回给前端）
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppConfig {
-    pub data_dir: String,
-    pub hotkey: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanResult {

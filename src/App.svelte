@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
-  import type { AppConfig, CategoryCount, Prompt, PromptMeta } from "./lib/types";
+  import type { CategoryCount, Prompt, PromptMeta, SyncStatus } from "./lib/types";
   import {
     copyText,
     createCategory,
     createPrompt,
     deletePrompt,
+    getSyncStatus,
     hideWindow,
     initApp,
     readPrompt,
@@ -23,9 +24,9 @@
   import Settings from "./lib/Settings.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
 
-  let config: AppConfig | null = null;
   let allPrompts: Prompt[] = $state([]);
   let categories: CategoryCount[] = $state([]);
+  let syncStatus: SyncStatus | null = $state(null);
 
   let selectedCategory = $state<string>("__all__");
   let query = $state("");
@@ -76,8 +77,13 @@
   async function bootstrap() {
     try {
       loading = true;
-      config = await initApp();
+      await initApp();
       await refresh();
+      try {
+        syncStatus = await getSyncStatus();
+      } catch {
+        /* 同步状态获取失败不阻断 */
+      }
     } catch (e) {
       error = String(e);
     } finally {
@@ -92,15 +98,27 @@
   }
 
   // 设置界面切换数据目录后：更新配置、重置选中、重新扫描
-  async function onConfigChanged(newConfig: AppConfig) {
-    config = newConfig;
-    selectedPath = null;
-    lastLoadedPath = null;
-    selectedCategory = "__all__";
-    query = "";
+  // 同步完成后：重新加载列表 + 刷新同步状态
+  async function onSynced() {
     await refresh();
-    settingsOpen = false;
+    try {
+      syncStatus = await getSyncStatus();
+    } catch {
+      /* 忽略 */
+    }
   }
+
+  // 监听后端 sync-finished 事件，自动刷新
+  let unlisten: (() => void) | null = null;
+  $effect(() => {
+    import("@tauri-apps/api/event").then(({ listen }) => {
+      listen("sync-finished", () => {
+        void refresh();
+        void getSyncStatus().then((s) => (syncStatus = s));
+      }).then((fn) => (unlisten = fn));
+    });
+    return () => unlisten?.();
+  });
 
   // 选中变化时加载内容
   let lastLoadedPath: string | null = null;
@@ -437,6 +455,14 @@
           spellcheck="false"
         />
         <button class="new-btn" onclick={doCreate} title="新建 (Ctrl+N)">+</button>
+        {#if syncStatus?.configured}
+          <span
+            class="sync-indicator"
+            class:syncing={syncStatus.syncing}
+            class:error={!!syncStatus.lastError}
+            title={syncStatus.lastError || syncStatus.lastSync || "已连接坚果云"}
+          ></span>
+        {/if}
         <button
           class="new-btn"
           onclick={() => (settingsOpen = true)}
@@ -506,7 +532,7 @@
       </div>
     {/if}
 
-    <Settings bind:open={settingsOpen} onchanged={onConfigChanged} />
+    <Settings bind:open={settingsOpen} onsynced={onSynced} />
 
     <ContextMenu
       bind:open={contextMenu.open}
@@ -683,6 +709,27 @@
   .new-btn:hover {
     background: var(--fg);
     color: var(--bg);
+  }
+
+  .sync-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #22a06b;
+    flex-shrink: 0;
+    cursor: help;
+  }
+  .sync-indicator.syncing {
+    background: #4a7cf7;
+    animation: sync-pulse 1s infinite;
+  }
+  .sync-indicator.error {
+    background: var(--danger);
+  }
+  @keyframes sync-pulse {
+    50% {
+      opacity: 0.4;
+    }
   }
 
   .body {

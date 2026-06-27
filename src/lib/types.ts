@@ -38,12 +38,21 @@ export interface CategoryCount {
   count: number;
 }
 
-/** 配置（_config.json） */
-export interface AppConfig {
-  /** prompt 根目录绝对路径 */
-  data_dir: string;
-  /** 全局快捷键，默认 Alt+Space */
-  hotkey: string;
+/** 云同步配置（读取时用，密码只返回是否存在） */
+export interface CloudConfigView {
+  username: string;
+  remoteRoot: string;
+  enabled: boolean;
+  hasPassword: boolean;
+}
+
+/** 同步状态 */
+export interface SyncStatus {
+  configured: boolean;
+  enabled: boolean;
+  lastSync: string | null;
+  lastError: string | null;
+  syncing: boolean;
 }
 
 /** read_prompt 返回：结构化元数据 + 正文 */
