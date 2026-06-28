@@ -43,9 +43,15 @@ pub struct SyncStatus {
     pub syncing: bool,
 }
 
-/// 构造 WebDAV 客户端
+/// 构造 WebDAV 客户端（带超时，避免坚果云慢响应时无限期挂起）
 pub fn build_client(cfg: &CloudConfig) -> Result<Client, DavError> {
+    let agent = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| DavError::Reqwest(e))?;
     ClientBuilder::new()
+        .set_agent(agent)
         .set_host(JIANGUO_HOST.to_string())
         .set_auth(Auth::Basic(cfg.username.clone(), cfg.password.clone()))
         .build()
@@ -80,6 +86,7 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
     let mut remote_files: HashSet<String> = HashSet::new();
     let mut downloaded = 0u32;
     let mut skipped = 0u32;
+    let mut errors: Vec<String> = Vec::new();
 
     for entity in entities {
         if let ListEntity::File(file) = entity {
@@ -99,8 +106,8 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
 
             if need_download {
                 if let Err(e) = download_file(&client, &root, &rel, &local_path).await {
-                    // 单个文件下载失败不中断整体
-                    eprintln!("下载失败 {rel}: {e}");
+                    // 单个文件下载失败不中断整体，但记录错误供前端展示
+                    errors.push(format!("{rel}: {e}"));
                     continue;
                 }
                 downloaded += 1;
@@ -119,6 +126,7 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
         skipped,
         deleted,
         uploaded: 0,
+        errors,
     })
 }
 
@@ -128,6 +136,7 @@ pub struct SyncReport {
     pub skipped: u32,
     pub deleted: u32,
     pub uploaded: u32,
+    pub errors: Vec<String>,
 }
 
 /// 全量上传：把本地所有文件推送到远程（只增不删，不删除云端多余文件）
@@ -140,6 +149,7 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
     let _ = client.mkcol(&format!("/{root}")).await;
 
     let mut uploaded = 0u32;
+    let mut errors: Vec<String> = Vec::new();
 
     // 遍历本地所有 .md 文件 + .order.json
     for entry in walkdir::WalkDir::new(local_dir)
@@ -170,21 +180,31 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
         let rel = path.strip_prefix(local_dir).map_err(|e| e.to_string())?;
         let rel_unix = rel.to_string_lossy().replace('\\', "/");
 
-        // 确保远程目录存在
-        ensure_remote_dirs(&client, &root, &rel_unix).await?;
+        // 确保远程目录存在（失败不中断，记入 errors）
+        if let Err(e) = ensure_remote_dirs(&client, &root, &rel_unix).await {
+            errors.push(format!("{rel_unix}（建目录）: {e}"));
+            continue;
+        }
 
-        let content = std::fs::read(path).map_err(|e| e.to_string())?;
+        let content = match std::fs::read(path) {
+            Ok(c) => c,
+            Err(e) => {
+                errors.push(format!("{rel_unix}（读文件）: {e}"));
+                continue;
+            }
+        };
         match client
             .put(&format!("/{root}/{rel_unix}"), content)
             .await
         {
             Ok(()) => uploaded += 1,
-            Err(e) => eprintln!("上传失败 {rel_unix}: {e}"),
+            Err(e) => errors.push(format!("{rel_unix}: {e}")),
         }
     }
 
     Ok(SyncReport {
         uploaded,
+        errors,
         ..Default::default()
     })
 }
@@ -197,6 +217,35 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
 /// 规范化远程路径：去首尾斜杠
 fn sanitize_remote_path(s: &str) -> String {
     s.trim_matches('/').to_string()
+}
+
+/// 紧凑时间戳，用于备份文件名（如 20260628T153000）
+fn now_iso_compact() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    let (y, mo, d) = civil_from_days(days as i64);
+    format!("{:04}{:02}{:02}T{:02}{:02}{:02}", y, mo, d, h, m, s)
+}
+
+/// Howard Hinnant 的 days_from_civil 逆运算
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// 从 WebDAV href 中提取相对于 remote_root 的路径
@@ -284,7 +333,19 @@ fn clean_local_extra(
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
             if !remote_files.contains(&rel_unix) {
-                let _ = std::fs::remove_file(&path);
+                // P1-7：删除前备份到 .trash/，避免下载覆盖时永久丢失本地数据
+                let trash_dir = local_dir.join(".trash");
+                let _ = std::fs::create_dir_all(&trash_dir);
+                let backup_name = format!(
+                    "{}_{}.md",
+                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled"),
+                    now_iso_compact()
+                );
+                let backup_path = trash_dir.join(backup_name);
+                // 移动到回收站，失败则直接删除（保证远程为主）
+                if std::fs::rename(&path, &backup_path).is_err() {
+                    let _ = std::fs::remove_file(&path);
+                }
                 *deleted += 1;
             }
         }

@@ -47,12 +47,13 @@ struct AppState {
 
 impl AppState {
     fn cloud_config(&self) -> CloudConfig {
-        self.cloud.lock().unwrap().clone()
+        // 毒锁时取出内部数据而非 panic（读操作安全）
+        self.cloud.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn set_cloud_config(&self, cfg: CloudConfig) -> Result<(), String> {
         {
-            *self.cloud.lock().unwrap() = cfg.clone();
+            *self.cloud.lock().map_err(|e| e.to_string())? = cfg.clone();
         }
         let persisted = PersistedConfig {
             username: Some(cfg.username),
@@ -77,9 +78,9 @@ impl AppState {
         SyncStatus {
             configured: cfg.is_configured(),
             enabled: cfg.enabled,
-            last_sync: self.last_sync.lock().unwrap().clone(),
-            last_error: self.last_error.lock().unwrap().clone(),
-            syncing: *self.syncing.lock().unwrap(),
+            last_sync: self.last_sync.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            last_error: self.last_error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            syncing: *self.syncing.lock().unwrap_or_else(|e| e.into_inner()),
         }
     }
 }
@@ -130,7 +131,7 @@ fn init_app(state: tauri::State<'_, AppState>) -> Result<(), String> {
     std::fs::create_dir_all(&state.local_dir).map_err(|e| e.to_string())?;
     let any_md = walkdir_has_md(&state.local_dir);
     if !any_md {
-        seed_sample_prompts(&state.local_dir);
+        seed_sample_prompts(&state.local_dir)?;
     }
     Ok(())
 }
@@ -378,19 +379,33 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     if !cfg.is_configured() {
         return Err("未配置坚果云同步".to_string());
     }
-    *state.syncing.lock().unwrap() = true;
+    // P0-3 并发保护：若已在同步中，拒绝重复触发
+    {
+        let syncing = state.syncing.lock().map_err(|e| e.to_string())?;
+        if *syncing {
+            return Err("正在同步中，请稍候".to_string());
+        }
+    }
+    *state.syncing.lock().map_err(|e| e.to_string())? = true;
     let result = push_all_to_remote(&cfg, &state.local_dir).await;
-    *state.syncing.lock().unwrap() = false;
+    // 无论成功失败都释放 syncing（用 map_err 防 poison，不 unwrap）
+    *state.syncing.lock().map_err(|e| e.to_string())? = false;
     match result {
         Ok(report) => {
-            let msg = format!("上传完成：共 {} 个文件", report.uploaded);
-            *state.last_sync.lock().unwrap() = Some(msg.clone());
-            *state.last_error.lock().unwrap() = None;
+            let mut msg = format!("上传完成：共 {} 个文件", report.uploaded);
+            if !report.errors.is_empty() {
+                msg.push_str(&format!("，{} 个失败", report.errors.len()));
+                *state.last_error.lock().map_err(|e| e.to_string())? =
+                    Some(report.errors.join("; "));
+            } else {
+                *state.last_error.lock().map_err(|e| e.to_string())? = None;
+            }
+            *state.last_sync.lock().map_err(|e| e.to_string())? = Some(msg.clone());
             let _ = app.emit("sync-finished", ());
             Ok(msg)
         }
         Err(e) => {
-            *state.last_error.lock().unwrap() = Some(e.clone());
+            *state.last_error.lock().map_err(|e| e.to_string())? = Some(e.clone());
             Err(e)
         }
     }
@@ -404,22 +419,35 @@ async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     if !cfg.is_configured() {
         return Err("未配置坚果云同步".to_string());
     }
-    *state.syncing.lock().unwrap() = true;
+    // P0-3 并发保护
+    {
+        let syncing = state.syncing.lock().map_err(|e| e.to_string())?;
+        if *syncing {
+            return Err("正在同步中，请稍候".to_string());
+        }
+    }
+    *state.syncing.lock().map_err(|e| e.to_string())? = true;
     let result = sync::pull_from_remote(&cfg, &state.local_dir).await;
-    *state.syncing.lock().unwrap() = false;
+    *state.syncing.lock().map_err(|e| e.to_string())? = false;
     match result {
         Ok(report) => {
-            let msg = format!(
+            let mut msg = format!(
                 "下载完成：更新 {}，跳过 {}，清理 {}",
                 report.downloaded, report.skipped, report.deleted
             );
-            *state.last_sync.lock().unwrap() = Some(msg.clone());
-            *state.last_error.lock().unwrap() = None;
+            if !report.errors.is_empty() {
+                msg.push_str(&format!("，{} 个失败", report.errors.len()));
+                *state.last_error.lock().map_err(|e| e.to_string())? =
+                    Some(report.errors.join("; "));
+            } else {
+                *state.last_error.lock().map_err(|e| e.to_string())? = None;
+            }
+            *state.last_sync.lock().map_err(|e| e.to_string())? = Some(msg.clone());
             let _ = app.emit("sync-finished", ());
             Ok(msg)
         }
         Err(e) => {
-            *state.last_error.lock().unwrap() = Some(e.clone());
+            *state.last_error.lock().map_err(|e| e.to_string())? = Some(e.clone());
             Err(e)
         }
     }
@@ -480,7 +508,7 @@ fn strip_unc_prefix(path: &std::path::Path) -> PathBuf {
     path.to_path_buf()
 }
 
-fn seed_sample_prompts(dir: &std::path::Path) {
+fn seed_sample_prompts(dir: &std::path::Path) -> Result<(), String> {
     let samples = [
         (
             "写作",
@@ -500,9 +528,10 @@ fn seed_sample_prompts(dir: &std::path::Path) {
     ];
     for (cat, name, content) in samples {
         let sub = dir.join(cat);
-        let _ = std::fs::create_dir_all(&sub);
-        let _ = std::fs::write(sub.join(name), content);
+        std::fs::create_dir_all(&sub).map_err(|e| format!("创建示例分类失败: {e}"))?;
+        std::fs::write(sub.join(name), content).map_err(|e| format!("写入示例文件失败: {e}"))?;
     }
+    Ok(())
 }
 
 fn toggle_main_window(app: &tauri::AppHandle) {
@@ -606,16 +635,22 @@ pub fn run() {
 
             // v1.0.1：同步改为纯手动，启动时不再自动拉取
 
-            // 注册全局快捷键
-            let shortcut: Shortcut = hotkey.parse().expect("无效的全局快捷键");
+            // 注册全局快捷键（解析失败则降级为无快捷键，不 panic）
             let app_handle = app.handle().clone();
-            app.global_shortcut()
-                .on_shortcut(shortcut, move |_app, _shortcut, event| {
-                    if event.state == ShortcutState::Pressed {
-                        toggle_main_window(&app_handle);
+            match hotkey.parse::<Shortcut>() {
+                Ok(shortcut) => {
+                    if let Err(e) = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
+                        if event.state == ShortcutState::Pressed {
+                            toggle_main_window(&app_handle);
+                        }
+                    }) {
+                        eprintln!("[启动] 全局快捷键注册失败（可能被占用）: {e}");
                     }
-                })
-                .map_err(|e| format!("注册快捷键失败: {e}"))?;
+                }
+                Err(e) => {
+                    eprintln!("[启动] 全局快捷键解析失败: {e}");
+                }
+            }
 
             if let Some(win) = app.get_webview_window("main") {
                 #[cfg(debug_assertions)]

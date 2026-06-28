@@ -42,6 +42,14 @@
 
   let loading = $state(true);
   let error = $state<string | null>(null);
+
+  // 统一错误提示：显示后 5 秒自动消失，不阻塞 UI
+  function showError(msg: string) {
+    error = msg;
+    setTimeout(() => {
+      if (error === msg) error = null;
+    }, 5000);
+  }
   let copiedFlash = $state(false);
   let settingsOpen = $state(false);
 
@@ -85,7 +93,7 @@
         /* 同步状态获取失败不阻断 */
       }
     } catch (e) {
-      error = String(e);
+      showError(String(e));
     } finally {
       loading = false;
     }
@@ -179,7 +187,7 @@
       setTimeout(() => (copiedFlash = false), 800);
       await hideWindow();
     } catch (e) {
-      error = String(e);
+      showError(String(e));
     }
   }
 
@@ -220,7 +228,7 @@
       editingBody = "";
       editorMode = "edit";
     } catch (e) {
-      error = String(e);
+      showError(String(e));
     }
   }
 
@@ -233,7 +241,7 @@
       lastLoadedPath = null;
       await refresh();
     } catch (e) {
-      error = String(e);
+      showError(String(e));
     }
   }
 
@@ -262,33 +270,39 @@
       );
       await refresh();
     } catch (e) {
-      error = String(e);
+      showError(String(e));
     }
   }
 
-  // 拖拽排序：本地重排 + 持久化 + 推送云端
+  // 拖拽排序：本地重排 + 持久化
   async function doReorder(from: number, to: number) {
-    if (from === to) return;
-    // 只在非搜索、非"全部"视图下允许拖拽（搜索结果是过滤后的，"全部"是跨分类的）
+    if (from === to || from < 0 || to < 0) return;
+    // 只在非搜索、非"全部"视图下允许拖拽
     if (query.trim() || selectedCategory === "__all__") return;
 
-    const reordered = [...visiblePrompts];
-    const [moved] = reordered.splice(from, 1);
-    reordered.splice(to, 0, moved);
-    allPrompts = [...allPrompts]; // 触发响应式
+    // 基于当前可见列表重排（完整边界 clamp）
+    const list = [...visiblePrompts];
+    if (list.length === 0 || from >= list.length) return;
+    // to 允许等于 length（插入到末尾后），clamp 到 [0, length]
+    const clampedTo = Math.max(0, Math.min(to, list.length));
+    if (clampedTo === from || clampedTo === from + 1) return;
 
-    // 重建当前分类的 prompts 顺序（用 visiblePrompts 的新顺序覆盖 allPrompts 里该分类的部分）
+    const [moved] = list.splice(from, 1);
+    const insertAt = clampedTo > from ? clampedTo - 1 : clampedTo;
+    list.splice(insertAt, 0, moved);
+
     const categoryName = selectedCategory;
-    const newPathOrder = reordered.map((p) => p.path);
-    // 同步更新 allPrompts 里该分类项的顺序
+    const newPathOrder = list.map((p) => p.path);
+
+    // 用新顺序替换 allPrompts 中该分类的部分（其他分类保持不变）
     const others = allPrompts.filter((p) => p.category !== categoryName);
-    allPrompts = [...others, ...reordered];
+    allPrompts = [...others, ...list];
 
     try {
       await reorderPrompts(categoryName, newPathOrder);
     } catch (e) {
-      error = String(e);
-      await refresh(); // 失败则回滚
+      showError(String(e));
+      await refresh();
     }
   }
 
@@ -304,7 +318,7 @@
         }
         return refresh();
       })
-      .catch((e) => (error = String(e)));
+      .catch((e) => showError(String(e)));
   }
 
   // 重命名对话框提交
@@ -320,7 +334,7 @@
       lastLoadedPath = null;
       renameDialog.open = false;
     } catch (e) {
-      error = String(e);
+      showError(String(e));
     }
   }
 
@@ -330,7 +344,7 @@
       await createCategory(name);
       await refresh();
     } catch (e) {
-      error = String(e);
+      showError(String(e));
     }
   }
 
@@ -358,7 +372,7 @@
       await refresh();
       catRenameDialog.open = false;
     } catch (e) {
-      error = String(e);
+      showError(String(e));
     }
   }
 
@@ -442,12 +456,6 @@
     <div class="state">
       <div class="spinner"></div>
       <span>正在加载提示词…</span>
-    </div>
-  {:else if error}
-    <div class="state error">
-      <strong>出错了</strong>
-      <pre>{error}</pre>
-      <button class="ghost" onclick={() => (error = null)}>关闭</button>
     </div>
   {:else}
     <header class="topbar" data-tauri-drag-region>
@@ -537,6 +545,13 @@
     {#if copiedFlash}
       <div class="toast" transition:fly={{ y: 20 }}>
         ✓ 已复制，回到原应用粘贴
+      </div>
+    {/if}
+
+    {#if error}
+      <div class="toast error-toast" transition:fly={{ y: 20 }}>
+        <span class="error-text">{error}</span>
+        <button class="error-close" onclick={() => (error = null)}>×</button>
       </div>
     {/if}
 
@@ -763,15 +778,6 @@
     gap: 12px;
     color: var(--muted);
   }
-  .state.error pre {
-    max-width: 80%;
-    white-space: pre-wrap;
-    color: var(--danger);
-    background: var(--bg-elevated);
-    padding: 12px;
-    border-radius: 6px;
-  }
-
   .spinner {
     width: 28px;
     height: 28px;
@@ -797,6 +803,33 @@
     border-radius: 6px;
     font-size: 13px;
     z-index: 100;
+  }
+  .error-toast {
+    background: var(--danger);
+    color: #fff;
+    max-width: 80vw;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    bottom: 64px;
+  }
+  .error-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .error-close {
+    background: transparent;
+    border: none;
+    color: #fff;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+    opacity: 0.8;
+  }
+  .error-close:hover {
+    opacity: 1;
   }
 
   .backdrop {

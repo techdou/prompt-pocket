@@ -19,10 +19,10 @@
     draggable?: boolean;
   } = $props();
 
-  // 拖拽状态
-  let dragFromIndex: number | null = $state(null);
-  let dragOverIndex: number | null = $state(null);
-  let dragBefore: boolean = $state(true); // 插入到目标项前还是后
+  // 拖拽状态：用一个简单的外部变量（不依赖响应式，避免渲染时机问题）
+  let dragFromIndex = -1;
+  let dragOverIndex = $state(-1);
+  let dragBefore = $state(true);
 
   function onDragStart(e: DragEvent, i: number) {
     if (!draggable) {
@@ -30,32 +30,35 @@
       return;
     }
     dragFromIndex = i;
-    e.dataTransfer?.setData("text/plain", String(i));
-    e.dataTransfer!.effectAllowed = "move";
+    // 必须设置 dataTransfer，否则部分浏览器不触发后续事件
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", String(i));
+    }
   }
 
+  // 关键：dragover 必须无条件 preventDefault，否则 drop 永远不触发
   function onDragOver(e: DragEvent, i: number) {
-    if (!draggable || dragFromIndex === null) return;
-    e.preventDefault(); // 允许 drop
+    if (!draggable) return;
+    e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
 
-    // 根据鼠标在项的上半还是下半，决定插入到前还是后
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const isBefore = e.clientY < rect.top + rect.height / 2;
     dragOverIndex = i;
-    dragBefore = isBefore;
+    dragBefore = e.clientY < rect.top + rect.height / 2;
   }
 
   function onDrop(e: DragEvent, i: number) {
-    if (!draggable || dragFromIndex === null) return;
     e.preventDefault();
+    if (!draggable || dragFromIndex < 0) {
+      resetDrag();
+      return;
+    }
     let to = dragBefore ? i : i + 1;
-    // 拖到自身位置无效
     if (to === dragFromIndex || to === dragFromIndex + 1) {
       resetDrag();
       return;
     }
-    // 从下方往上拖时，目标索引要 -1（因为源项被移除后整体前移）
     if (to > dragFromIndex) to -= 1;
     onreorder(dragFromIndex, to);
     resetDrag();
@@ -65,31 +68,31 @@
     resetDrag();
   }
 
-  function resetDrag() {
-    dragFromIndex = null;
-    dragOverIndex = null;
+  // 容器级 dragover：拖到空白处也允许 preventDefault
+  function onListDragOver(e: DragEvent) {
+    if (!draggable) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
   }
 
-  // 判断某项是否显示上指示线
+  function resetDrag() {
+    dragFromIndex = -1;
+    dragOverIndex = -1;
+  }
+
   function showLineBefore(i: number): boolean {
-    return (
-      dragFromIndex !== null &&
-      dragOverIndex === i &&
-      dragBefore &&
-      i !== dragFromIndex
-    );
+    return draggable && dragFromIndex >= 0 && dragOverIndex === i && dragBefore && i !== dragFromIndex;
   }
   function showLineAfter(i: number): boolean {
-    return (
-      dragFromIndex !== null &&
-      dragOverIndex === i &&
-      !dragBefore &&
-      i !== dragFromIndex
-    );
+    return draggable && dragFromIndex >= 0 && dragOverIndex === i && !dragBefore && i !== dragFromIndex;
   }
 </script>
 
-<ul class="list" role="listbox">
+<ul
+  class="list"
+  role="listbox"
+  ondragover={onListDragOver}
+>
   {#each prompts as p, i (p.path)}
     <li
       role="option"
@@ -183,12 +186,10 @@
     opacity: 0.4;
   }
 
-  /* 拖拽中：源项半透明 */
   .item.dragging {
     opacity: 0.4;
   }
 
-  /* 插入指示线：在项的上/下边显示蓝色横线 */
   .item.line-before::before {
     content: "";
     position: absolute;
@@ -222,7 +223,7 @@
   .drag-handle {
     font-size: 13px;
     color: var(--muted);
-    opacity: 0; /* 默认隐藏，hover 时显示 */
+    opacity: 0;
     cursor: grab;
     user-select: none;
     line-height: 1;
@@ -242,7 +243,7 @@
     display: flex;
     gap: 8px;
     margin-top: 2px;
-    margin-left: 17px; /* 对齐标题（拖拽手柄宽度） */
+    margin-left: 17px;
     font-size: 11px;
     color: var(--muted);
     overflow: hidden;
