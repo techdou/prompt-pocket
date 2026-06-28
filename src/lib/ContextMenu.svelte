@@ -10,7 +10,6 @@
     categories = [],
     onrename,
     onmove,
-    ontogglepin,
     ondelete,
     onclose,
   }: {
@@ -21,7 +20,6 @@
     categories: CategoryCount[];
     onrename: () => void;
     onmove: (category: string) => void;
-    ontogglepin: () => void;
     ondelete: () => void;
     onclose: () => void;
   } = $props();
@@ -91,11 +89,6 @@
         {/each}
       </div>
     {/if}
-
-    <button class="item" onclick={() => handle(ontogglepin)}>
-      <span class="ico">{prompt.meta.pinned ? "☆" : "★"}</span>
-      {prompt.meta.pinned ? "取消置顶" : "置顶"}
-    </button>
 
     <div class="sep"></div>
 

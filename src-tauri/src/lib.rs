@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Emitter, LogicalPosition, Manager, WindowEvent};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -17,8 +17,8 @@ use crate::store::{
     create_category as create_category_disk, create_prompt as create_prompt_disk,
     delete_prompt as delete_prompt_disk, read_prompt as read_prompt_disk,
     rename_category as rename_category_disk, rename_prompt as rename_prompt_disk,
-    save_prompt as save_prompt_disk, scan_prompts as scan_disk, Prompt, PromptContent,
-    SaveRequest, ScanResult,
+    reorder_category as reorder_category_disk, save_prompt as save_prompt_disk,
+    scan_prompts as scan_disk, Prompt, PromptContent, SaveRequest, ScanResult,
 };
 use crate::sync::{CloudConfig, SyncStatus};
 
@@ -387,6 +387,24 @@ fn delete_prompt(
     Ok(())
 }
 
+/// 拖拽排序：重写某分类的顺序到 .order.json，并推送云端
+#[tauri::command]
+fn reorder(
+    category: String,
+    paths: Vec<String>,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    reorder_category_disk(&state.local_dir, &category, &paths).map_err(|e| e.to_string())?;
+    // 推送 .order.json 到云端
+    let cfg = state.cloud_config();
+    if cfg.is_configured() {
+        let order_path = state.local_dir.join(store::ORDER_FILE);
+        spawn_push(&app, order_path);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn copy_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
@@ -586,11 +604,65 @@ fn toggle_main_window(app: &tauri::AppHandle) {
             let _ = win.hide();
         }
         _ => {
-            let _ = win.center();
+            // 多屏跟随鼠标定位：找到鼠标所在的显示器，在该屏居中显示
+            position_window_at_cursor(&win);
             let _ = win.show();
             let _ = win.set_focus();
         }
     }
+}
+
+/// 把窗口定位到鼠标光标所在的显示器中央（支持多屏）
+fn position_window_at_cursor(win: &tauri::WebviewWindow) {
+    // 获取鼠标当前位置（物理坐标，相对桌面左上角）
+    let cursor = match win.cursor_position() {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = win.center();
+            return;
+        }
+    };
+
+    // 鼠标坐标统一转 i32（cursor_position 返回 f64，monitor 用 i32）
+    let (cx, cy) = (cursor.x as i32, cursor.y as i32);
+
+    // 遍历所有显示器，找到包含鼠标位置的那个
+    let target_monitor = win
+        .available_monitors()
+        .ok()
+        .into_iter()
+        .flatten()
+        .find(|m| {
+            let pos = m.position();
+            let size = m.size();
+            cx >= pos.x
+                && cx < pos.x + size.width as i32
+                && cy >= pos.y
+                && cy < pos.y + size.height as i32
+        })
+        .or_else(|| win.current_monitor().ok().flatten());
+
+    let Some(monitor) = target_monitor else {
+        let _ = win.center();
+        return;
+    };
+
+    let mon_pos = monitor.position();
+    let mon_size = monitor.size();
+    let scale = monitor.scale_factor();
+
+    // 窗口逻辑尺寸
+    let (win_w, win_h) = match win.inner_size() {
+        Ok(s) => (s.width as i32, s.height as i32),
+        Err(_) => (960, 600),
+    };
+
+    // 在目标显示器中央定位（物理坐标），再转 logical 设置
+    let center_x = mon_pos.x + (mon_size.width as i32 - win_w) / 2;
+    let center_y = mon_pos.y + (mon_size.height as i32 - win_h) / 2;
+    let logical_x = center_x as f64 / scale;
+    let logical_y = center_y as f64 / scale;
+    let _ = win.set_position(LogicalPosition::new(logical_x, logical_y));
 }
 
 // ────────────────────────────────────────────────────────────
@@ -675,6 +747,7 @@ pub fn run() {
             create_category,
             create_prompt,
             delete_prompt,
+            reorder,
             copy_text,
             hide_window,
             reveal_in_finder,

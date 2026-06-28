@@ -21,8 +21,6 @@ pub struct PromptMeta {
     #[serde(default = "default_copy_mode")]
     pub copy_mode: String,
     #[serde(default)]
-    pub pinned: bool,
-    #[serde(default)]
     pub created: String,
     #[serde(default)]
     pub updated: String,
@@ -38,7 +36,6 @@ impl Default for PromptMeta {
         Self {
             title: String::new(),
             copy_mode: default_copy_mode(),
-            pinned: false,
             created: now.clone(),
             updated: now,
         }
@@ -55,6 +52,9 @@ pub struct Prompt {
     pub path: String,
     pub abs_path: String,
     pub meta: PromptMeta,
+    /// 在分类内的排序权重（来自 .order.json），None 表示未定义（排末尾）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
 }
 
 /// 分类计数
@@ -87,8 +87,6 @@ pub struct SaveRequest {
     pub title: String,
     #[serde(default = "default_copy_mode")]
     pub copy_mode: String,
-    #[serde(default)]
-    pub pinned: bool,
     pub body: String,
 }
 
@@ -188,6 +186,9 @@ pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
         }
     }
 
+    // 读取 .order.json：{ 分类名: [相对路径, ...] }
+    let order_map = load_order_map(root);
+
     // 扫描所有 .md 文件
     for entry in WalkDir::new(root)
         .min_depth(1)
@@ -207,16 +208,34 @@ pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
             }
         }
 
-        if let Some(prompt) = build_prompt(root, path) {
+        // 计算 order：取该文件所在分类，在 order_map[分类] 里找路径索引
+        let rel_str = path_to_unix(path.strip_prefix(root).unwrap_or(path));
+        let category_name = if let Some(idx) = rel_str.find('/') {
+            rel_str[..idx].to_string()
+        } else {
+            "未分类".to_string()
+        };
+        let order = order_map
+            .get(&category_name)
+            .and_then(|paths| paths.iter().position(|p| p == &rel_str))
+            .map(|idx| idx as i32);
+
+        if let Some(prompt) = build_prompt(root, path, order) {
             *cat_counts.entry(prompt.category.clone()).or_insert(0) += 1;
             prompts.push(prompt);
         }
     }
 
+    // 排序：category（字母序）→ order（升序，None 排后）→ updated（倒序）
     prompts.sort_by(|a, b| {
-        b.meta
-            .pinned
-            .cmp(&a.meta.pinned)
+        a.category
+            .cmp(&b.category)
+            .then_with(|| {
+                // None 视为 i32::MAX，排到末尾
+                let oa = a.order.unwrap_or(i32::MAX);
+                let ob = b.order.unwrap_or(i32::MAX);
+                oa.cmp(&ob)
+            })
             .then_with(|| b.meta.updated.cmp(&a.meta.updated))
     });
 
@@ -228,7 +247,35 @@ pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
     Ok(ScanResult { prompts, categories })
 }
 
-fn build_prompt(root: &Path, abs: &Path) -> Option<Prompt> {
+/// .order.json 文件名
+pub const ORDER_FILE: &str = ".order.json";
+
+/// 加载 order 映射：{ 分类名: [相对路径, ...] }
+fn load_order_map(root: &Path) -> std::collections::HashMap<String, Vec<String>> {
+    let path = root.join(ORDER_FILE);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 重写某分类的顺序到 .order.json
+pub fn reorder_category(
+    root: &Path,
+    category: &str,
+    ordered_paths: &[String],
+) -> io::Result<()> {
+    let path = root.join(ORDER_FILE);
+    let mut map: std::collections::HashMap<String, Vec<String>> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    map.insert(category.to_string(), ordered_paths.to_vec());
+    let json = serde_json::to_string_pretty(&map).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(&path, json)
+}
+
+fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
     let content = fs::read_to_string(abs).ok()?;
     let (mut meta, _body) = parse_markdown(&content);
 
@@ -260,6 +307,7 @@ fn build_prompt(root: &Path, abs: &Path) -> Option<Prompt> {
         path: rel_str,
         abs_path: abs.to_string_lossy().to_string(),
         meta,
+        order,
     })
 }
 
@@ -291,7 +339,6 @@ pub fn save_prompt(abs: &Path, req: &SaveRequest) -> io::Result<()> {
     let meta = PromptMeta {
         title: req.title.clone(),
         copy_mode: req.copy_mode.clone(),
-        pinned: req.pinned,
         created: old_created,
         updated: now_iso(),
     };
@@ -328,7 +375,6 @@ pub fn create_prompt(root: &Path, category: &str, title: &str) -> io::Result<Pat
     let meta = PromptMeta {
         title: title.to_string(),
         copy_mode: default_copy_mode(),
-        pinned: false,
         created: now.clone(),
         updated: now,
     };
@@ -498,7 +544,6 @@ mod tests {
         let req = SaveRequest {
             title: "改过的标题".into(),
             copy_mode: "markdown".into(),
-            pinned: true,
             body: "这是正文内容\n\n## 第二段\n\n- 列表项1\n- 列表项2".into(),
         };
         save_prompt(&abs, &req).unwrap();
@@ -506,7 +551,6 @@ mod tests {
         // 读回，验证 body 完整
         let content = read_prompt(&abs).unwrap();
         assert_eq!(content.meta.title, "改过的标题");
-        assert!(content.meta.pinned);
         assert!(
             content.body.contains("这是正文内容"),
             "body 应包含正文，实际: {}",
@@ -532,7 +576,6 @@ mod tests {
             let req = SaveRequest {
                 title: format!("标题{}", i),
                 copy_mode: "markdown".into(),
-                pinned: false,
                 body: body.clone(),
             };
             save_prompt(&abs, &req).unwrap();
@@ -598,6 +641,60 @@ mod tests {
         let (meta, body) = parse_markdown(content);
         assert_eq!(meta.title, "旧格式");
         assert_eq!(body, "正文");
+    }
+
+    /// 验证 order.json：写入顺序后 scan 能按该顺序返回
+    #[test]
+    fn order_json_controls_sort_within_category() {
+        let dir = std::env::temp_dir().join("pp_test_order");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 建两个 prompt（默认按文件名/时间排序）
+        create_prompt(&dir, "写作", "甲").unwrap();
+        create_prompt(&dir, "写作", "乙").unwrap();
+
+        // 写入自定义顺序：乙 在 甲 前面
+        reorder_category(
+            &dir,
+            "写作",
+            &["写作/乙.md".to_string(), "写作/甲.md".to_string()],
+        )
+        .unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+        let cat_prompts: Vec<_> = res.prompts.iter().filter(|p| p.category == "写作").collect();
+        assert_eq!(cat_prompts.len(), 2);
+        assert_eq!(cat_prompts[0].title, "乙", "乙应在前面");
+        assert_eq!(cat_prompts[1].title, "甲");
+        assert_eq!(cat_prompts[0].order, Some(0));
+        assert_eq!(cat_prompts[1].order, Some(1));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 验证不在 order.json 里的 prompt 排到分类末尾
+    #[test]
+    fn unlisted_prompt_goes_last() {
+        let dir = std::env::temp_dir().join("pp_test_order_unlisted");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        create_prompt(&dir, "写作", "甲").unwrap();
+        create_prompt(&dir, "写作", "乙").unwrap();
+        create_prompt(&dir, "写作", "丙").unwrap();
+
+        // order.json 只列了 甲（丙 未列入，应排末尾）
+        reorder_category(&dir, "写作", &["写作/甲.md".to_string()]).unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+        let cat: Vec<_> = res.prompts.iter().filter(|p| p.category == "写作").collect();
+        assert_eq!(cat[0].title, "甲");
+        // 甲有 order=0，乙和丙 order=None 排其后
+        assert_eq!(cat[0].order, Some(0));
+        assert!(cat[1].order.is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// 验证 rename_prompt：改标题 + 移动分类

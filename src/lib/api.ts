@@ -50,6 +50,14 @@ export async function deletePrompt(path: string): Promise<void> {
   return invoke<void>("delete_prompt", { path });
 }
 
+/** 拖拽排序：重写某分类的顺序 */
+export async function reorderPrompts(
+  category: string,
+  paths: string[],
+): Promise<void> {
+  return invoke<void>("reorder", { category, paths });
+}
+
 // ── 剪贴板 / 窗口 ──
 
 export async function copyText(text: string): Promise<void> {

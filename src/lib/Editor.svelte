@@ -8,7 +8,6 @@
     // 结构化编辑字段（双向绑定）
     title = $bindable(""),
     category = $bindable(""),
-    pinned = $bindable(false),
     copyMode = $bindable<"markdown" | "plain">("markdown"),
     // 分类列表（编辑模式下的下拉选项）
     categories = [],
@@ -25,7 +24,6 @@
     body: string;
     title: string;
     category: string;
-    pinned: boolean;
     copyMode: "markdown" | "plain";
     categories: CategoryCount[];
     oncopy: (mode: "markdown" | "plain") => void;
@@ -151,7 +149,6 @@
   <section class="editor">
     <header class="editor-head">
       <div class="title-block">
-        {#if pinned}<span class="pin">★</span>{/if}
         <h2 class="title">{title || prompt.title}</h2>
       </div>
       <div class="actions">
@@ -241,13 +238,6 @@
           </button>
         {/if}
 
-        <div class="form-row">
-          <label class="checkbox-wrap">
-            <input type="checkbox" bind:checked={pinned} />
-            <span>置顶（显示在列表顶部）</span>
-          </label>
-        </div>
-
         <div class="form-row form-row-body">
           <label class="form-label" for="f-body">正文</label>
           <textarea
@@ -327,6 +317,7 @@
 
   .preview {
     flex: 1;
+    min-height: 0; /* 关键：让 flex 子项在内容超长时收缩，footer 固定在底部 */
     overflow-y: auto;
     padding: 24px 32px;
     font-size: 14px;
@@ -366,6 +357,7 @@
   /* ── 填空式表单 ── */
   .edit-area {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     padding: 18px 24px;
     display: flex;

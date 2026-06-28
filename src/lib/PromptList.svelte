@@ -7,39 +7,100 @@
     selectedIndex,
     onselect,
     oncontextmenu,
-    onmounted,
+    onreorder,
+    draggable = true,
   }: {
     prompts: Prompt[];
     selectedPath: string | null;
     selectedIndex: number;
     onselect: (path: string) => void;
     oncontextmenu: (prompt: Prompt, x: number, y: number) => void;
-    onmounted: (scrollToIndex: (i: number) => void) => void;
+    onreorder: (from: number, to: number) => void;
+    draggable?: boolean;
   } = $props();
 
-  // 内部持有 DOM 引用，通过回调暴露滚动能力给父组件
-  let itemEls: HTMLLIElement[] = $state([]);
+  // 拖拽状态
+  let dragFromIndex: number | null = $state(null);
+  let dragOverIndex: number | null = $state(null);
+  let dragBefore: boolean = $state(true); // 插入到目标项前还是后
 
-  function scrollToIndex(i: number) {
-    itemEls[i]?.scrollIntoView({ block: "nearest" });
+  function onDragStart(e: DragEvent, i: number) {
+    if (!draggable) {
+      e.preventDefault();
+      return;
+    }
+    dragFromIndex = i;
+    e.dataTransfer?.setData("text/plain", String(i));
+    e.dataTransfer!.effectAllowed = "move";
   }
 
-  // 挂载时把滚动函数上报
-  $effect(() => {
-    onmounted(scrollToIndex);
-  });
+  function onDragOver(e: DragEvent, i: number) {
+    if (!draggable || dragFromIndex === null) return;
+    e.preventDefault(); // 允许 drop
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+
+    // 根据鼠标在项的上半还是下半，决定插入到前还是后
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const isBefore = e.clientY < rect.top + rect.height / 2;
+    dragOverIndex = i;
+    dragBefore = isBefore;
+  }
+
+  function onDrop(e: DragEvent, i: number) {
+    if (!draggable || dragFromIndex === null) return;
+    e.preventDefault();
+    let to = dragBefore ? i : i + 1;
+    // 拖到自身位置无效
+    if (to === dragFromIndex || to === dragFromIndex + 1) {
+      resetDrag();
+      return;
+    }
+    // 从下方往上拖时，目标索引要 -1（因为源项被移除后整体前移）
+    if (to > dragFromIndex) to -= 1;
+    onreorder(dragFromIndex, to);
+    resetDrag();
+  }
+
+  function onDragEnd() {
+    resetDrag();
+  }
+
+  function resetDrag() {
+    dragFromIndex = null;
+    dragOverIndex = null;
+  }
+
+  // 判断某项是否显示上指示线
+  function showLineBefore(i: number): boolean {
+    return (
+      dragFromIndex !== null &&
+      dragOverIndex === i &&
+      dragBefore &&
+      i !== dragFromIndex
+    );
+  }
+  function showLineAfter(i: number): boolean {
+    return (
+      dragFromIndex !== null &&
+      dragOverIndex === i &&
+      !dragBefore &&
+      i !== dragFromIndex
+    );
+  }
 </script>
 
 <ul class="list" role="listbox">
   {#each prompts as p, i (p.path)}
     <li
-      bind:this={itemEls[i]}
       role="option"
       tabindex="-1"
       aria-selected={p.path === selectedPath}
       class="item"
       class:active={p.path === selectedPath}
-      class:pinned={p.meta.pinned}
+      class:dragging={dragFromIndex === i}
+      class:line-before={showLineBefore(i)}
+      class:line-after={showLineAfter(i)}
+      draggable={draggable}
       onclick={() => onselect(p.path)}
       onkeydown={(e) => {
         if (e.key === " " || e.key === "Enter") {
@@ -51,10 +112,14 @@
         e.preventDefault();
         oncontextmenu(p, e.clientX, e.clientY);
       }}
+      ondragstart={(e) => onDragStart(e, i)}
+      ondragover={(e) => onDragOver(e, i)}
+      ondrop={(e) => onDrop(e, i)}
+      ondragend={onDragEnd}
     >
       <div class="main">
         <div class="title-row">
-          {#if p.meta.pinned}<span class="pin">★</span>{/if}
+          <span class="drag-handle" title="拖拽排序">⠿</span>
           <span class="title">{p.title}</span>
         </div>
         <div class="sub">
@@ -97,6 +162,7 @@
     border-radius: 6px;
     cursor: pointer;
     transition: background 0.1s;
+    position: relative;
   }
   .item:hover {
     background: var(--bg-hover);
@@ -104,11 +170,44 @@
   .item:hover .more-btn {
     opacity: 1;
   }
+  .item:hover .drag-handle {
+    opacity: 0.4;
+  }
   .item.active {
     background: var(--bg-active);
   }
   .item.active .more-btn {
     opacity: 0.7;
+  }
+  .item.active .drag-handle {
+    opacity: 0.4;
+  }
+
+  /* 拖拽中：源项半透明 */
+  .item.dragging {
+    opacity: 0.4;
+  }
+
+  /* 插入指示线：在项的上/下边显示蓝色横线 */
+  .item.line-before::before {
+    content: "";
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    top: -2px;
+    height: 2px;
+    background: #4a7cf7;
+    border-radius: 1px;
+  }
+  .item.line-after::after {
+    content: "";
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    bottom: -2px;
+    height: 2px;
+    background: #4a7cf7;
+    border-radius: 1px;
   }
 
   .main {
@@ -120,9 +219,16 @@
     align-items: center;
     gap: 5px;
   }
-  .pin {
-    font-size: 10px;
-    color: var(--fg);
+  .drag-handle {
+    font-size: 13px;
+    color: var(--muted);
+    opacity: 0; /* 默认隐藏，hover 时显示 */
+    cursor: grab;
+    user-select: none;
+    line-height: 1;
+  }
+  .drag-handle:active {
+    cursor: grabbing;
   }
   .title {
     font-size: 13.5px;
@@ -136,6 +242,7 @@
     display: flex;
     gap: 8px;
     margin-top: 2px;
+    margin-left: 17px; /* 对齐标题（拖拽手柄宽度） */
     font-size: 11px;
     color: var(--muted);
     overflow: hidden;

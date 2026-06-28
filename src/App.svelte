@@ -13,6 +13,7 @@
     readPrompt,
     renamePrompt,
     renameCategory,
+    reorderPrompts,
     revealInFinder,
     savePrompt,
     scanPrompts,
@@ -37,7 +38,6 @@
   let editingBody = $state("");
   let editingTitle = $state("");
   let editingCategory = $state("");
-  let editingPinned = $state(false);
   let editingCopyMode = $state<"markdown" | "plain">("markdown");
 
   let loading = $state(true);
@@ -149,7 +149,6 @@
   function applyMetaToEditFields(meta: PromptMeta) {
     editingTitle = meta.title;
     editingCategory = selectedPrompt?.category ?? "未分类";
-    editingPinned = meta.pinned;
     editingCopyMode = (meta.copy_mode === "plain" ? "plain" : "markdown");
   }
 
@@ -191,7 +190,6 @@
       await savePrompt(selectedPrompt.path, {
         title: editingTitle.trim() || "未命名",
         copy_mode: editingCopyMode,
-        pinned: editingPinned,
         body: editingBody,
       });
       await refresh();
@@ -218,7 +216,6 @@
       // 进入编辑，字段初始化
       editingTitle = "新提示词";
       editingCategory = cat;
-      editingPinned = false;
       editingCopyMode = "markdown";
       editingBody = "";
       editorMode = "edit";
@@ -269,19 +266,29 @@
     }
   }
 
-  async function onCtxTogglePin() {
-    if (!contextMenu.prompt) return;
-    const p = contextMenu.prompt;
+  // 拖拽排序：本地重排 + 持久化 + 推送云端
+  async function doReorder(from: number, to: number) {
+    if (from === to) return;
+    // 只在非搜索、非"全部"视图下允许拖拽（搜索结果是过滤后的，"全部"是跨分类的）
+    if (query.trim() || selectedCategory === "__all__") return;
+
+    const reordered = [...visiblePrompts];
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(to, 0, moved);
+    allPrompts = [...allPrompts]; // 触发响应式
+
+    // 重建当前分类的 prompts 顺序（用 visiblePrompts 的新顺序覆盖 allPrompts 里该分类的部分）
+    const categoryName = selectedCategory;
+    const newPathOrder = reordered.map((p) => p.path);
+    // 同步更新 allPrompts 里该分类项的顺序
+    const others = allPrompts.filter((p) => p.category !== categoryName);
+    allPrompts = [...others, ...reordered];
+
     try {
-      await savePrompt(p.path, {
-        title: p.meta.title,
-        copy_mode: (p.meta.copy_mode === "plain" ? "plain" : "markdown"),
-        pinned: !p.meta.pinned,
-        body: editingBody,
-      });
-      await refresh();
+      await reorderPrompts(categoryName, newPathOrder);
     } catch (e) {
       error = String(e);
+      await refresh(); // 失败则回滚
     }
   }
 
@@ -490,12 +497,14 @@
         prompts={visiblePrompts}
         {selectedPath}
         {selectedIndex}
+        draggable={!query.trim() && selectedCategory !== "__all__"}
         onmounted={(fn) => (scrollToIndexFn = fn)}
         onselect={(path) => {
           selectedPath = path;
           selectedIndex = visiblePrompts.findIndex((p) => p.path === path);
         }}
         oncontextmenu={openContextMenu}
+        onreorder={doReorder}
       />
 
       <Editor
@@ -504,7 +513,6 @@
         bind:body={editingBody}
         bind:title={editingTitle}
         bind:category={editingCategory}
-        bind:pinned={editingPinned}
         bind:copyMode={editingCopyMode}
         {categories}
         oncopy={(m) => doCopy(m)}
@@ -542,7 +550,6 @@
       {categories}
       onrename={onCtxRename}
       onmove={onCtxMove}
-      ontogglepin={onCtxTogglePin}
       ondelete={onCtxDelete}
       onclose={() => (contextMenu.prompt = null)}
     />

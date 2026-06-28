@@ -44,13 +44,8 @@ export function filterPrompts(
 ): Prompt[] {
   const trimmed = query.trim();
   if (!trimmed) {
-    // 无查询：置顶优先，再按更新时间倒序
-    return [...prompts].sort((a, b) => {
-      if (!!a.meta.pinned !== !!b.meta.pinned) {
-        return a.meta.pinned ? -1 : 1;
-      }
-      return b.meta.updated.localeCompare(a.meta.updated);
-    });
+    // 无查询：保持后端返回的顺序（已按 category → order → updated 排好）
+    return [...prompts];
   }
 
   // 多关键词 AND

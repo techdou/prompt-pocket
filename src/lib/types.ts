@@ -4,8 +4,6 @@ export interface PromptMeta {
   title: string;
   /** 复制时是否先转纯文本：markdown 渲染成纯文本 / 原样 */
   copy_mode: "markdown" | "plain";
-  /** 是否置顶 */
-  pinned?: boolean;
   /** 创建时间 ISO 字符串 */
   created: string;
   /** 更新时间 ISO 字符串 */
@@ -25,6 +23,8 @@ export interface Prompt {
   abs_path: string;
   /** frontmatter 元数据 */
   meta: PromptMeta;
+  /** 在分类内的排序权重（来自 .order.json），undefined 表示未定义 */
+  order?: number;
 }
 
 /** 扫描结果：prompt 列表 + 分类汇总 */
@@ -65,6 +65,5 @@ export interface PromptContent {
 export interface SaveRequest {
   title: string;
   copy_mode: "markdown" | "plain";
-  pinned: boolean;
   body: string;
 }
