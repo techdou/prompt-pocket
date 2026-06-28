@@ -118,6 +118,7 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
         downloaded,
         skipped,
         deleted,
+        uploaded: 0,
     })
 }
 
@@ -126,70 +127,68 @@ pub struct SyncReport {
     pub downloaded: u32,
     pub skipped: u32,
     pub deleted: u32,
+    pub uploaded: u32,
 }
 
-/// 推送单个文件到远程（保存/新建后调用）
-pub async fn push_file(cfg: &CloudConfig, local_path: &Path, local_dir: &Path) -> Result<(), String> {
+/// 全量上传：把本地所有文件推送到远程（只增不删，不删除云端多余文件）
+/// 用于"上传到坚果云（覆盖）"按钮
+pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
     let root = sanitize_remote_path(&cfg.remote_root);
-    let rel = local_path
-        .strip_prefix(local_dir)
-        .map_err(|e| e.to_string())?;
-    let rel_unix = rel.to_string_lossy().replace('\\', "/");
 
-    // 确保远程目录存在（逐级 mkcol）
-    ensure_remote_dirs(&client, &root, &rel_unix).await?;
+    // 确保远程根目录存在
+    let _ = client.mkcol(&format!("/{root}")).await;
 
-    let content = std::fs::read(local_path).map_err(|e| e.to_string())?;
-    client
-        .put(&format!("/{root}/{rel_unix}"), content)
-        .await
-        .map_err(|e| format!("推送失败: {e}"))?;
-    Ok(())
+    let mut uploaded = 0u32;
+
+    // 遍历本地所有 .md 文件 + .order.json
+    for entry in walkdir::WalkDir::new(local_dir)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str());
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        // 只推 .md 文件和 .order.json，跳过隐藏/临时文件
+        let is_md = ext == Some("md");
+        let is_order = name == ".order.json";
+        if !is_md && !is_order {
+            continue;
+        }
+        if name.starts_with('~') {
+            continue;
+        }
+
+        let rel = path.strip_prefix(local_dir).map_err(|e| e.to_string())?;
+        let rel_unix = rel.to_string_lossy().replace('\\', "/");
+
+        // 确保远程目录存在
+        ensure_remote_dirs(&client, &root, &rel_unix).await?;
+
+        let content = std::fs::read(path).map_err(|e| e.to_string())?;
+        match client
+            .put(&format!("/{root}/{rel_unix}"), content)
+            .await
+        {
+            Ok(()) => uploaded += 1,
+            Err(e) => eprintln!("上传失败 {rel_unix}: {e}"),
+        }
+    }
+
+    Ok(SyncReport {
+        uploaded,
+        ..Default::default()
+    })
 }
 
-/// 删除远程文件（本地删除后调用）
-pub async fn delete_remote(cfg: &CloudConfig, rel_unix: &str) -> Result<(), String> {
-    let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
-    let root = sanitize_remote_path(&cfg.remote_root);
-    client
-        .delete(&format!("/{root}/{rel_unix}"))
-        .await
-        .map_err(|e| format!("远程删除失败: {e}"))?;
-    Ok(())
-}
-
-/// 远程移动/重命名文件
-pub async fn move_remote(
-    cfg: &CloudConfig,
-    from_rel_unix: &str,
-    to_rel_unix: &str,
-) -> Result<(), String> {
-    let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
-    let root = sanitize_remote_path(&cfg.remote_root);
-    // 确保目标目录存在
-    ensure_remote_dirs(&client, &root, to_rel_unix).await?;
-    client
-        .mv(
-            &format!("/{root}/{from_rel_unix}"),
-            &format!("/{root}/{to_rel_unix}"),
-        )
-        .await
-        .map_err(|e| format!("远程移动失败: {e}"))?;
-    Ok(())
-}
-
-/// 远程新建文件夹（分类）
-pub async fn create_remote_dir(cfg: &CloudConfig, dir_name: &str) -> Result<(), String> {
-    let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
-    let root = sanitize_remote_path(&cfg.remote_root);
-    let safe = sanitize_remote_path(dir_name);
-    client
-        .mkcol(&format!("/{root}/{safe}"))
-        .await
-        .map_err(|e| format!("远程建目录失败: {e}"))?;
-    Ok(())
-}
 
 // ────────────────────────────────────────────────
 // 辅助函数

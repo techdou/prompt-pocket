@@ -2,12 +2,13 @@
   import { fade, scale } from "svelte/transition";
   import type { CloudConfigView, SyncStatus } from "./types";
   import {
+    downloadAll,
     getCloudConfig,
     getSyncStatus,
     openUrl,
     saveCloudConfig,
-    syncNow,
     testCloudConnection,
+    uploadAll,
   } from "./api";
 
   let {
@@ -24,10 +25,10 @@
   let username = $state("");
   let password = $state("");
   let remoteRoot = $state("PromptPocket");
-  let enabled = $state(true);
 
   let testing = $state(false);
   let saving = $state(false);
+  let transferring = $state<"upload" | "download" | null>(null);
   let message = $state<{ type: "ok" | "err"; text: string } | null>(null);
 
   // 坚果云帮助页：如何获取应用密码
@@ -47,7 +48,6 @@
       [config, status] = await Promise.all([getCloudConfig(), getSyncStatus()]);
       username = config.username;
       remoteRoot = config.remoteRoot || "PromptPocket";
-      enabled = config.enabled;
       // 密码不回显，仅清空让用户在需要时重填
       password = "";
     } catch (e) {
@@ -96,17 +96,15 @@
     message = null;
     try {
       // 若没填新密码，传空字符串，后端识别"空密码"为保留旧密码
-      // 但为简单起见，要求用户每次都填密码（除非只想改 enabled）
+      // 若没填新密码，传 __KEEP__ 占位符保留旧密码
       const finalPwd = pwd || (config?.hasPassword ? "__KEEP__" : "");
       await saveCloudConfig(
         username.trim(),
         finalPwd,
         remoteRoot.trim() || "PromptPocket",
-        enabled,
       );
-      message = { type: "ok", text: "✓ 已保存并触发首次同步" };
+      message = { type: "ok", text: "✓ 配置已保存" };
       await load();
-      onsynced();
     } catch (e) {
       message = { type: "err", text: String(e) };
     } finally {
@@ -114,15 +112,35 @@
     }
   }
 
-  async function doSyncNow() {
+  // 上传到坚果云：本地覆盖云端（只增不删云端）
+  async function doUpload() {
+    transferring = "upload";
     message = null;
     try {
-      await syncNow();
-      message = { type: "ok", text: "同步已触发，稍候查看状态" };
-      setTimeout(refreshStatus, 2000);
+      const result = await uploadAll();
+      message = { type: "ok", text: "↑ " + result };
+      await refreshStatus();
       onsynced();
     } catch (e) {
       message = { type: "err", text: String(e) };
+    } finally {
+      transferring = null;
+    }
+  }
+
+  // 下载到本地：云端覆盖本地
+  async function doDownload() {
+    transferring = "download";
+    message = null;
+    try {
+      const result = await downloadAll();
+      message = { type: "ok", text: "↓ " + result };
+      await refreshStatus();
+      onsynced();
+    } catch (e) {
+      message = { type: "err", text: String(e) };
+    } finally {
+      transferring = null;
     }
   }
 
@@ -219,12 +237,31 @@
           <p class="hint">提示词会存在坚果云的这个文件夹下。</p>
         </section>
 
-        <section class="field row-field">
-          <label class="checkbox-wrap">
-            <input type="checkbox" bind:checked={enabled} />
-            <span>启用自动同步（启动时拉取，保存时推送）</span>
-          </label>
-        </section>
+        <!-- 手动同步操作区 -->
+        {#if status?.configured}
+          <section class="sync-actions">
+            <span class="field-label">手动同步</span>
+            <div class="sync-btns">
+              <button
+                class="sync-btn upload"
+                onclick={doUpload}
+                disabled={transferring !== null}
+              >
+                {#if transferring === "upload"}上传中…{:else}↑ 上传到坚果云{/if}
+              </button>
+              <button
+                class="sync-btn download"
+                onclick={doDownload}
+                disabled={transferring !== null}
+              >
+                {#if transferring === "download"}下载中…{:else}↓ 下载到本地{/if}
+              </button>
+            </div>
+            <p class="hint">
+              上传：本地文件推送到云端（不删除云端已有）。下载：云端覆盖本地（含清理）。
+            </p>
+          </section>
+        {/if}
 
         {#if message}
           <div class="msg" class:ok={message.type === "ok"} class:err={message.type === "err"}>
@@ -234,16 +271,13 @@
       </div>
 
       <footer class="modal-foot">
-        <button class="ghost" onclick={doSyncNow} disabled={!status?.configured}>
-          立即同步
-        </button>
         <div class="spacer"></div>
-        <button class="ghost" onclick={close}>取消</button>
-        <button class="ghost" onclick={doTest} disabled={testing || saving}>
+        <button class="ghost" onclick={close}>关闭</button>
+        <button class="ghost" onclick={doTest} disabled={testing || saving || transferring !== null}>
           {testing ? "测试中…" : "测试连接"}
         </button>
         <button class="primary" onclick={doSave} disabled={saving || testing}>
-          {saving ? "保存中…" : "保存并同步"}
+          {saving ? "保存中…" : "保存配置"}
         </button>
       </footer>
     </div>
@@ -413,18 +447,44 @@
     padding: 0;
     font-family: inherit;
   }
-  .checkbox-wrap {
+  /* 手动同步操作区 */
+  .sync-actions {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    cursor: pointer;
-    user-select: none;
+    flex-direction: column;
+    gap: 6px;
   }
-  .checkbox-wrap input {
-    width: 15px;
-    height: 15px;
+  .sync-btns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .sync-btn {
+    padding: 9px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-elevated);
+    color: var(--fg);
+    font-size: 13px;
+    font-weight: 500;
     cursor: pointer;
+    transition: all 0.12s;
+  }
+  .sync-btn:hover:not(:disabled) {
+    border-color: var(--fg);
+  }
+  .sync-btn.upload:hover:not(:disabled) {
+    background: #4a7cf7;
+    color: #fff;
+    border-color: #4a7cf7;
+  }
+  .sync-btn.download:hover:not(:disabled) {
+    background: #22a06b;
+    color: #fff;
+    border-color: #22a06b;
+  }
+  .sync-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .msg {

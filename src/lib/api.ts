@@ -94,13 +94,18 @@ export async function saveCloudConfig(
   username: string,
   password: string,
   remoteRoot: string,
-  enabled: boolean,
 ): Promise<void> {
-  return invoke<void>("save_cloud_config", { username, password, remoteRoot, enabled });
+  return invoke<void>("save_cloud_config", { username, password, remoteRoot });
 }
 
-export async function syncNow(): Promise<void> {
-  return invoke<void>("sync_now");
+/** 上传到坚果云：本地所有文件推送到云端（只增不删） */
+export async function uploadAll(): Promise<string> {
+  return invoke<string>("upload_all");
+}
+
+/** 下载到本地：从坚果云拉取并覆盖本地 */
+export async function downloadAll(): Promise<string> {
+  return invoke<string>("download_all");
 }
 
 export async function openUrl(url: string): Promise<void> {

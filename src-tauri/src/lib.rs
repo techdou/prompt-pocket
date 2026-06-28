@@ -20,7 +20,7 @@ use crate::store::{
     reorder_category as reorder_category_disk, save_prompt as save_prompt_disk,
     scan_prompts as scan_disk, Prompt, PromptContent, SaveRequest, ScanResult,
 };
-use crate::sync::{CloudConfig, SyncStatus};
+use crate::sync::{push_all_to_remote, CloudConfig, SyncStatus};
 
 // ────────────────────────────────────────────────────────────
 // 配置持久化：config.json 存在 %APPDATA%/prompt-pocket/ 下
@@ -121,85 +121,6 @@ fn load_cloud_config(config_file: &std::path::Path) -> CloudConfig {
 // 同步辅助：后台 spawn 异步任务（不阻塞 UI）
 // ────────────────────────────────────────────────────────────
 
-/// 在后台拉取远程（启动时用）
-fn spawn_pull(app: &tauri::AppHandle) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let cfg = state.cloud_config();
-        if !cfg.is_configured() {
-            return;
-        }
-        *state.syncing.lock().unwrap() = true;
-        match sync::pull_from_remote(&cfg, &state.local_dir).await {
-            Ok(report) => {
-                *state.last_sync.lock().unwrap() = Some(format!(
-                    "同步完成：下载 {}，跳过 {}，清理 {}",
-                    report.downloaded, report.skipped, report.deleted
-                ));
-                *state.last_error.lock().unwrap() = None;
-            }
-            Err(e) => {
-                *state.last_error.lock().unwrap() = Some(e);
-            }
-        }
-        *state.syncing.lock().unwrap() = false;
-        // 通知前端刷新
-        let _ = app.emit("sync-finished", ());
-    });
-}
-
-/// 后台推送单个文件（保存/新建后用）
-fn spawn_push(app: &tauri::AppHandle, local_path: PathBuf) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let cfg = state.cloud_config();
-        if !cfg.is_configured() {
-            return;
-        }
-        match sync::push_file(&cfg, &local_path, &state.local_dir).await {
-            Ok(()) => {
-                *state.last_sync.lock().unwrap() =
-                    Some(format!("已同步：{}", local_path.file_name().unwrap_or_default().to_string_lossy()));
-            }
-            Err(e) => {
-                *state.last_error.lock().unwrap() = Some(e);
-            }
-        }
-    });
-}
-
-/// 后台远程删除
-fn spawn_remote_delete(app: &tauri::AppHandle, rel_unix: String) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let cfg = state.cloud_config();
-        if !cfg.is_configured() {
-            return;
-        }
-        if let Err(e) = sync::delete_remote(&cfg, &rel_unix).await {
-            *state.last_error.lock().unwrap() = Some(e);
-        }
-    });
-}
-
-/// 后台远程移动
-fn spawn_remote_move(app: &tauri::AppHandle, from: String, to: String) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let state = app.state::<AppState>();
-        let cfg = state.cloud_config();
-        if !cfg.is_configured() {
-            return;
-        }
-        if let Err(e) = sync::move_remote(&cfg, &from, &to).await {
-            *state.last_error.lock().unwrap() = Some(e);
-        }
-    });
-}
-
 // ────────────────────────────────────────────────────────────
 // Tauri 命令
 // ────────────────────────────────────────────────────────────
@@ -249,7 +170,6 @@ fn save_prompt(
     path: String,
     req: SaveRequest,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<Prompt, String> {
     let abs = resolve_abs(&state.local_dir, &path);
     save_prompt_disk(&abs, &req).map_err(|e| {
@@ -259,15 +179,12 @@ fn save_prompt(
             e.to_string()
         }
     })?;
-    // 先同步返回，再后台推送
     let result = scan_disk(&state.local_dir)
         .map_err(|e| e.to_string())?
         .prompts
         .into_iter()
         .find(|p| p.abs_path == abs.to_string_lossy().to_string())
         .ok_or_else(|| "保存后未能重新定位该提示词".to_string())?;
-    // 后台推送单个文件
-    spawn_push(&app, abs);
     Ok(result)
 }
 
@@ -277,7 +194,6 @@ fn rename_prompt(
     new_title: String,
     new_category: String,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<Prompt, String> {
     let old_abs = resolve_abs(&state.local_dir, &path);
     let new_abs = rename_prompt_disk(&state.local_dir, &old_abs, &new_title, &new_category)
@@ -288,19 +204,6 @@ fn rename_prompt(
                 e.to_string()
             }
         })?;
-
-    // 远程移动
-    if old_abs != new_abs {
-        let from_rel = old_abs
-            .strip_prefix(&state.local_dir)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        let to_rel = new_abs
-            .strip_prefix(&state.local_dir)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        spawn_remote_move(&app, from_rel, to_rel);
-    }
 
     scan_disk(&state.local_dir)
         .map_err(|e| e.to_string())?
@@ -315,23 +218,8 @@ fn rename_category(
     old_name: String,
     new_name: String,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<(), String> {
     rename_category_disk(&state.local_dir, &old_name, &new_name).map_err(|e| e.to_string())?;
-
-    // 远程同步：推送新目录下的所有文件（本地已重命名，远程靠全量推送覆盖）
-    let cfg = state.cloud_config();
-    if cfg.is_configured() {
-        let new_dir = state.local_dir.join(sanitize_filename::sanitize(&new_name));
-        if let Ok(entries) = std::fs::read_dir(&new_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                    spawn_push(&app, path);
-                }
-            }
-        }
-    }
     Ok(())
 }
 
@@ -339,20 +227,8 @@ fn rename_category(
 fn create_category(
     name: String,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<(), String> {
     create_category_disk(&state.local_dir, &name).map_err(|e| e.to_string())?;
-    // 远程建目录
-    let cfg = state.cloud_config();
-    if cfg.is_configured() {
-        let app = app.clone();
-        let n = name.clone();
-        tauri::async_runtime::spawn(async move {
-            let st = app.state::<AppState>();
-            let c = st.cloud_config();
-            let _ = sync::create_remote_dir(&c, &n).await;
-        });
-    }
     Ok(())
 }
 
@@ -361,12 +237,10 @@ fn create_prompt(
     category: String,
     title: String,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<Prompt, String> {
     let abs = create_prompt_disk(&state.local_dir, &category, &title).map_err(|e| e.to_string())?;
     let rel = abs.strip_prefix(&state.local_dir).unwrap_or(&abs);
     let rel_unix = store::path_to_unix(rel);
-    spawn_push(&app, abs);
     scan_disk(&state.local_dir)
         .map_err(|e| e.to_string())?
         .prompts
@@ -379,29 +253,20 @@ fn create_prompt(
 fn delete_prompt(
     path: String,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let abs = resolve_abs(&state.local_dir, &path);
     delete_prompt_disk(&abs).map_err(|e| e.to_string())?;
-    spawn_remote_delete(&app, path.replace('\\', "/"));
     Ok(())
 }
 
-/// 拖拽排序：重写某分类的顺序到 .order.json，并推送云端
+/// 拖拽排序：重写某分类的顺序到 .order.json（纯本地，手动上传时才同步）
 #[tauri::command]
 fn reorder(
     category: String,
     paths: Vec<String>,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<(), String> {
     reorder_category_disk(&state.local_dir, &category, &paths).map_err(|e| e.to_string())?;
-    // 推送 .order.json 到云端
-    let cfg = state.cloud_config();
-    if cfg.is_configured() {
-        let order_path = state.local_dir.join(store::ORDER_FILE);
-        spawn_push(&app, order_path);
-    }
     Ok(())
 }
 
@@ -486,9 +351,7 @@ fn save_cloud_config(
     username: String,
     password: String,
     remote_root: String,
-    enabled: bool,
     state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
 ) -> Result<(), String> {
     // __KEEP__ 占位符表示保留旧密码（用户未重新填写）
     let final_password = if password == "__KEEP__" {
@@ -501,18 +364,65 @@ fn save_cloud_config(
         username,
         password: final_password,
         remote_root,
-        enabled,
+        enabled: true,
     };
     state.set_cloud_config(cfg)?;
-    // 保存后立即拉取一次
-    spawn_pull(&app);
     Ok(())
 }
 
+/// 上传到坚果云：本地所有文件推送到云端（只增不删）
 #[tauri::command]
-fn sync_now(app: tauri::AppHandle) -> Result<(), String> {
-    spawn_pull(&app);
-    Ok(())
+async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let cfg = state.cloud_config();
+    if !cfg.is_configured() {
+        return Err("未配置坚果云同步".to_string());
+    }
+    *state.syncing.lock().unwrap() = true;
+    let result = push_all_to_remote(&cfg, &state.local_dir).await;
+    *state.syncing.lock().unwrap() = false;
+    match result {
+        Ok(report) => {
+            let msg = format!("上传完成：共 {} 个文件", report.uploaded);
+            *state.last_sync.lock().unwrap() = Some(msg.clone());
+            *state.last_error.lock().unwrap() = None;
+            let _ = app.emit("sync-finished", ());
+            Ok(msg)
+        }
+        Err(e) => {
+            *state.last_error.lock().unwrap() = Some(e.clone());
+            Err(e)
+        }
+    }
+}
+
+/// 下载到本地：从坚果云拉取并覆盖本地（清理本地多余文件）
+#[tauri::command]
+async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let cfg = state.cloud_config();
+    if !cfg.is_configured() {
+        return Err("未配置坚果云同步".to_string());
+    }
+    *state.syncing.lock().unwrap() = true;
+    let result = sync::pull_from_remote(&cfg, &state.local_dir).await;
+    *state.syncing.lock().unwrap() = false;
+    match result {
+        Ok(report) => {
+            let msg = format!(
+                "下载完成：更新 {}，跳过 {}，清理 {}",
+                report.downloaded, report.skipped, report.deleted
+            );
+            *state.last_sync.lock().unwrap() = Some(msg.clone());
+            *state.last_error.lock().unwrap() = None;
+            let _ = app.emit("sync-finished", ());
+            Ok(msg)
+        }
+        Err(e) => {
+            *state.last_error.lock().unwrap() = Some(e.clone());
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -694,10 +604,7 @@ pub fn run() {
                 syncing: Mutex::new(false),
             });
 
-            // 启动时若已配置则异步拉取
-            if cloud.is_configured() {
-                spawn_pull(app.handle());
-            }
+            // v1.0.1：同步改为纯手动，启动时不再自动拉取
 
             // 注册全局快捷键
             let shortcut: Shortcut = hotkey.parse().expect("无效的全局快捷键");
@@ -755,7 +662,8 @@ pub fn run() {
             get_cloud_config,
             test_cloud_connection,
             save_cloud_config,
-            sync_now,
+            upload_all,
+            download_all,
             open_url,
         ])
         .run(tauri::generate_context!())
