@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { Prompt } from "./types";
+  import { dndzone } from "svelte-dnd-action";
+  import type { DndEvent } from "svelte-dnd-action";
 
   let {
     prompts,
@@ -19,114 +21,78 @@
     draggable?: boolean;
   } = $props();
 
-  // 拖拽状态：用一个简单的外部变量（不依赖响应式，避免渲染时机问题）
-  let dragFromIndex = -1;
-  let dragOverIndex = $state(-1);
-  let dragBefore = $state(true);
+  // dnd-action 需要带 id 的项
+  type Item = { id: string; data: Prompt };
+  let items = $state<Item[]>([]);
+  $effect(() => {
+    items = prompts.map((p) => ({ id: p.path, data: p }));
+  });
 
-  function onDragStart(e: DragEvent, i: number) {
-    if (!draggable) {
-      e.preventDefault();
-      return;
+  // dndzone 配置
+  const flipDurationMs = 200;
+
+  function onConsidered(e: CustomEvent<DndEvent>) {
+    const newItems = e.detail.items as Item[];
+    items = newItems;
+  }
+
+  function onDropped(e: CustomEvent<DndEvent>) {
+    const newItems = e.detail.items as Item[];
+    // 找到被移动项的原始位置和新位置
+    const oldPaths = prompts.map((p) => p.path);
+    const newPaths = newItems.map((i) => i.id);
+    // 找第一个不同的位置
+    let from = -1;
+    let to = -1;
+    for (let i = 0; i < oldPaths.length; i++) {
+      if (oldPaths[i] !== newPaths[i]) {
+        from = i;
+        break;
+      }
     }
-    dragFromIndex = i;
-    // 必须设置 dataTransfer，否则部分浏览器不触发后续事件
-    if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/plain", String(i));
+    if (from < 0) return;
+    const movedId = oldPaths[from];
+    to = newPaths.indexOf(movedId);
+    if (to >= 0 && to !== from) {
+      items = newItems;
+      onreorder(from, to);
     }
-  }
-
-  // 关键：dragover 必须无条件 preventDefault，否则 drop 永远不触发
-  function onDragOver(e: DragEvent, i: number) {
-    if (!draggable) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    dragOverIndex = i;
-    dragBefore = e.clientY < rect.top + rect.height / 2;
-  }
-
-  function onDrop(e: DragEvent, i: number) {
-    e.preventDefault();
-    if (!draggable || dragFromIndex < 0) {
-      resetDrag();
-      return;
-    }
-    let to = dragBefore ? i : i + 1;
-    if (to === dragFromIndex || to === dragFromIndex + 1) {
-      resetDrag();
-      return;
-    }
-    if (to > dragFromIndex) to -= 1;
-    onreorder(dragFromIndex, to);
-    resetDrag();
-  }
-
-  function onDragEnd() {
-    resetDrag();
-  }
-
-  // 容器级 dragover：拖到空白处也允许 preventDefault
-  function onListDragOver(e: DragEvent) {
-    if (!draggable) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-  }
-
-  function resetDrag() {
-    dragFromIndex = -1;
-    dragOverIndex = -1;
-  }
-
-  function showLineBefore(i: number): boolean {
-    return draggable && dragFromIndex >= 0 && dragOverIndex === i && dragBefore && i !== dragFromIndex;
-  }
-  function showLineAfter(i: number): boolean {
-    return draggable && dragFromIndex >= 0 && dragOverIndex === i && !dragBefore && i !== dragFromIndex;
   }
 </script>
 
 <ul
   class="list"
   role="listbox"
-  ondragover={onListDragOver}
+  use:dndzone={{ items, flipDurationMs }}
+  onconsidered={onConsidered}
+  ondropped={onDropped}
 >
-  {#each prompts as p, i (p.path)}
+  {#each items as item, i (item.id)}
     <li
       role="option"
       tabindex="-1"
-      aria-selected={p.path === selectedPath}
+      aria-selected={item.id === selectedPath}
       class="item"
-      class:active={p.path === selectedPath}
-      class:dragging={dragFromIndex === i}
-      class:line-before={showLineBefore(i)}
-      class:line-after={showLineAfter(i)}
-      draggable={draggable}
-      onclick={() => onselect(p.path)}
+      class:active={item.id === selectedPath}
+      onclick={() => onselect(item.id)}
       onkeydown={(e) => {
         if (e.key === " " || e.key === "Enter") {
           e.preventDefault();
-          onselect(p.path);
+          onselect(item.id);
         }
       }}
       oncontextmenu={(e) => {
         e.preventDefault();
-        oncontextmenu(p, e.clientX, e.clientY);
+        oncontextmenu(item.data, e.clientX, e.clientY);
       }}
-      ondragstart={(e) => onDragStart(e, i)}
-      ondragover={(e) => onDragOver(e, i)}
-      ondrop={(e) => onDrop(e, i)}
-      ondragend={onDragEnd}
     >
       <div class="main">
         <div class="title-row">
           <span class="drag-handle" title="拖拽排序">⠿</span>
-          <span class="title">{p.title}</span>
+          <span class="title">{item.data.title}</span>
         </div>
         <div class="sub">
-          <span class="cat">{p.category}</span>
+          <span class="cat">{item.data.category}</span>
         </div>
       </div>
       <button
@@ -136,7 +102,7 @@
         onclick={(e) => {
           e.stopPropagation();
           const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-          oncontextmenu(p, rect.right, rect.bottom);
+          oncontextmenu(item.data, rect.right, rect.bottom);
         }}
       >
         ⋯
@@ -186,29 +152,9 @@
     opacity: 0.4;
   }
 
-  .item.dragging {
+  /* svelte-dnd-action 拖拽中的项 */
+  .item:global(.monaco-dragged) {
     opacity: 0.4;
-  }
-
-  .item.line-before::before {
-    content: "";
-    position: absolute;
-    left: 6px;
-    right: 6px;
-    top: -2px;
-    height: 2px;
-    background: #4a7cf7;
-    border-radius: 1px;
-  }
-  .item.line-after::after {
-    content: "";
-    position: absolute;
-    left: 6px;
-    right: 6px;
-    bottom: -2px;
-    height: 2px;
-    background: #4a7cf7;
-    border-radius: 1px;
   }
 
   .main {

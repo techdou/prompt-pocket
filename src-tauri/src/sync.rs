@@ -69,7 +69,8 @@ pub async fn test_connection(cfg: &CloudConfig) -> Result<(), String> {
 }
 
 /// 全量拉取：把远程的文件同步到本地缓存
-/// 策略：远程为准。远程有的下载，远程没有的本地删除。
+/// 策略：远程为准。远程有的下载，远程没有的本地 .md 备份到 .trash 后删除。
+/// 关键修复：排除 .trash 目录，避免无限循环；只处理真实 prompt 文件。
 pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
     let root = sanitize_remote_path(&cfg.remote_root);
@@ -90,15 +91,18 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
 
     for entity in entities {
         if let ListEntity::File(file) = entity {
-            // href 形如 /dav/PromptPocket/%E5%86%99%E4%BD%9C/a.md
-            // 提取出 PromptPocket 之后的相对路径
             let rel = match extract_rel_path(&file.href, &root) {
                 Some(r) => r,
                 None => continue,
             };
+            // 排除 .trash 路径下的文件（备份目录不参与同步）
+            if rel.starts_with(".trash/") || rel.contains("/.trash/") {
+                continue;
+            }
             remote_files.insert(rel.clone());
 
             let local_path = local_dir.join(&rel);
+            // 内容校对：用文件大小 + 存在性判断是否需要下载
             let need_download = match std::fs::metadata(&local_path) {
                 Ok(meta) => meta.len() as i64 != file.content_length,
                 Err(_) => true, // 本地不存在
@@ -106,7 +110,6 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
 
             if need_download {
                 if let Err(e) = download_file(&client, &root, &rel, &local_path).await {
-                    // 单个文件下载失败不中断整体，但记录错误供前端展示
                     errors.push(format!("{rel}: {e}"));
                     continue;
                 }
@@ -117,7 +120,7 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
         }
     }
 
-    // 清理本地多余文件（远程已删）
+    // 清理本地多余文件（远程已删）—— 排除 .trash
     let mut deleted = 0u32;
     clean_local_extra(local_dir, &remote_files, Path::new(""), &mut deleted)?;
 
@@ -140,7 +143,9 @@ pub struct SyncReport {
 }
 
 /// 全量上传：把本地所有文件推送到远程（只增不删，不删除云端多余文件）
-/// 用于"上传到坚果云（覆盖）"按钮
+/// 关键修复：
+/// 1. 排除 .trash 目录（备份文件不参与上传，避免无限上传）
+/// 2. 内容校对：先 PROPFIND 远程文件大小，相同则跳过，避免无限制重复上传
 pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
     let root = sanitize_remote_path(&cfg.remote_root);
@@ -148,13 +153,37 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
     // 确保远程根目录存在
     let _ = client.mkcol(&format!("/{root}")).await;
 
+    // 先列出远程所有文件及其大小，用于内容校对
+    let remote_sizes: std::collections::HashMap<String, i64> = match client
+        .list(&format!("/{root}/"), Depth::Infinity)
+        .await
+    {
+        Ok(entities) => entities
+            .into_iter()
+            .filter_map(|e| match e {
+                ListEntity::File(f) => {
+                    let rel = extract_rel_path(&f.href, &root)?;
+                    Some((rel, f.content_length))
+                }
+                _ => None,
+            })
+            .collect(),
+        Err(_) => std::collections::HashMap::new(), // 远程为空或出错则全量上传
+    };
+
     let mut uploaded = 0u32;
+    let mut skipped = 0u32;
     let mut errors: Vec<String> = Vec::new();
 
     // 遍历本地所有 .md 文件 + .order.json
     for entry in walkdir::WalkDir::new(local_dir)
         .min_depth(1)
         .into_iter()
+        .filter_entry(|e| {
+            // 关键：排除 .trash 目录及其内容
+            let name = e.file_name().to_string_lossy();
+            name != ".trash"
+        })
         .filter_map(|e| e.ok())
     {
         if !entry.file_type().is_file() {
@@ -167,7 +196,6 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
             .and_then(|n| n.to_str())
             .unwrap_or_default();
 
-        // 只推 .md 文件和 .order.json，跳过隐藏/临时文件
         let is_md = ext == Some("md");
         let is_order = name == ".order.json";
         if !is_md && !is_order {
@@ -180,21 +208,30 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
         let rel = path.strip_prefix(local_dir).map_err(|e| e.to_string())?;
         let rel_unix = rel.to_string_lossy().replace('\\', "/");
 
-        // 确保远程目录存在（失败不中断，记入 errors）
-        if let Err(e) = ensure_remote_dirs(&client, &root, &rel_unix).await {
-            errors.push(format!("{rel_unix}（建目录）: {e}"));
-            continue;
-        }
-
-        let content = match std::fs::read(path) {
+        // 内容校对：读取本地文件大小，与远程比对，相同则跳过
+        let local_content = match std::fs::read(path) {
             Ok(c) => c,
             Err(e) => {
                 errors.push(format!("{rel_unix}（读文件）: {e}"));
                 continue;
             }
         };
+        let local_size = local_content.len() as i64;
+        if let Some(&remote_size) = remote_sizes.get(&rel_unix) {
+            if remote_size == local_size {
+                skipped += 1;
+                continue; // 大小相同，跳过上传
+            }
+        }
+
+        // 确保远程目录存在
+        if let Err(e) = ensure_remote_dirs(&client, &root, &rel_unix).await {
+            errors.push(format!("{rel_unix}（建目录）: {e}"));
+            continue;
+        }
+
         match client
-            .put(&format!("/{root}/{rel_unix}"), content)
+            .put(&format!("/{root}/{rel_unix}"), local_content)
             .await
         {
             Ok(()) => uploaded += 1,
@@ -204,6 +241,7 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
 
     Ok(SyncReport {
         uploaded,
+        skipped,
         errors,
         ..Default::default()
     })
@@ -299,6 +337,9 @@ async fn download_file(client: &Client, root: &str, rel: &str, local_path: &Path
 }
 
 /// 清理本地缓存中"远程已不存在"的 .md 文件
+/// 关键修复：
+/// 1. 跳过 .trash 目录（不递归清理备份文件）
+/// 2. 跳过隐藏文件（以 . 开头）
 fn clean_local_extra(
     local_dir: &Path,
     remote_files: &HashSet<String>,
@@ -306,34 +347,35 @@ fn clean_local_extra(
     deleted: &mut u32,
 ) -> Result<(), String> {
     let scan_dir = if current_rel.as_os_str().is_empty() {
-        local_dir
+        local_dir.to_path_buf()
     } else {
-        &local_dir.join(current_rel)
+        local_dir.join(current_rel)
     };
 
-    let entries = match std::fs::read_dir(scan_dir) {
+    let entries = match std::fs::read_dir(&scan_dir) {
         Ok(e) => e,
         Err(_) => return Ok(()),
     };
 
     for entry in entries.flatten() {
         let path = entry.path();
-        let entry_name = entry.file_name();
-        let name = entry_name.to_string_lossy();
+        let name = entry.file_name().to_string_lossy().to_string();
+
+        // 跳过 .trash 和所有隐藏目录/文件（不参与清理）
+        if name.starts_with('.') {
+            continue;
+        }
 
         if path.is_dir() {
-            // 递归处理子目录
-            let sub_rel = current_rel.join(name.to_string());
+            let sub_rel = current_rel.join(&name);
             clean_local_extra(local_dir, remote_files, &sub_rel, deleted)?;
-            // 空目录也清理（远程没有这个分类了）
-            // 但保留非空目录的判断留给最后
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
             let rel_unix = path
                 .strip_prefix(local_dir)
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
             if !remote_files.contains(&rel_unix) {
-                // P1-7：删除前备份到 .trash/，避免下载覆盖时永久丢失本地数据
+                // 备份到 .trash/ 后删除（避免永久丢失）
                 let trash_dir = local_dir.join(".trash");
                 let _ = std::fs::create_dir_all(&trash_dir);
                 let backup_name = format!(
@@ -342,7 +384,6 @@ fn clean_local_extra(
                     now_iso_compact()
                 );
                 let backup_path = trash_dir.join(backup_name);
-                // 移动到回收站，失败则直接删除（保证远程为主）
                 if std::fs::rename(&path, &backup_path).is_err() {
                     let _ = std::fs::remove_file(&path);
                 }
@@ -404,5 +445,56 @@ mod tests {
             Some("写作/a.md".to_string())
         );
         assert_eq!(extract_rel_path("/dav/PromptPocket/", "PromptPocket"), None);
+    }
+
+    /// 验证 clean_local_extra 跳过 .trash 目录（不清理备份文件）
+    #[test]
+    fn clean_local_extra_skips_trash() {
+        let dir = std::env::temp_dir().join("pp_test_clean_trash");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // .trash 里放一个备份文件
+        let trash = dir.join(".trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(trash.join("backup.md"), "备份内容").unwrap();
+        // 真实分类里放一个文件
+        std::fs::create_dir_all(dir.join("写作")).unwrap();
+        std::fs::write(dir.join("写作").join("真实.md"), "内容").unwrap();
+
+        // remote_files 为空（远程没有任何文件），clean 应该只清理真实文件，不动 .trash
+        let mut deleted = 0u32;
+        let remote_files: HashSet<String> = HashSet::new();
+        clean_local_extra(&dir, &remote_files, std::path::Path::new(""), &mut deleted).unwrap();
+
+        // 真实文件被移到 .trash（删除计数 +1）
+        assert_eq!(deleted, 1, "应只删除 1 个真实文件");
+        // .trash 里的备份文件仍然存在
+        assert!(trash.join("backup.md").exists(), ".trash 备份不应被清理");
+        // 现在有 2 个文件在 .trash（原备份 + 移入的真实文件）
+        let trash_count = std::fs::read_dir(&trash).unwrap().count();
+        assert_eq!(trash_count, 2, ".trash 应有 2 个文件");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 验证 clean_local_extra 正确匹配远程文件（不误删）
+    #[test]
+    fn clean_local_extra_keeps_matched() {
+        let dir = std::env::temp_dir().join("pp_test_clean_keep");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("写作")).unwrap();
+        std::fs::write(dir.join("写作").join("保留.md"), "内容").unwrap();
+
+        let mut remote_files: HashSet<String> = HashSet::new();
+        remote_files.insert("写作/保留.md".to_string());
+
+        let mut deleted = 0u32;
+        clean_local_extra(&dir, &remote_files, std::path::Path::new(""), &mut deleted).unwrap();
+
+        assert_eq!(deleted, 0, "远程存在的文件不应被删除");
+        assert!(dir.join("写作").join("保留.md").exists(), "文件应保留");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
