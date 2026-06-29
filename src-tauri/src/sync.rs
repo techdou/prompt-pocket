@@ -121,8 +121,15 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
     }
 
     // 清理本地多余文件（远程已删）—— 排除 .trash
+    // 防御：如果 remote_files 为空（可能 PROPFIND 解析失败），不执行清理，
+    // 避免把本地真实文件全部误移到 .trash
     let mut deleted = 0u32;
-    clean_local_extra(local_dir, &remote_files, Path::new(""), &mut deleted)?;
+    if !remote_files.is_empty() {
+        clean_local_extra(local_dir, &remote_files, Path::new(""), &mut deleted)?;
+    } else {
+        // 远程列表为空：记录警告，让用户知道可能有连接/解析问题
+        errors.push("警告：未获取到远程文件列表，跳过本地清理（可能网络或解析问题）".to_string());
+    }
 
     Ok(SyncReport {
         downloaded,
@@ -143,9 +150,11 @@ pub struct SyncReport {
 }
 
 /// 全量上传：把本地所有文件推送到远程（只增不删，不删除云端多余文件）
-/// 关键修复：
-/// 1. 排除 .trash 目录（备份文件不参与上传，避免无限上传）
-/// 2. 内容校对：先 PROPFIND 远程文件大小，相同则跳过，避免无限制重复上传
+/// 内容校对（杜绝无限制重复上传）：
+///   上传前算本地内容哈希(FNV-1a)，与 .sync_meta.json 里记录的「上次上传哈希」比对：
+///   - 哈希相同 → 内容未变 → 跳过
+///   - 哈希不同 或 无记录 → 上传，上传成功后更新记录
+/// 这完全不依赖服务端 ETag 算法，100% 由客户端掌控，准确可靠。
 pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
     let root = sanitize_remote_path(&cfg.remote_root);
@@ -153,23 +162,8 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
     // 确保远程根目录存在
     let _ = client.mkcol(&format!("/{root}")).await;
 
-    // 先列出远程所有文件及其大小，用于内容校对
-    let remote_sizes: std::collections::HashMap<String, i64> = match client
-        .list(&format!("/{root}/"), Depth::Infinity)
-        .await
-    {
-        Ok(entities) => entities
-            .into_iter()
-            .filter_map(|e| match e {
-                ListEntity::File(f) => {
-                    let rel = extract_rel_path(&f.href, &root)?;
-                    Some((rel, f.content_length))
-                }
-                _ => None,
-            })
-            .collect(),
-        Err(_) => std::collections::HashMap::new(), // 远程为空或出错则全量上传
-    };
+    // 读取上次上传记录 { 路径: 哈希 }
+    let mut sync_meta: std::collections::HashMap<String, u64> = load_sync_meta(local_dir);
 
     let mut uploaded = 0u32;
     let mut skipped = 0u32;
@@ -180,9 +174,9 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
         .min_depth(1)
         .into_iter()
         .filter_entry(|e| {
-            // 关键：排除 .trash 目录及其内容
+            // 排除 .trash / .sync_meta.json 自身
             let name = e.file_name().to_string_lossy();
-            name != ".trash"
+            name != ".trash" && name != ".sync_meta.json"
         })
         .filter_map(|e| e.ok())
     {
@@ -208,7 +202,6 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
         let rel = path.strip_prefix(local_dir).map_err(|e| e.to_string())?;
         let rel_unix = rel.to_string_lossy().replace('\\', "/");
 
-        // 内容校对：读取本地文件大小，与远程比对，相同则跳过
         let local_content = match std::fs::read(path) {
             Ok(c) => c,
             Err(e) => {
@@ -216,11 +209,13 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
                 continue;
             }
         };
-        let local_size = local_content.len() as i64;
-        if let Some(&remote_size) = remote_sizes.get(&rel_unix) {
-            if remote_size == local_size {
+
+        // 内容校对：本地哈希 vs 上次上传记录的哈希
+        let local_hash = fnv1a_hash(&local_content);
+        if let Some(&last_hash) = sync_meta.get(&rel_unix) {
+            if last_hash == local_hash {
                 skipped += 1;
-                continue; // 大小相同，跳过上传
+                continue; // 内容未变，跳过
             }
         }
 
@@ -234,10 +229,17 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
             .put(&format!("/{root}/{rel_unix}"), local_content)
             .await
         {
-            Ok(()) => uploaded += 1,
+            Ok(()) => {
+                uploaded += 1;
+                // 上传成功，更新记录
+                sync_meta.insert(rel_unix, local_hash);
+            }
             Err(e) => errors.push(format!("{rel_unix}: {e}")),
         }
     }
+
+    // 持久化更新后的记录
+    save_sync_meta(local_dir, &sync_meta);
 
     Ok(SyncReport {
         uploaded,
@@ -245,6 +247,33 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
         errors,
         ..Default::default()
     })
+}
+
+/// 读取 .sync_meta.json（记录每个文件上次上传时的内容哈希）
+fn load_sync_meta(local_dir: &Path) -> std::collections::HashMap<String, u64> {
+    let path = local_dir.join(".sync_meta.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 写入 .sync_meta.json
+fn save_sync_meta(local_dir: &Path, meta: &std::collections::HashMap<String, u64>) {
+    let path = local_dir.join(".sync_meta.json");
+    if let Ok(json) = serde_json::to_string_pretty(meta) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// FNV-1a 64 位哈希（轻量内容指纹，无外部依赖，对内容任何变化敏感）
+fn fnv1a_hash(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in data {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 
@@ -494,6 +523,36 @@ mod tests {
 
         assert_eq!(deleted, 0, "远程存在的文件不应被删除");
         assert!(dir.join("写作").join("保留.md").exists(), "文件应保留");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 验证 FNV-1a 哈希对内容变化敏感（相同内容同哈希，不同内容不同哈希）
+    #[test]
+    fn fnv1a_hash_detects_changes() {
+        let h1 = fnv1a_hash(b"hello world");
+        let h2 = fnv1a_hash(b"hello world");
+        let h3 = fnv1a_hash(b"hello world!");
+        assert_eq!(h1, h2, "相同内容应有相同哈希");
+        assert_ne!(h1, h3, "不同内容应有不同哈希");
+    }
+
+    /// 验证 .sync_meta.json 的读写
+    #[test]
+    fn sync_meta_roundtrip() {
+        let dir = std::env::temp_dir().join("pp_test_sync_meta");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        meta.insert("写作/a.md".to_string(), 12345);
+        meta.insert("编程/b.md".to_string(), 67890);
+        save_sync_meta(&dir, &meta);
+
+        let loaded = load_sync_meta(&dir);
+        assert_eq!(loaded.get("写作/a.md"), Some(&12345));
+        assert_eq!(loaded.get("编程/b.md"), Some(&67890));
+        assert!(dir.join(".sync_meta.json").exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
