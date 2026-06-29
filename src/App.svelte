@@ -195,13 +195,15 @@
   async function doSave() {
     if (!selectedPrompt) return;
     try {
-      await savePrompt(selectedPrompt.path, {
+      const saved = await savePrompt(selectedPrompt.path, {
         title: editingTitle.trim() || "未命名",
         copy_mode: editingCopyMode,
         body: editingBody,
       });
+      // 保存可能因标题变化而重命名了文件，用新路径更新选中
+      selectedPath = saved.path;
+      lastLoadedPath = saved.path; // 避免立即重载覆盖编辑内容
       await refresh();
-      lastLoadedPath = selectedPath; // 避免立即重载覆盖
       editorMode = "view";
     } catch (e) {
       const msg = String(e);
@@ -216,13 +218,15 @@
   async function doCreate() {
     const cat = selectedCategory === "__all__" ? "未分类" : selectedCategory;
     try {
-      const p = await createPrompt(cat, "新提示词");
+      // 新建用占位标题（文件名是时间戳），进入编辑后用户填写真实标题
+      // 保存时若标题变化会自动重命名文件
+      const p = await createPrompt(cat, "");
       await refresh();
       selectedPath = p.path;
-      lastLoadedPath = null;
+      lastLoadedPath = p.path;
       query = "";
-      // 进入编辑，字段初始化
-      editingTitle = "新提示词";
+      // 进入编辑，标题留空引导用户输入
+      editingTitle = "";
       editingCategory = cat;
       editingCopyMode = "markdown";
       editingBody = "";

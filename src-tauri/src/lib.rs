@@ -173,18 +173,20 @@ fn save_prompt(
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
     let abs = resolve_abs(&state.local_dir, &path);
-    save_prompt_disk(&abs, &req).map_err(|e| {
+    // save_prompt 现在返回新路径（可能因标题重命名而变化）
+    let new_abs = save_prompt_disk(&abs, &req).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             "FILE_NOT_FOUND".to_string()
         } else {
             e.to_string()
         }
     })?;
+    // 用新路径查找返回的 prompt（路径可能变了，必须用 new_abs）
     let result = scan_disk(&state.local_dir)
         .map_err(|e| e.to_string())?
         .prompts
         .into_iter()
-        .find(|p| p.abs_path == abs.to_string_lossy().to_string())
+        .find(|p| p.abs_path == new_abs.to_string_lossy().to_string())
         .ok_or_else(|| "保存后未能重新定位该提示词".to_string())?;
     Ok(result)
 }

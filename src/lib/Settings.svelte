@@ -25,6 +25,8 @@
   let username = $state("");
   let password = $state("");
   let remoteRoot = $state("PromptPocket");
+  // 密码编辑模式：已配置时默认锁定（显示"已保存"），点"修改"才解锁
+  let editingPassword = $state(false);
 
   let testing = $state(false);
   let saving = $state(false);
@@ -33,6 +35,9 @@
 
   // 坚果云帮助页：如何获取应用密码
   const HELP_URL = "https://help.jianguoyun.com/?p=2064";
+
+  // 密码是否已保存（用于显示状态）
+  let hasPassword = $derived(!!config?.hasPassword);
 
   let lastOpen = false;
   $effect(() => {
@@ -48,8 +53,9 @@
       [config, status] = await Promise.all([getCloudConfig(), getSyncStatus()]);
       username = config.username;
       remoteRoot = config.remoteRoot || "PromptPocket";
-      // 密码不回显，仅清空让用户在需要时重填
+      // 密码不回显（安全）；已配置则锁定编辑模式，点"修改"才解锁
       password = "";
+      editingPassword = !config.hasPassword;
     } catch (e) {
       message = { type: "err", text: String(e) };
     }
@@ -81,23 +87,21 @@
   }
 
   async function doSave() {
-    // 若用户没填密码但已有密码，保留旧密码——需要密码字段
     if (!username.trim()) {
       message = { type: "err", text: "请填写坚果云账号" };
       return;
     }
-    // 已配置过且没填新密码：用空字符串占位，后端判断
     const pwd = password.trim();
-    if (!pwd && config && !config.hasPassword) {
+    // 已配置且未进入密码编辑模式 → 保留旧密码；否则必须填密码
+    if (editingPassword && !pwd) {
       message = { type: "err", text: "请填写应用密码" };
       return;
     }
     saving = true;
     message = null;
     try {
-      // 若没填新密码，传空字符串，后端识别"空密码"为保留旧密码
-      // 若没填新密码，传 __KEEP__ 占位符保留旧密码
-      const finalPwd = pwd || (config?.hasPassword ? "__KEEP__" : "");
+      // 未编辑密码（已配置）传 __KEEP__ 占位符保留旧密码
+      const finalPwd = editingPassword ? pwd : "__KEEP__";
       await saveCloudConfig(
         username.trim(),
         finalPwd,
@@ -208,16 +212,33 @@
               如何获取？
             </button>
           </span>
-          <input
-            class="form-input"
-            type="password"
-            bind:value={password}
-            placeholder={config?.hasPassword ? "已设置（留空则不改）" : "在坚果云官网生成的应用密码"}
-            spellcheck="false"
-            autocomplete="off"
-          />
+          {#if hasPassword && !editingPassword}
+            <!-- 已保存：显示状态 + 修改按钮（明确告知密码已持久化）-->
+            <div class="pwd-saved">
+              <span class="pwd-saved-text">✓ 已保存（无需重复输入）</span>
+              <button
+                class="pwd-edit-btn"
+                onclick={() => {
+                  editingPassword = true;
+                  password = "";
+                }}
+              >
+                修改
+              </button>
+            </div>
+          {:else}
+            <!-- 未配置或编辑模式：输入框 -->
+            <input
+              class="form-input"
+              type="password"
+              bind:value={password}
+              placeholder="在坚果云官网生成的应用密码"
+              spellcheck="false"
+              autocomplete="off"
+            />
+          {/if}
           <p class="hint">
-            不是登录密码。需在
+            应用密码会本地加密保存，下次上传/下载无需重复输入。不是登录密码，需在
             <button class="inline-link" onclick={() => void openUrl(HELP_URL)}>
               坚果云官网 → 账户信息 → 安全选项 → 第三方应用管理
             </button>
@@ -458,6 +479,34 @@
     grid-template-columns: 1fr 1fr;
     gap: 8px;
   }
+  /* 密码已保存状态 */
+  .pwd-saved {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(34, 160, 107, 0.1);
+    border: 1px solid rgba(34, 160, 107, 0.3);
+    border-radius: 6px;
+  }
+  .pwd-saved-text {
+    font-size: 13px;
+    color: #1a7a52;
+  }
+  .pwd-edit-btn {
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--fg);
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .pwd-edit-btn:hover {
+    border-color: var(--fg);
+  }
+
   .sync-btn {
     padding: 9px 12px;
     border-radius: 6px;

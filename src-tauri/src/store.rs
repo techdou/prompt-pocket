@@ -326,9 +326,10 @@ pub fn read_prompt(abs: &Path) -> io::Result<PromptContent> {
 
 /// ────────────────────────────────────────────────
 /// 保存：接收结构化字段，用 serde_yaml 规范序列化 frontmatter
-/// 关键：杜绝裸文本往返导致的格式漂移
+/// 若标题与当前文件名不一致，自动重命名文件（让文件名反映标题，便于同步比对）
+/// 返回（新路径, 新 Prompt）—— 路径可能因重命名而变化
 /// ────────────────────────────────────────────────
-pub fn save_prompt(abs: &Path, req: &SaveRequest) -> io::Result<()> {
+pub fn save_prompt(abs: &Path, req: &SaveRequest) -> io::Result<PathBuf> {
     // 读取旧文件以保留 created 时间戳
     let old_created = fs::read_to_string(abs)
         .ok()
@@ -346,16 +347,65 @@ pub fn save_prompt(abs: &Path, req: &SaveRequest) -> io::Result<()> {
     let fm = serialize_frontmatter(&meta);
     let content = format!("---\n{}\n---\n\n{}\n", fm, req.body);
 
-    if let Some(parent) = abs.parent() {
+    // 自动重命名：若标题有意义的部分与文件名不同，则重命名
+    let final_path = maybe_rename_to_title(abs, &req.title);
+
+    if let Some(parent) = final_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(abs, content)
+    // 若路径变了，删除旧文件
+    if final_path != abs && abs.exists() {
+        let _ = fs::remove_file(abs);
+    }
+    fs::write(&final_path, content)?;
+    Ok(final_path)
+}
+
+/// 若标题与当前文件名差异较大，重命名文件为「标题.md」
+/// 规则：标题 sanitize 后若与当前文件 stem 不同且非空，则重命名（避免重名追加序号）
+fn maybe_rename_to_title(abs: &Path, title: &str) -> PathBuf {
+    let safe_title = sanitize_filename::sanitize(title);
+    if safe_title.is_empty() {
+        return abs.to_path_buf();
+    }
+    let current_stem = abs
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    // 标题与当前文件名一致，无需重命名
+    if safe_title == current_stem {
+        return abs.to_path_buf();
+    }
+    // 时间戳命名的（14 位纯数字，如 20260628T153000）一定重命名为标题
+    let is_timestamp = current_stem
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == 'T')
+        && current_stem.len() >= 13;
+
+    let parent = abs.parent().unwrap_or(Path::new("."));
+    let mut new_name = format!("{}.md", safe_title);
+    let mut n = 1;
+    // 重名则追加序号（但保留标题可读性）
+    while parent.join(&new_name).exists() && parent.join(&new_name) != abs {
+        new_name = format!("{}-{}.md", safe_title, n);
+        n += 1;
+    }
+    let candidate = parent.join(&new_name);
+    if candidate != abs || is_timestamp {
+        candidate
+    } else {
+        abs.to_path_buf()
+    }
 }
 
 /// 新建 prompt 文件，返回其绝对路径
+/// 文件名用时间戳保证唯一，frontmatter 的 title 用传入标题
+/// （避免"新提示词-1.md"这种无意义命名；真正有意义的标题在保存时自动同步到文件名）
 pub fn create_prompt(root: &Path, category: &str, title: &str) -> io::Result<PathBuf> {
     let safe_cat = sanitize_filename::sanitize(category);
-    let safe_title = sanitize_filename::sanitize(title);
     let dir = if safe_cat.is_empty() || safe_cat == "未分类" {
         root.to_path_buf()
     } else {
@@ -363,10 +413,12 @@ pub fn create_prompt(root: &Path, category: &str, title: &str) -> io::Result<Pat
     };
     fs::create_dir_all(&dir)?;
 
-    let mut file_name = format!("{}.md", safe_title);
+    // 用紧凑时间戳作文件名，避免重名 + 避免无意义的"新提示词-N"
+    let stamp = now_compact();
+    let mut file_name = format!("{}.md", stamp);
     let mut n = 1;
     while dir.join(&file_name).exists() {
-        file_name = format!("{}-{}.md", safe_title, n);
+        file_name = format!("{}-{}.md", stamp, n);
         n += 1;
     }
 
@@ -498,6 +550,22 @@ pub fn now_iso() -> String {
     format_iso_utc(secs)
 }
 
+/// 紧凑时间戳，用于新建文件名（如 20260628T153000），保证唯一
+pub fn now_compact() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let h = rem / 3600;
+    let m = (rem % 3600) / 60;
+    let s = rem % 60;
+    let (y, mo, d) = civil_from_days(days as i64);
+    format!("{:04}{:02}{:02}T{:02}{:02}{:02}", y, mo, d, h, m, s)
+}
+
 fn format_iso_utc(secs: u64) -> String {
     let days = secs / 86400;
     let rem = secs % 86400;
@@ -546,10 +614,10 @@ mod tests {
             copy_mode: "markdown".into(),
             body: "这是正文内容\n\n## 第二段\n\n- 列表项1\n- 列表项2".into(),
         };
-        save_prompt(&abs, &req).unwrap();
+        let new_abs = save_prompt(&abs, &req).unwrap();
 
-        // 读回，验证 body 完整
-        let content = read_prompt(&abs).unwrap();
+        // 读回，验证 body 完整（用返回的新路径，可能因标题重命名）
+        let content = read_prompt(&new_abs).unwrap();
         assert_eq!(content.meta.title, "改过的标题");
         assert!(
             content.body.contains("这是正文内容"),
@@ -570,7 +638,8 @@ mod tests {
 
         let abs = create_prompt(&dir, "未分类", "多次保存").unwrap();
 
-        // 连续保存 3 次，每次改 body
+        // 连续保存 3 次，每次改 body 和标题（标题变化会触发重命名，需追踪路径）
+        let mut cur_abs = abs;
         for i in 0..3 {
             let body = format!("第 {} 次的内容", i);
             let req = SaveRequest {
@@ -578,9 +647,9 @@ mod tests {
                 copy_mode: "markdown".into(),
                 body: body.clone(),
             };
-            save_prompt(&abs, &req).unwrap();
+            cur_abs = save_prompt(&cur_abs, &req).unwrap();
 
-            let content = read_prompt(&abs).unwrap();
+            let content = read_prompt(&cur_abs).unwrap();
             assert_eq!(content.meta.title, format!("标题{}", i));
             assert_eq!(content.body, body, "第 {} 次保存后 body 不一致", i);
         }
@@ -650,15 +719,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // 建两个 prompt（默认按文件名/时间排序）
-        create_prompt(&dir, "写作", "甲").unwrap();
-        create_prompt(&dir, "写作", "乙").unwrap();
+        // 建两个 prompt，拿到真实路径（现在用时间戳命名）
+        let p1 = create_prompt(&dir, "写作", "甲").unwrap();
+        let p2 = create_prompt(&dir, "写作", "乙").unwrap();
+        let p1_rel = path_to_unix(p1.strip_prefix(&dir).unwrap());
+        let p2_rel = path_to_unix(p2.strip_prefix(&dir).unwrap());
 
         // 写入自定义顺序：乙 在 甲 前面
         reorder_category(
             &dir,
             "写作",
-            &["写作/乙.md".to_string(), "写作/甲.md".to_string()],
+            &[p2_rel.clone(), p1_rel.clone()],
         )
         .unwrap();
 
@@ -680,12 +751,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        create_prompt(&dir, "写作", "甲").unwrap();
-        create_prompt(&dir, "写作", "乙").unwrap();
-        create_prompt(&dir, "写作", "丙").unwrap();
+        let p1 = create_prompt(&dir, "写作", "甲").unwrap();
+        let _p2 = create_prompt(&dir, "写作", "乙").unwrap();
+        let _p3 = create_prompt(&dir, "写作", "丙").unwrap();
+        let p1_rel = path_to_unix(p1.strip_prefix(&dir).unwrap());
 
-        // order.json 只列了 甲（丙 未列入，应排末尾）
-        reorder_category(&dir, "写作", &["写作/甲.md".to_string()]).unwrap();
+        // order.json 只列了 甲（乙丙 未列入，应排末尾）
+        reorder_category(&dir, "写作", &[p1_rel]).unwrap();
 
         let res = scan_prompts(&dir).unwrap();
         let cat: Vec<_> = res.prompts.iter().filter(|p| p.category == "写作").collect();
@@ -693,6 +765,37 @@ mod tests {
         // 甲有 order=0，乙和丙 order=None 排其后
         assert_eq!(cat[0].order, Some(0));
         assert!(cat[1].order.is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 验证保存时按标题自动重命名文件（时间戳名 → 标题名）
+    #[test]
+    fn save_renames_file_to_title() {
+        let dir = std::env::temp_dir().join("pp_test_rename_on_save");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 新建（文件名是时间戳）
+        let abs = create_prompt(&dir, "写作", "初始标题").unwrap();
+        let old_name = abs.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            old_name.ends_with(".md") && old_name.len() >= 15,
+            "新建文件名应为时间戳，实际: {old_name}"
+        );
+
+        // 保存时改成有意义的标题
+        let req = SaveRequest {
+            title: "我的代码审查清单".into(),
+            copy_mode: "markdown".into(),
+            body: "正文内容".into(),
+        };
+        let new_abs = save_prompt(&abs, &req).unwrap();
+        let new_name = new_abs.file_name().unwrap().to_string_lossy().to_string();
+
+        assert_eq!(new_name, "我的代码审查清单.md", "保存后文件名应为标题");
+        assert!(!abs.exists(), "旧时间戳文件应已删除");
+        assert!(new_abs.exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
