@@ -2676,7 +2676,7 @@ dependencies = [
 
 [[package]]
 name = "prompt-pocket"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "dirs 5.0.1",
  "reqwest 0.12.28",
