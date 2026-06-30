@@ -190,9 +190,17 @@ pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
     let order_map = load_order_map(root);
 
     // 扫描所有 .md 文件
+    // 关键修复：用 filter_entry 剪掉 .trash 及所有隐藏目录，避免备份文件泄漏进列表
+    // （clean_local_extra 会把被删的 prompt 备份到 .trash/，若这里不剪掉，
+    //  walkdir 会钻进去把备份当成正常 prompt 扫出来，分类显示成 ".trash"）
     for entry in WalkDir::new(root)
         .min_depth(1)
         .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            // 剪掉 .trash、.sync_meta.json 及所有以 . 开头的隐藏目录/文件
+            !(name.starts_with('.') || name.starts_with('~'))
+        })
         .filter_map(|e| e.ok())
     {
         if !entry.file_type().is_file() {
@@ -819,6 +827,52 @@ mod tests {
         // 内容正确
         let content = read_prompt(&new_abs).unwrap();
         assert_eq!(content.meta.title, "新标题");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Bug：scan_prompts 不能把 .trash/ 里的备份文件扫进列表。
+    /// clean_local_extra 会把被删/被远程覆盖的 prompt 备份到 .trash/，
+    /// 若 scan 不剪掉 .trash 目录，这些备份会以 category=".trash" 泄漏进列表，
+    /// 造成"层级错乱"（截图里看到的 "改写润色 / .trash"）。
+    #[test]
+    fn scan_excludes_trash_directory() {
+        let dir = std::env::temp_dir().join("pp_test_scan_trash");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 真实分类 + 真实 prompt
+        create_prompt(&dir, "写作", "真实提示词").unwrap();
+
+        // 模拟 clean_local_extra 产生的备份：.trash/改写润色_20260628T153000.md
+        let trash = dir.join(".trash");
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(
+            trash.join("改写润色_20260628T153000.md"),
+            "---\ntitle: 改写润色\n---\n\n正文",
+        )
+        .unwrap();
+
+        // 隐藏目录里的文件也不应出现
+        let hidden = dir.join(".cache");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(hidden.join(" leaked.md"), "---\ntitle: 泄漏\n---\n\nx").unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+
+        // 只有 1 个真实 prompt，.trash 和隐藏目录的都不算
+        assert_eq!(res.prompts.len(), 1, "应只扫到 1 个真实 prompt，实际: {:?}", res.prompts.iter().map(|p| &p.path).collect::<Vec<_>>());
+        assert_eq!(res.prompts[0].category, "写作");
+        // 任何 prompt 的分类都不应是 .trash
+        assert!(
+            !res.prompts.iter().any(|p| p.category == ".trash"),
+            ".trash 里的备份不应出现在列表"
+        );
+        // .trash 不应被注册为分类
+        assert!(
+            !res.categories.iter().any(|c| c.name == ".trash"),
+            ".trash 不应是分类"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

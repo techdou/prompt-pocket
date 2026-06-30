@@ -78,45 +78,34 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
     // 确保远程根目录存在
     let _ = client.mkcol(&format!("/{root}")).await;
 
-    // 递归列出远程所有文件（Depth::Infinity）
-    let entities = client
-        .list(&format!("/{root}/"), Depth::Infinity)
-        .await
-        .map_err(|e| format!("列出远程文件失败: {e}"))?;
-
     let mut remote_files: HashSet<String> = HashSet::new();
     let mut downloaded = 0u32;
     let mut skipped = 0u32;
     let mut errors: Vec<String> = Vec::new();
 
-    for entity in entities {
-        if let ListEntity::File(file) = entity {
-            let rel = match extract_rel_path(&file.href, &root) {
-                Some(r) => r,
-                None => continue,
-            };
-            // 排除 .trash 路径下的文件（备份目录不参与同步）
-            if rel.starts_with(".trash/") || rel.contains("/.trash/") {
+    // 关键修复：坚果云 WebDAV 不支持 Depth::Infinity（静默降级为只返回一层），
+    // 必须用 Depth::Number(1) 逐层递归遍历（与 Obsidian Remotely Save / rclone 同策略）。
+    // walk_remote 返回 (文件列表, 错误列表)，文件已是去 .trash、解码后的相对路径。
+    let files = walk_remote(&client, &root, &mut errors).await;
+
+    for file in files {
+        remote_files.insert(file.rel.clone());
+
+        let local_path = local_dir.join(&file.rel);
+        // 内容校对：用文件大小 + 存在性判断是否需要下载
+        let need_download = match std::fs::metadata(&local_path) {
+            Ok(meta) => meta.len() as i64 != file.content_length,
+            Err(_) => true, // 本地不存在
+        };
+
+        if need_download {
+            if let Err(e) = download_file(&client, &root, &file.rel, &local_path).await {
+                errors.push(format!("{}: {e}", file.rel));
                 continue;
             }
-            remote_files.insert(rel.clone());
-
-            let local_path = local_dir.join(&rel);
-            // 内容校对：用文件大小 + 存在性判断是否需要下载
-            let need_download = match std::fs::metadata(&local_path) {
-                Ok(meta) => meta.len() as i64 != file.content_length,
-                Err(_) => true, // 本地不存在
-            };
-
-            if need_download {
-                if let Err(e) = download_file(&client, &root, &rel, &local_path).await {
-                    errors.push(format!("{rel}: {e}"));
-                    continue;
-                }
-                downloaded += 1;
-            } else {
-                skipped += 1;
-            }
+            downloaded += 1;
+        } else {
+            skipped += 1;
         }
     }
 
@@ -147,6 +136,99 @@ pub struct SyncReport {
     pub deleted: u32,
     pub uploaded: u32,
     pub errors: Vec<String>,
+}
+
+/// 远程文件（已解码、已去根前缀、已过滤 .trash 的相对路径）
+struct RemoteFile {
+    rel: String,
+    content_length: i64,
+}
+
+/// 用 Depth::Number(1) 递归遍历远程目录树。
+///
+/// 关键背景：坚果云 WebDAV 不支持 Depth::Infinity——发 infinity 时服务端
+/// 静默降级成只返回一层（实测 infinity 与 depth=1 返回字节完全一致），
+/// 导致 `pull_from_remote` 永远看不到任何 .md 文件。
+///
+/// 解法（与 Obsidian Remotely Save / rclone 一致）：逐层 PROPFIND depth=1，
+/// 遇到文件夹就递归再列一层，把整棵树走完。坚果云 600 次/30 分钟的限速
+/// 对本工具的规模（几个分类、几十个文件）完全够用。
+///
+/// - 跳过 `.trash` 目录（含其所有后代）
+/// - 跳过根目录自身（depth=1 会把被列目录自己也返回一次）
+/// - 单个目录列举失败不中断整树：记录到 errors，继续其它目录
+async fn walk_remote(
+    client: &Client,
+    root: &str,
+    errors: &mut Vec<String>,
+) -> Vec<RemoteFile> {
+    let mut files: Vec<RemoteFile> = Vec::new();
+    // 待访问的远程相对目录路径队列（相对 root，空串表示根目录）
+    let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    queue.push_back(String::new());
+
+    while let Some(rel_dir) = queue.pop_front() {
+        // 该层的请求路径：根用 "/{root}/"，子目录用 "/{root}/{rel_dir}/"
+        let req_path = if rel_dir.is_empty() {
+            format!("/{root}/")
+        } else {
+            format!("/{root}/{rel_dir}/")
+        };
+
+        let entities = match client.list(&req_path, Depth::Number(1)).await {
+            Ok(es) => es,
+            Err(e) => {
+                // 单层列举失败：记录后继续其它分支，不让整次同步崩溃
+                let label = if rel_dir.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("{rel_dir}/")
+                };
+                errors.push(format!("列出远程目录 {label} 失败: {e}"));
+                continue;
+            }
+        };
+
+        for entity in entities {
+            match entity {
+                ListEntity::File(file) => {
+                    let Some(rel) = extract_rel_path(&file.href, root) else {
+                        continue;
+                    };
+                    // 过滤 .trash 及任何 . 开头的目录（防御）
+                    if is_trash_or_hidden_rel(&rel) {
+                        continue;
+                    }
+                    files.push(RemoteFile {
+                        rel,
+                        content_length: file.content_length,
+                    });
+                }
+                ListEntity::Folder(folder) => {
+                    let Some(rel) = extract_rel_path(&folder.href, root) else {
+                        continue;
+                    };
+                    // 跳过根自身（depth=1 会把被列目录自身作为 Folder 返回一次）
+                    if rel == rel_dir || rel.is_empty() {
+                        continue;
+                    }
+                    // 过滤 .trash / 隐藏目录，不递归进去
+                    if is_trash_or_hidden_rel(&rel) {
+                        continue;
+                    }
+                    queue.push_back(rel);
+                }
+            }
+        }
+    }
+
+    files
+}
+
+/// 判断相对路径是否落在 .trash 或任意隐藏目录下（不参与同步）
+/// 例：".trash/x.md" / "a/.trash/b.md" / ".hidden/y.md" 均返回 true
+fn is_trash_or_hidden_rel(rel: &str) -> bool {
+    rel.split('/').any(|seg| seg == ".trash" || seg.starts_with('.'))
 }
 
 /// 全量上传：把本地所有文件推送到远程（只增不删，不删除云端多余文件）
@@ -555,5 +637,24 @@ mod tests {
         assert!(dir.join(".sync_meta.json").exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 验证 walk_remote 的路径过滤：.trash 及隐藏目录下的文件应被排除
+    /// 这是 walk_remote 不递归进 .trash、不收录隐藏文件的核心防线。
+    #[test]
+    fn is_trash_or_hidden_rel_filters_correctly() {
+        // 应被排除（true）
+        assert!(is_trash_or_hidden_rel(".trash/x.md"));
+        assert!(is_trash_or_hidden_rel("写作/.trash/b.md"));
+        assert!(is_trash_or_hidden_rel(".cache/y.md"));
+        assert!(is_trash_or_hidden_rel("a/.hidden/b.md"));
+        // 根目录下的隐藏文件
+        assert!(is_trash_or_hidden_rel(".sync_meta.json"));
+
+        // 应保留（false）：正常分类路径
+        assert!(!is_trash_or_hidden_rel("写作/a.md"));
+        assert!(!is_trash_or_hidden_rel("编程/子目录/b.md"));
+        assert!(!is_trash_or_hidden_rel("root.md"));
+        assert!(!is_trash_or_hidden_rel("web服务/html-read.md"));
     }
 }
