@@ -1,0 +1,837 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Prompt Pocket — 全局秒唤的提示词口袋</title>
+    <meta
+      name="description"
+      content="轻量级提示词管理工具：全局快捷键秒唤，Markdown 存储，坚果云同步。Tauri + Rust，1.6MB 安装包。"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%232563eb'/><text x='50' y='72' font-size='62' text-anchor='middle' fill='white' font-family='monospace' font-weight='bold'>⌕</text></svg>" />
+    <style>
+      :root {
+        --bg: #0b0d12;
+        --bg-2: #11141b;
+        --surface: #161a23;
+        --line: #232936;
+        --line-2: #2e3545;
+        --ink: #eef1f6;
+        --ink-2: #aab2c2;
+        --ink-3: #6b7488;
+        --accent: #2563eb;
+        --accent-2: #3b82f6;
+        --accent-soft: rgba(37, 99, 235, 0.14);
+        --glow: rgba(59, 130, 246, 0.35);
+        --display: "Bricolage Grotesque", "Noto Sans SC", sans-serif;
+        --body: "Geist", "Noto Sans SC", sans-serif;
+        --mono: "JetBrains Mono", ui-monospace, monospace;
+      }
+
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+
+      html { scroll-behavior: smooth; }
+
+      body {
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--body);
+        font-size: 16px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+        overflow-x: hidden;
+      }
+
+      /* ── 背景氛围：网格 + 渐变光斑 + 噪点 ── */
+      .bg-fx {
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        background:
+          radial-gradient(900px 600px at 78% -8%, var(--glow), transparent 60%),
+          radial-gradient(700px 500px at 8% 12%, rgba(37, 99, 235, 0.12), transparent 55%),
+          linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+      }
+      .bg-fx::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(var(--line) 1px, transparent 1px),
+          linear-gradient(90deg, var(--line) 1px, transparent 1px);
+        background-size: 64px 64px;
+        opacity: 0.4;
+        mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 30%, transparent 75%);
+      }
+      .bg-fx::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+        opacity: 0.04;
+      }
+
+      .wrap {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 28px;
+      }
+
+      /* ── 导航 ── */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 50;
+        backdrop-filter: blur(12px);
+        background: rgba(11, 13, 18, 0.6);
+        border-bottom: 1px solid transparent;
+        transition: border-color 0.3s;
+      }
+      nav.scrolled { border-bottom-color: var(--line); }
+      nav .wrap {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: 64px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-family: var(--display);
+        font-weight: 800;
+        font-size: 18px;
+        letter-spacing: -0.02em;
+        text-decoration: none;
+        color: var(--ink);
+      }
+      .brand-mark {
+        width: 30px;
+        height: 30px;
+        border-radius: 8px;
+        background: var(--accent);
+        display: grid;
+        place-items: center;
+        color: #fff;
+        font-size: 18px;
+        box-shadow: 0 0 0 4px var(--accent-soft);
+      }
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 28px;
+      }
+      .nav-links a {
+        color: var(--ink-2);
+        text-decoration: none;
+        font-size: 14px;
+        transition: color 0.15s;
+      }
+      .nav-links a:hover { color: var(--ink); }
+      .nav-cta {
+        padding: 8px 16px;
+        border-radius: 8px;
+        background: var(--ink);
+        color: var(--bg) !important;
+        font-weight: 600;
+      }
+      .nav-cta:hover { background: #fff; }
+
+      /* ── Hero ── */
+      .hero {
+        padding: 90px 0 56px;
+        position: relative;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px 6px 8px;
+        border: 1px solid var(--line-2);
+        border-radius: 999px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-2);
+        background: var(--surface);
+        margin-bottom: 28px;
+        animation: rise 0.7s both;
+      }
+      .badge .tag {
+        background: var(--accent-soft);
+        color: var(--accent-2);
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-weight: 500;
+      }
+      h1 {
+        font-family: var(--display);
+        font-weight: 800;
+        font-size: clamp(44px, 7vw, 84px);
+        line-height: 0.98;
+        letter-spacing: -0.035em;
+        margin-bottom: 24px;
+        animation: rise 0.7s 0.05s both;
+      }
+      h1 .accent {
+        background: linear-gradient(120deg, var(--accent-2), #93c5fd);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        font-style: italic;
+        font-weight: 400;
+      }
+      .lede {
+        font-size: 19px;
+        color: var(--ink-2);
+        max-width: 580px;
+        margin-bottom: 40px;
+        animation: rise 0.7s 0.12s both;
+      }
+      .lede code {
+        font-family: var(--mono);
+        font-size: 15px;
+        background: var(--surface);
+        border: 1px solid var(--line-2);
+        padding: 2px 7px;
+        border-radius: 6px;
+        color: var(--accent-2);
+      }
+      .cta-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+        margin-bottom: 64px;
+        animation: rise 0.7s 0.18s both;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 22px;
+        border-radius: 10px;
+        text-decoration: none;
+        font-weight: 600;
+        font-size: 15px;
+        transition: transform 0.12s, box-shadow 0.2s, background 0.2s;
+        border: 1px solid transparent;
+      }
+      .btn-primary {
+        background: var(--accent);
+        color: #fff;
+        box-shadow: 0 10px 30px -8px var(--glow);
+      }
+      .btn-primary:hover {
+        background: var(--accent-2);
+        transform: translateY(-2px);
+        box-shadow: 0 16px 40px -8px var(--glow);
+      }
+      .btn-ghost {
+        background: var(--surface);
+        color: var(--ink);
+        border-color: var(--line-2);
+      }
+      .btn-ghost:hover {
+        border-color: var(--accent-2);
+        color: var(--accent-2);
+      }
+      .btn .kbd-hint {
+        font-family: var(--mono);
+        font-size: 12px;
+        opacity: 0.7;
+        padding-left: 8px;
+        border-left: 1px solid rgba(255, 255, 255, 0.2);
+      }
+
+      /* ── Hero 模拟窗口（唤出动效）── */
+      .stage {
+        position: relative;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        padding: 14px;
+        box-shadow: 0 40px 120px -30px rgba(0, 0, 0, 0.7);
+        animation: rise 0.9s 0.25s both;
+      }
+      .stage-bar {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 4px 6px 12px;
+      }
+      .stage-dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--line-2);
+      }
+      .stage-prompt {
+        margin-left: auto;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-3);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .stage-prompt kbd {
+        font-family: var(--mono);
+        background: var(--bg-2);
+        border: 1px solid var(--line-2);
+        padding: 2px 6px;
+        border-radius: 5px;
+        font-size: 11px;
+        color: var(--ink-2);
+      }
+      .stage-prompt .pulse {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent-2);
+        animation: blink 1.4s infinite;
+      }
+      .stage img {
+        display: block;
+        width: 100%;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+      }
+
+      /* ── 章节通用 ── */
+      section { padding: 100px 0; }
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 12px;
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+        color: var(--accent-2);
+        margin-bottom: 16px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .eyebrow::before {
+        content: "";
+        width: 24px;
+        height: 1px;
+        background: var(--accent-2);
+      }
+      h2 {
+        font-family: var(--display);
+        font-weight: 800;
+        font-size: clamp(30px, 4.5vw, 48px);
+        letter-spacing: -0.03em;
+        line-height: 1.05;
+        margin-bottom: 18px;
+        max-width: 720px;
+      }
+      .section-lede {
+        color: var(--ink-2);
+        font-size: 18px;
+        max-width: 600px;
+        margin-bottom: 56px;
+      }
+
+      /* ── 特性网格 ── */
+      .features {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 18px;
+      }
+      .feat {
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, var(--surface), var(--bg-2));
+        border-radius: 14px;
+        padding: 28px;
+        transition: border-color 0.2s, transform 0.2s;
+      }
+      .feat:hover {
+        border-color: var(--accent);
+        transform: translateY(-3px);
+      }
+      .feat.big { grid-column: span 7; }
+      .feat.med { grid-column: span 5; }
+      .feat.sm { grid-column: span 4; }
+      .feat-num {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-3);
+        margin-bottom: 18px;
+      }
+      .feat h3 {
+        font-family: var(--display);
+        font-weight: 600;
+        font-size: 22px;
+        letter-spacing: -0.02em;
+        margin-bottom: 10px;
+      }
+      .feat p {
+        color: var(--ink-2);
+        font-size: 15px;
+      }
+      .feat .glyph {
+        font-size: 28px;
+        margin-bottom: 14px;
+        display: block;
+      }
+      .feat.featured {
+        background: linear-gradient(140deg, rgba(37, 99, 235, 0.16), var(--surface) 55%);
+        border-color: var(--accent);
+      }
+      .feat.featured h3 .hi {
+        color: var(--accent-2);
+      }
+
+      /* ── 截图画廊 ── */
+      .gallery {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+      }
+      .shot {
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        overflow: hidden;
+        background: var(--surface);
+        transition: transform 0.25s, border-color 0.25s;
+      }
+      .shot:hover {
+        transform: scale(1.015);
+        border-color: var(--line-2);
+      }
+      .shot.tall { grid-row: span 2; }
+      .shot img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .shot-cap {
+        padding: 14px 18px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-3);
+        border-top: 1px solid var(--line);
+        display: flex;
+        justify-content: space-between;
+      }
+
+      /* ── 快捷键表 ── */
+      .keys {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1px;
+        background: var(--line);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      .key-row {
+        background: var(--bg-2);
+        padding: 18px 22px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        transition: background 0.15s;
+      }
+      .key-row:hover { background: var(--surface); }
+      .key-row .what { color: var(--ink-2); font-size: 15px; }
+      .key-row kbd {
+        font-family: var(--mono);
+        font-size: 13px;
+        background: var(--bg);
+        border: 1px solid var(--line-2);
+        border-bottom-width: 2px;
+        padding: 4px 9px;
+        border-radius: 6px;
+        color: var(--ink);
+      }
+
+      /* ── 安装区 ── */
+      .install {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--bg-2);
+        overflow: hidden;
+        margin-top: 8px;
+      }
+      .install-head {
+        padding: 12px 18px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-3);
+      }
+      .install-head .d {
+        width: 11px; height: 11px; border-radius: 50%; background: var(--line-2);
+      }
+      .install pre {
+        padding: 22px 24px;
+        font-family: var(--mono);
+        font-size: 14px;
+        line-height: 1.9;
+        color: var(--ink-2);
+        overflow-x: auto;
+      }
+      .install .c { color: var(--ink-3); }
+      .install .cmd { color: var(--accent-2); }
+
+      /* ── 页脚 CTA ── */
+      .final {
+        text-align: center;
+        padding: 120px 0 80px;
+      }
+      .final h2 {
+        margin: 0 auto 22px;
+        font-style: italic;
+      }
+      .final h2 .accent {
+        font-style: normal;
+        background: linear-gradient(120deg, var(--accent-2), #93c5fd);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+      }
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 32px 0;
+        color: var(--ink-3);
+        font-size: 14px;
+      }
+      footer .wrap {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 16px;
+      }
+      footer a { color: var(--ink-2); text-decoration: none; }
+      footer a:hover { color: var(--accent-2); }
+
+      /* ── 动画 ── */
+      @keyframes rise {
+        from { opacity: 0; transform: translateY(18px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      @keyframes blink {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.25; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+          animation: none !important;
+          transition: none !important;
+        }
+      }
+
+      /* ── 响应式 ── */
+      @media (max-width: 860px) {
+        .feat.big, .feat.med, .feat.sm { grid-column: span 12; }
+        .gallery { grid-template-columns: 1fr; }
+        .shot.tall { grid-row: auto; }
+        .keys { grid-template-columns: 1fr; }
+        .nav-links a:not(.nav-cta) { display: none; }
+        .hero { padding: 56px 0 40px; }
+        section { padding: 70px 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bg-fx"></div>
+
+    <nav id="nav">
+      <div class="wrap">
+        <a class="brand" href="#top">
+          <span class="brand-mark">⌕</span>
+          Prompt Pocket
+        </a>
+        <div class="nav-links">
+          <a href="#features">特性</a>
+          <a href="#gallery">截图</a>
+          <a href="#shortcuts">快捷键</a>
+          <a href="#install">安装</a>
+          <a class="nav-cta" href="https://github.com/techdou/prompt-pocket/releases/tag/v1.0.6">下载 v1.0.6</a>
+        </div>
+      </div>
+    </nav>
+
+    <!-- ───────────── HERO ───────────── -->
+    <header class="hero" id="top">
+      <div class="wrap">
+        <div class="badge">
+          <span class="tag">v1.0.6</span>
+          UI 升级 · 分离字体栈 · 长 prompt 修复 · 拖拽重写
+        </div>
+        <h1>把提示词<br />装进口袋，<span class="accent">秒唤即用。</span></h1>
+        <p class="lede">
+          按 <code>Ctrl+Alt+P</code> 从任意应用唤出，搜索 → 选中 →
+          <code>Enter</code> 复制，回到原应用粘贴即用。Markdown
+          存储，坚果云同步，Tauri + Rust，安装包仅 1.6MB。
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/tag/v1.0.6">
+            下载 v1.0.6
+            <span class="kbd-hint">Windows</span>
+          </a>
+          <a class="btn btn-ghost" href="#install">从源码构建</a>
+        </div>
+
+        <div class="stage" id="stage">
+          <div class="stage-bar">
+            <span class="stage-dot"></span>
+            <span class="stage-dot"></span>
+            <span class="stage-dot"></span>
+            <span class="stage-prompt">
+              <span class="pulse"></span>
+              试试按
+              <kbd id="hotkey">Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>P</kbd>
+            </span>
+          </div>
+          <img id="hero-shot" src="screenshots/list.png" alt="Prompt Pocket 主界面：搜索栏、分类标签、提示词列表与编辑器" />
+        </div>
+      </div>
+    </header>
+
+    <!-- ───────────── FEATURES ───────────── -->
+    <section id="features">
+      <div class="wrap">
+        <div class="eyebrow">What's inside</div>
+        <h2>克制，但每一个像素都经过打磨。</h2>
+        <p class="section-lede">
+          v1.0.6 是一次全面的设计与工程升级——从视觉系统到字体栈，从布局 bug 到拖拽内核。
+        </p>
+
+        <div class="features">
+          <div class="feat big featured">
+            <div class="feat-num">01 / 视觉系统</div>
+            <span class="glyph">🎨</span>
+            <h3>全新的<span class="hi">亮蓝聚焦</span>主题</h3>
+            <p>
+              浅色基调搭配 <code>#2563eb</code> 强调色，卡片化布局、统一圆角梯度与柔和阴影。搜索框、胶囊式分类标签（带计数徽章）、按钮、右键菜单、对话框全部重绘，聚焦态有清晰的描边光晕。
+            </p>
+          </div>
+
+          <div class="feat med">
+            <div class="feat-num">02 / 字体栈</div>
+            <span class="glyph">🔤</span>
+            <h3>西文与中文分栈</h3>
+            <p>
+              西文（Segoe UI / Aptos）与中文（Noto Serif / Sans SC）分别选型，混排更协调；正文加大字号与行距，代码统一用等宽字体 Cascadia Code。
+            </p>
+          </div>
+
+          <div class="feat sm">
+            <div class="feat-num">03 / 布局修复</div>
+            <span class="glyph">📏</span>
+            <h3>长内容不再挤掉按钮</h3>
+            <p>
+              标题栏 / 正文滚动区 / 操作栏三段固定，复制按钮始终可见。
+            </p>
+          </div>
+
+          <div class="feat sm">
+            <div class="feat-num">04 / 拖拽重写</div>
+            <span class="glyph">🔀</span>
+            <h3>原生 Pointer Events</h3>
+            <p>
+              弃用三方库，落点实时计算 + 指示线，修掉同步竞态。
+            </p>
+          </div>
+
+          <div class="feat sm">
+            <div class="feat-num">05 / 云同步</div>
+            <span class="glyph">☁️</span>
+            <h3>坚果云 WebDAV</h3>
+            <p>
+              逐层遍历修复多分类拉取，.trash 防泄漏。
+            </p>
+          </div>
+
+          <div class="feat big">
+            <div class="feat-num">06 / 轻量</div>
+            <span class="glyph">🪶</span>
+            <h3>1.6MB 安装包，~42MB 内存</h3>
+            <p>
+              Tauri v2 + Rust 后端，无 Electron、无内嵌浏览器。Markdown 文件 + YAML frontmatter 存储，没有数据库，没有云端账号——数据完全归你所有，用你自己的坚果云同步到所有设备。CPU 占用近乎为零，常驻后台毫无负担。
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────── GALLERY ───────────── -->
+    <section id="gallery">
+      <div class="wrap">
+        <div class="eyebrow">Screenshots</div>
+        <h2>看一眼真实的样子。</h2>
+        <p class="section-lede">
+          以下是 v1.0.6 实机界面。点开 Release 页可获取最新版本。
+        </p>
+
+        <div class="gallery">
+          <div class="shot tall">
+            <img src="screenshots/editor-long.jpg" alt="长 prompt 编辑器：正文滚动，复制按钮固定底部" loading="lazy" />
+            <div class="shot-cap"><span>editor / 长 prompt</span><span>03</span></div>
+          </div>
+          <div class="shot">
+            <img src="screenshots/edit-form.jpg" alt="填空式编辑表单：标题、分类、复制模式、正文" loading="lazy" />
+            <div class="shot-cap"><span>edit / 填空式表单</span><span>04</span></div>
+          </div>
+          <div class="shot">
+            <img src="screenshots/settings.jpg" alt="坚果云同步设置面板" loading="lazy" />
+            <div class="shot-cap"><span>settings / 坚果云</span><span>05</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────── SHORTCUTS ───────────── -->
+    <section id="shortcuts">
+      <div class="wrap">
+        <div class="eyebrow">Keyboard first</div>
+        <h2>键盘全程可达，鼠标几乎不用。</h2>
+        <p class="section-lede">
+          设计目标：从唤出到复制粘贴，一次都不必碰鼠标。
+        </p>
+        <div class="keys">
+          <div class="key-row"><span class="what">全局唤出 / 隐藏</span><kbd>Ctrl + Alt + P</kbd></div>
+          <div class="key-row"><span class="what">新建提示词</span><kbd>Ctrl + N</kbd></div>
+          <div class="key-row"><span class="what">聚焦搜索框</span><kbd>Ctrl + F</kbd></div>
+          <div class="key-row"><span class="what">上下选择</span><kbd>↑ / ↓</kbd></div>
+          <div class="key-row"><span class="what">复制选中并隐藏</span><kbd>Enter</kbd></div>
+          <div class="key-row"><span class="what">隐藏窗口</span><kbd>Esc</kbd></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────── INSTALL ───────────── -->
+    <section id="install">
+      <div class="wrap">
+        <div class="eyebrow">Get it</div>
+        <h2>三行命令，从源码跑起来。</h2>
+        <p class="section-lede">
+          需 Node.js 18+ 与 Rust 1.77+。本仓库暂未提供 CI 预编译包，请用 Tauri 本地构建。
+        </p>
+        <div class="install">
+          <div class="install-head">
+            <span class="d"></span><span class="d"></span><span class="d"></span>
+            <span style="margin-left:8px">bash — prompt-pocket</span>
+          </div>
+          <pre><span class="c"># 克隆并安装依赖</span>
+<span class="cmd">git clone</span> https://github.com/techdou/prompt-pocket.git
+<span class="cmd">cd</span> prompt-pocket
+<span class="cmd">npm install</span>
+
+<span class="c"># 开发模式（热重载）或打包发布</span>
+<span class="cmd">npm run</span> tauri:dev
+<span class="cmd">npm run</span> tauri:build   <span class="c"># 产物在 src-tauri/target/release/bundle/</span></pre>
+        </div>
+        <p style="margin-top:24px; color:var(--ink-3); font-size:14px;">
+          想要预编译安装包？前往
+          <a href="https://github.com/techdou/prompt-pocket/releases" style="color:var(--accent-2)">Releases 页面</a>
+          查看最新版本。
+        </p>
+      </div>
+    </section>
+
+    <!-- ───────────── FINAL CTA ───────────── -->
+    <section class="final">
+      <div class="wrap">
+        <h2>别再翻聊天记录找<span class="accent">提示词</span>了。</h2>
+        <div class="cta-row" style="justify-content:center; margin-bottom:0;">
+          <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/tag/v1.0.6">
+            下载 Prompt Pocket v1.0.6
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/techdou/prompt-pocket">查看源码</a>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <div class="wrap">
+        <span>Prompt Pocket · MIT License</span>
+        <span>
+          <a href="https://github.com/techdou/prompt-pocket">GitHub</a> ·
+          <a href="https://github.com/techdou/prompt-pocket/releases">Releases</a> ·
+          <a href="https://github.com/techdou/prompt-pocket/blob/main/README.md">README</a>
+        </span>
+      </div>
+    </footer>
+
+    <script>
+      // ── 导航滚动描边 ──
+      const nav = document.getElementById("nav");
+      window.addEventListener("scroll", () => {
+        nav.classList.toggle("scrolled", window.scrollY > 8);
+      }, { passive: true });
+
+      // ── Hero 交互：按下 Ctrl+Alt+P 触发"唤出"动画 + 切图 ──
+      const heroShot = document.getElementById("hero-shot");
+      const hotkey = document.getElementById("hotkey");
+      const shots = [
+        "screenshots/list.png",
+        "screenshots/editor-long.jpg",
+        "screenshots/edit-form.jpg",
+      ];
+      let shotIdx = 0;
+
+      function triggerSummon() {
+        const stage = document.getElementById("stage");
+        stage.animate(
+          [
+            { transform: "scale(0.96) translateY(12px)", opacity: 0.4, filter: "blur(6px)" },
+            { transform: "scale(1) translateY(0)", opacity: 1, filter: "blur(0)" },
+          ],
+          { duration: 420, easing: "cubic-bezier(.2,.9,.25,1)" }
+        );
+        shotIdx = (shotIdx + 1) % shots.length;
+        heroShot.src = shots[shotIdx];
+        // 高亮提示
+        hotkey.animate(
+          [{ background: "var(--accent)", color: "#fff" }, { background: "transparent", color: "inherit" }],
+          { duration: 700 }
+        );
+      }
+
+      // 监听真实快捷键（也接受 Shift 替代，方便无法同时按的访客体验动效）
+      window.addEventListener("keydown", (e) => {
+        if (e.ctrlKey && e.altKey && e.key.toLowerCase() === "p") {
+          e.preventDefault();
+          triggerSummon();
+        }
+      });
+
+      // 点击 hotkey 提示也能触发（移动端友好）
+      document.querySelector(".stage-prompt").addEventListener("click", triggerSummon);
+
+      // ── 滚动渐显 ──
+      const io = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((en) => {
+            if (en.isIntersecting) {
+              en.target.style.opacity = 1;
+              en.target.style.transform = "translateY(0)";
+              io.unobserve(en.target);
+            }
+          });
+        },
+        { threshold: 0.12 }
+      );
+      document.querySelectorAll(".feat, .shot, .install").forEach((el) => {
+        el.style.opacity = 0;
+        el.style.transform = "translateY(24px)";
+        el.style.transition = "opacity .6s ease, transform .6s ease";
+        io.observe(el);
+      });
+    </script>
+  </body>
+</html>
