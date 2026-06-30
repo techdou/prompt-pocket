@@ -1,33 +1,24 @@
 :root {
-  /* 极简黑白配色（与参考稿一致：纯白底、黑字、灰辅助） */
-  --bg: #ffffff;
-  --bg-elevated: #fafafa;
-  --bg-hover: #f4f4f4;
-  --bg-active: #efefef;
-  --fg: #1a1a1a;
-  --muted: #999999;
-  --border: #ececec;
-  --border-strong: #d0d0d0;
-  /* 强调用黑色，而非蓝色，契合参考稿 */
-  --accent: #1a1a1a;
-  --accent-soft: #f0f0f0;
-  --danger: #d93025;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #1c1c1e;
-    --bg-elevated: #242426;
-    --bg-hover: #2c2c2e;
-    --bg-active: #323334;
-    --fg: #f0f0f2;
-    --muted: #8a8a8e;
-    --border: #343436;
-    --border-strong: #4a4a4d;
-    --accent: #f0f0f2;
-    --accent-soft: #38383a;
-    --danger: #ff6b6b;
-  }
+  color-scheme: light;
+  --bg: #f5f7fb;
+  --bg-elevated: #ffffff;
+  --bg-hover: #eef4ff;
+  --bg-active: #e5efff;
+  --fg: #1f2a44;
+  --muted: #748094;
+  --border: #dde6f2;
+  --border-strong: #b9c8dd;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-soft: #eaf2ff;
+  --danger: #dc2626;
+  --shadow-soft: 0 10px 32px rgba(31, 42, 68, 0.08);
+  --font-en: "Segoe UI Variable Text", "Aptos", "Avenir Next", "Segoe UI";
+  --font-zh: "Noto Serif SC", "Noto Sans SC", "Microsoft YaHei UI",
+    "PingFang SC";
+  --font-ui: var(--font-en), var(--font-zh), sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas,
+    monospace;
 }
 
 * {
@@ -41,9 +32,9 @@ body {
   height: 100%;
   overflow: hidden;
   user-select: none;
-  /* 无衬线、直角、克制 */
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  background: var(--bg);
+  font-family: var(--font-ui);
+  font-optical-sizing: auto;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -59,7 +50,59 @@ textarea,
 }
 
 button {
-  font-family: inherit;
+  font-family: var(--font-ui);
+}
+
+.primary,
+.ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    color 0.12s,
+    transform 0.08s;
+}
+
+.primary {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.primary:hover {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+}
+
+.ghost {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+
+.ghost:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.primary:active,
+.ghost:active {
+  transform: translateY(1px);
+}
+
+.primary:focus-visible,
+.ghost:focus-visible {
+  outline: 3px solid var(--accent-soft);
+  outline-offset: 2px;
 }
 
 /* 极简滚动条 */
@@ -69,7 +112,7 @@ button {
 }
 ::-webkit-scrollbar-thumb {
   background: var(--border-strong);
-  border-radius: 0;
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--muted);

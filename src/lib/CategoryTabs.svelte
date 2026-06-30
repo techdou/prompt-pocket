@@ -104,13 +104,13 @@
     display: flex;
     align-items: center;
     height: 100%;
-    gap: 4px;
+    gap: 8px;
   }
 
   .tabs-scroll {
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     flex: 1;
     overflow-x: auto;
     scrollbar-width: none;
@@ -124,32 +124,30 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 0 12px;
-    height: 100%;
+    height: 30px;
+    padding: 0 11px;
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
+    border-radius: 999px;
     color: var(--muted);
     font-size: 13px;
     white-space: nowrap;
     cursor: pointer;
     position: relative;
-    transition: color 0.12s;
+    transition:
+      background 0.12s,
+      border-color 0.12s,
+      color 0.12s;
   }
   .tab:hover {
     color: var(--fg);
+    background: var(--bg-hover);
   }
   .tab.active {
-    color: var(--fg);
-    font-weight: 500;
-  }
-  .tab.active::after {
-    content: "";
-    position: absolute;
-    left: 12px;
-    right: 12px;
-    bottom: 0;
-    height: 2px;
-    background: var(--fg);
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-color: #c9dafc;
+    font-weight: 600;
   }
 
   .name {
@@ -159,27 +157,35 @@
   }
   .num {
     font-size: 11px;
-    color: var(--muted);
-    background: transparent;
-    padding: 0;
+    color: inherit;
+    background: rgba(255, 255, 255, 0.72);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .add-btn {
     flex-shrink: 0;
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    border: none;
-    background: var(--bg-hover);
-    color: var(--muted);
+    width: 30px;
+    height: 30px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--accent);
     font-size: 18px;
     line-height: 1;
     cursor: pointer;
     transition: all 0.12s;
   }
   .add-btn:hover {
-    background: var(--bg-active);
-    color: var(--fg);
+    background: var(--accent-soft);
+    border-color: #c9dafc;
+    color: var(--accent-hover);
   }
 
   .new-cat-input {
@@ -190,26 +196,31 @@
   }
   .new-cat-input input {
     width: 100px;
-    height: 26px;
+    height: 30px;
     background: var(--bg-elevated);
-    border: 1px solid var(--border-strong);
+    border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 0 8px;
     font-size: 12.5px;
     outline: none;
   }
   .new-cat-input input:focus {
-    border-color: var(--fg);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .mini {
-    width: 26px;
-    height: 26px;
-    border-radius: 6px;
-    border: none;
-    background: var(--bg-hover);
-    color: var(--fg);
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--accent);
     font-size: 14px;
     cursor: pointer;
+  }
+  .mini:hover {
+    background: var(--accent-soft);
+    border-color: #c9dafc;
   }
 </style>

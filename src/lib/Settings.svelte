@@ -309,7 +309,7 @@
   .backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.35);
+    background: rgba(31, 42, 68, 0.24);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -322,10 +322,10 @@
     max-width: 92vw;
     max-height: 90vh;
     overflow-y: auto;
-    background: var(--bg);
+    background: var(--bg-elevated);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+    border-radius: 12px;
+    box-shadow: var(--shadow-soft);
     display: flex;
     flex-direction: column;
   }
@@ -351,7 +351,7 @@
     color: var(--muted);
     cursor: pointer;
     padding: 0 4px;
-    border-radius: 4px;
+    border-radius: 8px;
   }
   .close:hover {
     color: var(--fg);
@@ -370,12 +370,12 @@
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 13px;
     background: var(--bg-elevated);
   }
   .status-box.syncing {
-    background: rgba(74, 124, 247, 0.1);
+    background: var(--accent-soft);
   }
   .status-box.error {
     background: rgba(217, 48, 37, 0.08);
@@ -390,7 +390,7 @@
     background: #22a06b;
   }
   .syncing-dot {
-    background: #4a7cf7;
+    background: var(--accent);
     animation: pulse 1s infinite;
   }
   .err-dot {
@@ -416,10 +416,6 @@
     flex-direction: column;
     gap: 5px;
   }
-  .row-field {
-    flex-direction: row;
-    align-items: center;
-  }
   .field-label {
     font-size: 12px;
     font-weight: 600;
@@ -442,7 +438,7 @@
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 7px 10px;
     font-size: 13px;
     outline: none;
@@ -450,7 +446,8 @@
     box-sizing: border-box;
   }
   .form-input:focus {
-    border-color: var(--fg);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .hint {
     font-size: 11.5px;
@@ -488,7 +485,7 @@
     padding: 8px 12px;
     background: rgba(34, 160, 107, 0.1);
     border: 1px solid rgba(34, 160, 107, 0.3);
-    border-radius: 6px;
+    border-radius: 8px;
   }
   .pwd-saved-text {
     font-size: 13px;
@@ -500,16 +497,17 @@
     color: var(--fg);
     font-size: 12px;
     padding: 3px 10px;
-    border-radius: 5px;
+    border-radius: 7px;
     cursor: pointer;
   }
   .pwd-edit-btn:hover {
-    border-color: var(--fg);
+    border-color: var(--accent);
+    color: var(--accent);
   }
 
   .sync-btn {
     padding: 9px 12px;
-    border-radius: 6px;
+    border-radius: 8px;
     border: 1px solid var(--border-strong);
     background: var(--bg-elevated);
     color: var(--fg);
@@ -519,12 +517,13 @@
     transition: all 0.12s;
   }
   .sync-btn:hover:not(:disabled) {
-    border-color: var(--fg);
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .sync-btn.upload:hover:not(:disabled) {
-    background: #4a7cf7;
+    background: var(--accent);
     color: #fff;
-    border-color: #4a7cf7;
+    border-color: var(--accent);
   }
   .sync-btn.download:hover:not(:disabled) {
     background: #22a06b;
@@ -538,7 +537,7 @@
 
   .msg {
     padding: 8px 12px;
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 12.5px;
   }
   .msg.ok {

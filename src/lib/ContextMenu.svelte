@@ -110,10 +110,10 @@
     position: fixed;
     z-index: 160;
     min-width: 168px;
-    background: var(--bg);
+    background: var(--bg-elevated);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+    border-radius: 10px;
+    box-shadow: var(--shadow-soft);
     padding: 4px;
     user-select: none;
   }
@@ -129,13 +129,14 @@
     color: var(--fg);
     font-size: 13px;
     padding: 7px 10px;
-    border-radius: 5px;
+    border-radius: 7px;
     cursor: pointer;
     text-align: left;
     font-family: inherit;
   }
   .item:hover {
     background: var(--bg-hover);
+    color: var(--accent);
   }
   .item.danger {
     color: var(--danger);
@@ -175,16 +176,17 @@
     color: var(--fg);
     font-size: 12.5px;
     padding: 5px 10px;
-    border-radius: 5px;
+    border-radius: 7px;
     cursor: pointer;
     text-align: left;
     font-family: inherit;
   }
   .sub-item:hover {
     background: var(--bg-hover);
+    color: var(--accent);
   }
   .check {
-    color: var(--fg);
+    color: var(--accent);
     font-size: 11px;
   }
 
