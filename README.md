@@ -18,17 +18,15 @@
 
 ## 界面一览
 
-| 主界面 / 搜索 | 编辑（长内容也能完整看到复制按钮） |
-|---|---|
-| ![主界面](docs/screenshots/list.png) | ![编辑器](docs/screenshots/editor-long.jpg) |
+![主界面 / 搜索](docs/screenshots/list.png)
 
 | 填空式编辑表单 | 坚果云同步设置 |
 |---|---|
-| ![编辑表单](docs/screenshots/edit-form.jpg) | ![设置](docs/screenshots/settings.jpg) |
+| ![编辑表单](docs/screenshots/edit-form.jpg) | ![设置](docs/screenshots/settings.png) |
 
 按住列表项左侧的 ⠿ 手柄即可拖拽排序（搜索结果与「全部」多分类视图下自动禁用，避免隐藏项错序）：
 
-![拖拽排序](docs/screenshots/drag-handle.jpg)
+![拖拽排序](docs/screenshots/drag-handle.png)
 
 ## 坚果云同步
 
