@@ -14,21 +14,29 @@
       href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='24' fill='%232563eb'/><text x='50' y='72' font-size='62' text-anchor='middle' fill='white' font-family='monospace' font-weight='bold'>⌕</text></svg>" />
+    <!-- favicon：与应用图标一致的深色圆角口袋方块 -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%231e1e20'/></svg>"
+    />
     <style>
       :root {
-        --bg: #0b0d12;
-        --bg-2: #11141b;
-        --surface: #161a23;
-        --line: #232936;
-        --line-2: #2e3545;
-        --ink: #eef1f6;
-        --ink-2: #aab2c2;
-        --ink-3: #6b7488;
+        /* 与 app.css 同款亮色 token，保持品牌一致 */
+        --bg: #f5f7fb;
+        --bg-2: #eef2f8;
+        --surface: #ffffff;
+        --surface-2: #f8fafd;
+        --line: #dde6f2;
+        --line-2: #c9d6e8;
+        --ink: #1f2a44;
+        --ink-2: #4a5670;
+        --ink-3: #748094;
         --accent: #2563eb;
-        --accent-2: #3b82f6;
-        --accent-soft: rgba(37, 99, 235, 0.14);
-        --glow: rgba(59, 130, 246, 0.35);
+        --accent-2: #1d4ed8;
+        --accent-soft: #eaf2ff;
+        --glow: rgba(37, 99, 235, 0.18);
+        --shadow-soft: 0 10px 32px rgba(31, 42, 68, 0.08);
+        --shadow-lift: 0 24px 60px -24px rgba(31, 42, 68, 0.22);
         --display: "Bricolage Grotesque", "Noto Sans SC", sans-serif;
         --body: "Geist", "Noto Sans SC", sans-serif;
         --mono: "JetBrains Mono", ui-monospace, monospace;
@@ -48,15 +56,15 @@
         overflow-x: hidden;
       }
 
-      /* ── 背景氛围：网格 + 渐变光斑 + 噪点 ── */
+      /* ── 背景氛围：极淡蓝光斑 + 细网格，克制 ── */
       .bg-fx {
         position: fixed;
         inset: 0;
         z-index: -1;
         pointer-events: none;
         background:
-          radial-gradient(900px 600px at 78% -8%, var(--glow), transparent 60%),
-          radial-gradient(700px 500px at 8% 12%, rgba(37, 99, 235, 0.12), transparent 55%),
+          radial-gradient(900px 600px at 82% -10%, var(--accent-soft), transparent 60%),
+          radial-gradient(700px 520px at 4% 8%, rgba(37, 99, 235, 0.06), transparent 58%),
           linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
       }
       .bg-fx::before {
@@ -66,16 +74,9 @@
         background-image:
           linear-gradient(var(--line) 1px, transparent 1px),
           linear-gradient(90deg, var(--line) 1px, transparent 1px);
-        background-size: 64px 64px;
-        opacity: 0.4;
-        mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 30%, transparent 75%);
-      }
-      .bg-fx::after {
-        content: "";
-        position: absolute;
-        inset: 0;
-        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
-        opacity: 0.04;
+        background-size: 72px 72px;
+        opacity: 0.45;
+        mask-image: radial-gradient(ellipse 80% 55% at 50% 0%, black 28%, transparent 72%);
       }
 
       .wrap {
@@ -90,11 +91,14 @@
         top: 0;
         z-index: 50;
         backdrop-filter: blur(12px);
-        background: rgba(11, 13, 18, 0.6);
+        background: rgba(245, 247, 251, 0.72);
         border-bottom: 1px solid transparent;
-        transition: border-color 0.3s;
+        transition: border-color 0.3s, background 0.3s;
       }
-      nav.scrolled { border-bottom-color: var(--line); }
+      nav.scrolled {
+        border-bottom-color: var(--line);
+        background: rgba(245, 247, 251, 0.88);
+      }
       nav .wrap {
         display: flex;
         align-items: center;
@@ -112,16 +116,14 @@
         text-decoration: none;
         color: var(--ink);
       }
+      /* 品牌标：与应用图标一致的深色圆角口袋方块 */
       .brand-mark {
         width: 30px;
         height: 30px;
-        border-radius: 8px;
-        background: var(--accent);
-        display: grid;
-        place-items: center;
-        color: #fff;
-        font-size: 18px;
+        border-radius: 6px; /* 30px × 0.18 ≈ 5.4，取 6 贴近图标比例 */
+        background: #1e1e20;
         box-shadow: 0 0 0 4px var(--accent-soft);
+        flex-shrink: 0;
       }
       .nav-links {
         display: flex;
@@ -134,19 +136,19 @@
         font-size: 14px;
         transition: color 0.15s;
       }
-      .nav-links a:hover { color: var(--ink); }
+      .nav-links a:hover { color: var(--accent); }
       .nav-cta {
         padding: 8px 16px;
         border-radius: 8px;
         background: var(--ink);
-        color: var(--bg) !important;
+        color: #fff !important;
         font-weight: 600;
       }
-      .nav-cta:hover { background: #fff; }
+      .nav-cta:hover { background: #000; }
 
       /* ── Hero ── */
       .hero {
-        padding: 90px 0 56px;
+        padding: 96px 0 56px;
         position: relative;
       }
       .badge {
@@ -161,11 +163,12 @@
         color: var(--ink-2);
         background: var(--surface);
         margin-bottom: 28px;
+        box-shadow: var(--shadow-soft);
         animation: rise 0.7s both;
       }
       .badge .tag {
         background: var(--accent-soft);
-        color: var(--accent-2);
+        color: var(--accent);
         padding: 2px 8px;
         border-radius: 999px;
         font-weight: 500;
@@ -180,7 +183,7 @@
         animation: rise 0.7s 0.05s both;
       }
       h1 .accent {
-        background: linear-gradient(120deg, var(--accent-2), #93c5fd);
+        background: linear-gradient(120deg, var(--accent), #60a5fa);
         -webkit-background-clip: text;
         background-clip: text;
         color: transparent;
@@ -190,7 +193,7 @@
       .lede {
         font-size: 19px;
         color: var(--ink-2);
-        max-width: 580px;
+        max-width: 600px;
         margin-bottom: 40px;
         animation: rise 0.7s 0.12s both;
       }
@@ -201,7 +204,7 @@
         border: 1px solid var(--line-2);
         padding: 2px 7px;
         border-radius: 6px;
-        color: var(--accent-2);
+        color: var(--accent);
       }
       .cta-row {
         display: flex;
@@ -219,7 +222,7 @@
         text-decoration: none;
         font-weight: 600;
         font-size: 15px;
-        transition: transform 0.12s, box-shadow 0.2s, background 0.2s;
+        transition: transform 0.12s, box-shadow 0.2s, background 0.2s, border-color 0.2s;
         border: 1px solid transparent;
       }
       .btn-primary {
@@ -238,15 +241,15 @@
         border-color: var(--line-2);
       }
       .btn-ghost:hover {
-        border-color: var(--accent-2);
-        color: var(--accent-2);
+        border-color: var(--accent);
+        color: var(--accent);
       }
       .btn .kbd-hint {
         font-family: var(--mono);
         font-size: 12px;
-        opacity: 0.7;
+        opacity: 0.8;
         padding-left: 8px;
-        border-left: 1px solid rgba(255, 255, 255, 0.2);
+        border-left: 1px solid rgba(255, 255, 255, 0.25);
       }
 
       /* ── Hero 模拟窗口（唤出动效）── */
@@ -256,7 +259,7 @@
         border: 1px solid var(--line);
         background: var(--surface);
         padding: 14px;
-        box-shadow: 0 40px 120px -30px rgba(0, 0, 0, 0.7);
+        box-shadow: var(--shadow-lift);
         animation: rise 0.9s 0.25s both;
       }
       .stage-bar {
@@ -279,6 +282,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
+        cursor: pointer;
       }
       .stage-prompt kbd {
         font-family: var(--mono);
@@ -293,7 +297,7 @@
         width: 7px;
         height: 7px;
         border-radius: 50%;
-        background: var(--accent-2);
+        background: var(--accent);
         animation: blink 1.4s infinite;
       }
       .stage img {
@@ -310,7 +314,7 @@
         font-size: 12px;
         letter-spacing: 0.15em;
         text-transform: uppercase;
-        color: var(--accent-2);
+        color: var(--accent);
         margin-bottom: 16px;
         display: flex;
         align-items: center;
@@ -320,7 +324,7 @@
         content: "";
         width: 24px;
         height: 1px;
-        background: var(--accent-2);
+        background: var(--accent);
       }
       h2 {
         font-family: var(--display);
@@ -334,7 +338,7 @@
       .section-lede {
         color: var(--ink-2);
         font-size: 18px;
-        max-width: 600px;
+        max-width: 620px;
         margin-bottom: 56px;
       }
 
@@ -346,14 +350,15 @@
       }
       .feat {
         border: 1px solid var(--line);
-        background: linear-gradient(180deg, var(--surface), var(--bg-2));
+        background: var(--surface);
         border-radius: 14px;
         padding: 28px;
-        transition: border-color 0.2s, transform 0.2s;
+        transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
       }
       .feat:hover {
         border-color: var(--accent);
         transform: translateY(-3px);
+        box-shadow: var(--shadow-soft);
       }
       .feat.big { grid-column: span 7; }
       .feat.med { grid-column: span 5; }
@@ -381,11 +386,11 @@
         display: block;
       }
       .feat.featured {
-        background: linear-gradient(140deg, rgba(37, 99, 235, 0.16), var(--surface) 55%);
-        border-color: var(--accent);
+        background: linear-gradient(140deg, var(--accent-soft), var(--surface) 60%);
+        border-color: #bcd2fb;
       }
       .feat.featured h3 .hi {
-        color: var(--accent-2);
+        color: var(--accent);
       }
 
       /* ── 截图画廊 ── */
@@ -399,11 +404,12 @@
         border: 1px solid var(--line);
         overflow: hidden;
         background: var(--surface);
-        transition: transform 0.25s, border-color 0.25s;
+        transition: transform 0.25s, border-color 0.25s, box-shadow 0.25s;
       }
       .shot:hover {
-        transform: scale(1.015);
+        transform: scale(1.012);
         border-color: var(--line-2);
+        box-shadow: var(--shadow-soft);
       }
       .shot.tall { grid-row: span 2; }
       .shot img {
@@ -433,19 +439,19 @@
         overflow: hidden;
       }
       .key-row {
-        background: var(--bg-2);
+        background: var(--surface);
         padding: 18px 22px;
         display: flex;
         align-items: center;
         justify-content: space-between;
         transition: background 0.15s;
       }
-      .key-row:hover { background: var(--surface); }
+      .key-row:hover { background: var(--surface-2); }
       .key-row .what { color: var(--ink-2); font-size: 15px; }
       .key-row kbd {
         font-family: var(--mono);
         font-size: 13px;
-        background: var(--bg);
+        background: var(--bg-2);
         border: 1px solid var(--line-2);
         border-bottom-width: 2px;
         padding: 4px 9px;
@@ -467,7 +473,7 @@
         padding: 20px 22px;
         border: 1px solid var(--line-2);
         border-radius: 12px;
-        background: linear-gradient(180deg, var(--surface), var(--bg-2));
+        background: var(--surface);
         text-decoration: none;
         color: var(--ink);
         transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
@@ -482,7 +488,7 @@
         height: 44px;
         border-radius: 10px;
         background: var(--accent-soft);
-        color: var(--accent-2);
+        color: var(--accent);
         display: grid;
         place-items: center;
         font-size: 20px;
@@ -499,12 +505,12 @@
         color: var(--ink-3);
         font-size: 14px;
       }
-      .dl-note a { color: var(--accent-2); }
+      .dl-note a { color: var(--accent); }
       .src-build {
         margin-top: 28px;
         border: 1px solid var(--line);
         border-radius: 14px;
-        background: var(--bg-2);
+        background: var(--surface);
         overflow: hidden;
       }
       .src-build summary {
@@ -522,7 +528,7 @@
         display: inline-block;
         margin-right: 10px;
         transition: transform 0.2s;
-        color: var(--accent-2);
+        color: var(--accent);
       }
       .src-build[open] summary::before { transform: rotate(90deg); }
       .src-build[open] summary { border-bottom: 1px solid var(--line); }
@@ -564,7 +570,7 @@
         overflow-x: auto;
       }
       .install .c { color: var(--ink-3); }
-      .install .cmd { color: var(--accent-2); }
+      .install .cmd { color: var(--accent); }
 
       /* ── 页脚 CTA ── */
       .final {
@@ -577,7 +583,7 @@
       }
       .final h2 .accent {
         font-style: normal;
-        background: linear-gradient(120deg, var(--accent-2), #93c5fd);
+        background: linear-gradient(120deg, var(--accent), #60a5fa);
         -webkit-background-clip: text;
         background-clip: text;
         color: transparent;
@@ -596,7 +602,7 @@
         gap: 16px;
       }
       footer a { color: var(--ink-2); text-decoration: none; }
-      footer a:hover { color: var(--accent-2); }
+      footer a:hover { color: var(--accent); }
 
       /* ── 动画 ── */
       @keyframes rise {
@@ -632,7 +638,7 @@
     <nav id="nav">
       <div class="wrap">
         <a class="brand" href="#top">
-          <span class="brand-mark">⌕</span>
+          <span class="brand-mark" aria-hidden="true"></span>
           Prompt Pocket
         </a>
         <div class="nav-links">
@@ -640,7 +646,7 @@
           <a href="#gallery">截图</a>
           <a href="#shortcuts">快捷键</a>
           <a href="#install">安装</a>
-          <a class="nav-cta" href="https://github.com/techdou/prompt-pocket/releases/tag/v1.0.6">下载 v1.0.6</a>
+          <a class="nav-cta" href="https://github.com/techdou/prompt-pocket/releases/latest">下载</a>
         </div>
       </div>
     </nav>
@@ -649,18 +655,18 @@
     <header class="hero" id="top">
       <div class="wrap">
         <div class="badge">
-          <span class="tag">v1.0.6</span>
-          UI 升级 · 分离字体栈 · 长 prompt 修复 · 拖拽重写
+          <span class="tag">Tauri + Rust</span>
+          1.6MB 安装包 · 坚果云同步 · 数据归你所有
         </div>
         <h1>把提示词<br />装进口袋，<span class="accent">秒唤即用。</span></h1>
         <p class="lede">
           按 <code>Ctrl+Alt+P</code> 从任意应用唤出，搜索 → 选中 →
-          <code>Enter</code> 复制，回到原应用粘贴即用。Markdown
-          存储，坚果云同步，Tauri + Rust，安装包仅 1.6MB。
+          <code>Enter</code> 复制，回到原应用粘贴即用。一个 Markdown
+          文件即一条提示词，文件夹即分类，用你自己的坚果云同步到所有设备。
         </p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/tag/v1.0.6">
-            下载 v1.0.6
+          <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/latest">
+            下载 Prompt Pocket
             <span class="kbd-hint">Windows</span>
           </a>
           <a class="btn btn-ghost" href="#install">查看安装方式</a>
@@ -688,52 +694,52 @@
         <div class="eyebrow">What's inside</div>
         <h2>克制，但每一个像素都经过打磨。</h2>
         <p class="section-lede">
-          v1.0.6 是一次全面的设计与工程升级——从视觉系统到字体栈，从布局 bug 到拖拽内核。
+          一个专注的提示词口袋：只在需要时出现，复制完即消失，把常用 Prompt 变成肌肉记忆。
         </p>
 
         <div class="features">
           <div class="feat big featured">
-            <div class="feat-num">01 / 视觉系统</div>
-            <span class="glyph">🎨</span>
-            <h3>全新的<span class="hi">亮蓝聚焦</span>主题</h3>
+            <div class="feat-num">01 / 唤出</div>
+            <span class="glyph">⚡</span>
+            <h3>全局<span class="hi">秒唤</span>，失焦即收</h3>
             <p>
-              浅色基调搭配 <code>#2563eb</code> 强调色，卡片化布局、统一圆角梯度与柔和阴影。搜索框、胶囊式分类标签（带计数徽章）、按钮、右键菜单、对话框全部重绘，聚焦态有清晰的描边光晕。
+              <code>Ctrl+Alt+P</code> 从任意应用唤出 spotlight 窗口，复制完自动隐藏，失焦也会收起。不抢焦点、不占任务栏，像系统自带的搜索一样轻盈。
             </p>
           </div>
 
           <div class="feat med">
-            <div class="feat-num">02 / 字体栈</div>
-            <span class="glyph">🔤</span>
-            <h3>西文与中文分栈</h3>
+            <div class="feat-num">02 / 搜索</div>
+            <span class="glyph">🔍</span>
+            <h3>模糊搜索 · 键盘全程可达</h3>
             <p>
-              西文（Segoe UI / Aptos）与中文（Noto Serif / Sans SC）分别选型，混排更协调；正文加大字号与行距，代码统一用等宽字体 Cascadia Code。
+              标题 / 分类 / 正文实时检索，<code>Ctrl+F</code> 聚焦、<code>↑↓</code> 选择、<code>Enter</code> 复制——从唤出到粘贴，一次都不必碰鼠标。
             </p>
           </div>
 
           <div class="feat sm">
-            <div class="feat-num">03 / 布局修复</div>
-            <span class="glyph">📏</span>
-            <h3>长内容不再挤掉按钮</h3>
+            <div class="feat-num">03 / 存储</div>
+            <span class="glyph">📝</span>
+            <h3>Markdown 文件 + 填空编辑</h3>
             <p>
-              标题栏 / 正文滚动区 / 操作栏三段固定，复制按钮始终可见。
+              一条 Prompt 一个 <code>.md</code>，文件夹即分类。标题/分类用表单填，无需手写 YAML。
             </p>
           </div>
 
           <div class="feat sm">
-            <div class="feat-num">04 / 拖拽重写</div>
-            <span class="glyph">🔀</span>
-            <h3>原生 Pointer Events</h3>
-            <p>
-              弃用三方库，落点实时计算 + 指示线，修掉同步竞态。
-            </p>
-          </div>
-
-          <div class="feat sm">
-            <div class="feat-num">05 / 云同步</div>
+            <div class="feat-num">04 / 同步</div>
             <span class="glyph">☁️</span>
-            <h3>坚果云 WebDAV</h3>
+            <h3>坚果云 WebDAV 多端同步</h3>
             <p>
-              逐层遍历修复多分类拉取，.trash 防泄漏。
+              内置设置界面，填账号 + 应用密码即可。启动自动拉取、保存自动推送。
+            </p>
+          </div>
+
+          <div class="feat sm">
+            <div class="feat-num">05 / 排序</div>
+            <span class="glyph">🔀</span>
+            <h3>原生拖拽排序</h3>
+            <p>
+              按住列表项手柄拖到目标位置，落点指示线实时跟随。
             </p>
           </div>
 
@@ -742,7 +748,7 @@
             <span class="glyph">🪶</span>
             <h3>1.6MB 安装包，~42MB 内存</h3>
             <p>
-              Tauri v2 + Rust 后端，无 Electron、无内嵌浏览器。Markdown 文件 + YAML frontmatter 存储，没有数据库，没有云端账号——数据完全归你所有，用你自己的坚果云同步到所有设备。CPU 占用近乎为零，常驻后台毫无负担。
+              Tauri v2 + Rust 后端，无 Electron、无内嵌浏览器。没有数据库，没有云端账号——数据完全归你所有，用你自己的坚果云同步到所有设备。CPU 占用近乎为零，常驻后台毫无负担。
             </p>
           </div>
         </div>
@@ -755,7 +761,7 @@
         <div class="eyebrow">Screenshots</div>
         <h2>看一眼真实的样子。</h2>
         <p class="section-lede">
-          以下是 v1.0.6 实机界面。点开 Release 页可获取最新版本。
+          以下是 Prompt Pocket 的实机界面，所见即所得。
         </p>
 
         <div class="gallery">
@@ -768,7 +774,7 @@
             <div class="shot-cap"><span>edit / 填空式表单</span><span>04</span></div>
           </div>
           <div class="shot">
-            <img src="screenshots/settings.jpg" alt="坚果云同步设置面板" loading="lazy" />
+            <img src="screenshots/settings.png" alt="坚果云同步设置面板" loading="lazy" />
             <div class="shot-cap"><span>settings / 坚果云</span><span>05</span></div>
           </div>
         </div>
@@ -800,17 +806,17 @@
         <div class="eyebrow">Get it</div>
         <h2>Windows 用户，下载即用。</h2>
         <p class="section-lede">
-          v1.0.6 提供 NSIS 与 MSI 两种安装包，双击安装，无需额外运行环境。
+          提供 NSIS 与 MSI 两种安装包，双击安装，无需额外运行环境。
         </p>
         <div class="dl-row">
-          <a class="dl-card" href="https://github.com/techdou/prompt-pocket/releases/download/v1.0.6/Prompt.Pocket_1.0.6_x64-setup.exe">
+          <a class="dl-card" href="https://github.com/techdou/prompt-pocket/releases/latest">
             <span class="dl-ico">⬇</span>
             <span class="dl-text">
               <span class="dl-name">Windows 安装程序</span>
               <span class="dl-sub">NSIS · .exe · 约 2.7 MB</span>
             </span>
           </a>
-          <a class="dl-card" href="https://github.com/techdou/prompt-pocket/releases/download/v1.0.6/Prompt.Pocket_1.0.6_x64_en-US.msi">
+          <a class="dl-card" href="https://github.com/techdou/prompt-pocket/releases/latest">
             <span class="dl-ico">⬇</span>
             <span class="dl-text">
               <span class="dl-name">MSI 安装包</span>
@@ -848,8 +854,8 @@
       <div class="wrap">
         <h2>别再翻聊天记录找<span class="accent">提示词</span>了。</h2>
         <div class="cta-row" style="justify-content:center; margin-bottom:0;">
-          <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/tag/v1.0.6">
-            下载 Prompt Pocket v1.0.6
+          <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/latest">
+            下载 Prompt Pocket
           </a>
           <a class="btn btn-ghost" href="https://github.com/techdou/prompt-pocket">查看源码</a>
         </div>

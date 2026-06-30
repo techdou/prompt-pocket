@@ -465,7 +465,12 @@
 
     const tag = (e.target as HTMLElement)?.tagName;
     const inEditor = tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT";
-    if (inEditor) return;
+    // 搜索框聚焦时放行 ↑↓ / Enter 做列表导航（单行 input 不需要这些键编辑文本），
+    // 实现「Ctrl+F 搜索 → ↑↓ 选中 → Enter 复制」全程不离开搜索框、不碰鼠标。
+    // 其余编辑态（正文 textarea、重命名 input、select）照旧早退，不干扰编辑。
+    const isSearchInput =
+      (e.target as HTMLElement)?.id === "search-input";
+    if (inEditor && !isSearchInput) return;
 
     if (e.key === "ArrowDown") {
       e.preventDefault();

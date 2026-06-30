@@ -18,17 +18,15 @@
 
 ## 界面一览
 
-| 主界面 / 搜索 | 编辑（长内容也能完整看到复制按钮） |
-|---|---|
-| ![主界面](docs/screenshots/list.png) | ![编辑器](docs/screenshots/editor-long.jpg) |
+![主界面 / 搜索](docs/screenshots/list.png)
 
 | 填空式编辑表单 | 坚果云同步设置 |
 |---|---|
-| ![编辑表单](docs/screenshots/edit-form.jpg) | ![设置](docs/screenshots/settings.jpg) |
+| ![编辑表单](docs/screenshots/edit-form.jpg) | ![设置](docs/screenshots/settings.png) |
 
 按住列表项左侧的 ⠿ 手柄即可拖拽排序（搜索结果与「全部」多分类视图下自动禁用，避免隐藏项错序）：
 
-![拖拽排序](docs/screenshots/drag-handle.jpg)
+![拖拽排序](docs/screenshots/drag-handle.png)
 
 ## 坚果云同步
 
@@ -122,6 +120,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 ## 更新日志
+
+### v1.1.0
+
+- ⌨️ **搜索框内即可键盘导航**：`Ctrl+F` 聚焦搜索框后，`↑`/`↓` 直接选择、`Enter` 直接复制并隐藏，全程不必离开搜索框、不碰鼠标
+- 🎨 **落地页重设计**：改为与 App 一致的亮色主题，内容从版本更新介绍改为 Prompt Pocket 产品叙事；logo 统一为应用图标同款深色圆角方块
+- 📸 **重新截取** drag-handle / settings 截图
 
 ### v1.0.6
 
