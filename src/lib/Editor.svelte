@@ -177,8 +177,14 @@
         {@html renderMarkdown(body)}
       </div>
       <footer class="editor-foot">
-        <button class="primary" onclick={() => oncopy("markdown")}>
-          复制
+        <button
+          class="copy-action"
+          onclick={() => oncopy("markdown")}
+          title="复制 (Enter)"
+          aria-label="复制提示词"
+        >
+          <span class="copy-icon" aria-hidden="true">⧉</span>
+          <span class="copy-label">复制</span>
           <kbd>Enter</kbd>
         </button>
         <span class="meta-info">
@@ -258,8 +264,11 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+    min-height: 0;
     height: 100%;
-    background: var(--bg);
+    max-height: 100%;
+    overflow: hidden;
+    background: var(--bg-elevated);
   }
   .editor.empty {
     align-items: center;
@@ -270,8 +279,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 20px;
+    flex-shrink: 0;
+    min-height: 58px;
+    padding: 0 28px;
     border-bottom: 1px solid var(--border);
+    background: var(--bg-elevated);
     gap: 8px;
   }
   .title-block {
@@ -280,11 +292,8 @@
     gap: 6px;
     min-width: 0;
   }
-  .pin {
-    font-size: 12px;
-    color: var(--fg);
-  }
   .title {
+    font-family: var(--font-ui);
     font-size: 15px;
     font-weight: 600;
     margin: 0;
@@ -294,17 +303,21 @@
   }
   .text-btn {
     background: transparent;
-    border: none;
+    border: 1px solid transparent;
     color: var(--muted);
     font-size: 13px;
-    padding: 4px 8px;
-    border-radius: 4px;
+    padding: 5px 9px;
+    border-radius: 7px;
     cursor: pointer;
-    transition: all 0.12s;
+    transition:
+      background 0.12s,
+      border-color 0.12s,
+      color 0.12s;
   }
   .text-btn:hover {
-    color: var(--fg);
+    color: var(--accent);
     background: var(--bg-hover);
+    border-color: var(--border);
   }
   .text-btn.danger:hover {
     color: var(--danger);
@@ -319,10 +332,14 @@
     flex: 1;
     min-height: 0; /* 关键：让 flex 子项在内容超长时收缩，footer 固定在底部 */
     overflow-y: auto;
-    padding: 24px 32px;
-    font-size: 14px;
-    line-height: 1.75;
+    overflow-x: hidden;
+    padding: 30px 44px 36px;
+    font-family: var(--font-ui);
+    font-size: 15px;
+    line-height: 1.78;
     color: var(--fg);
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
   .preview :global(.empty-body) {
     color: var(--muted);
@@ -332,26 +349,86 @@
   .editor-foot {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 10px 20px;
+    flex-shrink: 0;
+    gap: 12px;
+    min-height: 56px;
+    padding: 10px 28px;
     border-top: 1px solid var(--border);
-    background: var(--bg);
+    background: #f8fbff;
   }
-  .editor-foot kbd {
-    display: inline-block;
-    margin-left: 6px;
-    padding: 1px 5px;
-    font-size: 10px;
-    font-family: ui-monospace, monospace;
-    background: rgba(255, 255, 255, 0.15);
-    border: 1px solid rgba(255, 255, 255, 0.25);
-    border-radius: 3px;
-    line-height: 1.4;
+  .copy-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-width: 112px;
+    height: 34px;
+    padding: 0 12px;
+    border: 1px solid var(--accent);
+    border-radius: 7px;
+    background: var(--accent);
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(37, 99, 235, 0.18);
+    transition:
+      transform 0.08s,
+      box-shadow 0.12s,
+      opacity 0.12s;
+  }
+  .copy-action:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    box-shadow: 0 8px 22px rgba(37, 99, 235, 0.22);
+  }
+  .copy-action:active {
+    transform: translateY(1px);
+    box-shadow: none;
+  }
+  .copy-action:focus-visible {
+    outline: 3px solid var(--accent-soft);
+    outline-offset: 2px;
+  }
+  .copy-icon {
+    font-size: 14px;
+    line-height: 1;
+    opacity: 0.9;
+  }
+  .copy-label {
+    line-height: 1;
+  }
+  .copy-action kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    min-width: 40px;
+    padding: 0 6px;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    line-height: 1;
+    color: inherit;
+    background: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 5px;
   }
   .meta-info {
     margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    max-width: 220px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elevated);
     font-size: 12px;
     color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* ── 填空式表单 ── */
@@ -384,31 +461,18 @@
     border-radius: 6px;
     padding: 7px 10px;
     font-size: 13px;
-    font-family: inherit;
+    font-family: var(--font-ui);
     outline: none;
     width: 100%;
     box-sizing: border-box;
   }
   .form-input:focus {
-    border-color: var(--fg);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   select.form-input {
     cursor: pointer;
   }
-  .checkbox-wrap {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 13px;
-    cursor: pointer;
-    user-select: none;
-  }
-  .checkbox-wrap input {
-    width: 15px;
-    height: 15px;
-    cursor: pointer;
-  }
-
   .new-cat-row {
     flex-direction: row;
     gap: 6px;
@@ -424,7 +488,7 @@
     cursor: pointer;
   }
   .link-btn:hover {
-    color: var(--fg);
+    color: var(--accent);
   }
 
   .form-row-body {
@@ -438,7 +502,7 @@
     color: var(--fg);
     border-radius: 6px;
     padding: 10px 12px;
-    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 13px;
     line-height: 1.6;
     resize: none;
@@ -446,7 +510,8 @@
     min-height: 160px;
   }
   .body-input:focus {
-    border-color: var(--fg);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
 
   .placeholder {
@@ -484,14 +549,15 @@
     margin: 3px 0;
   }
   .prose :global(code) {
-    background: var(--bg-elevated);
+    background: var(--accent-soft);
     padding: 1px 5px;
     border-radius: 4px;
-    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-family: var(--font-mono);
     font-size: 12.5px;
   }
   .prose :global(pre) {
-    background: var(--bg-elevated);
+    background: #f8fbff;
+    border: 1px solid var(--border);
     padding: 12px;
     border-radius: 8px;
     overflow-x: auto;
