@@ -454,6 +454,87 @@
       }
 
       /* ── 安装区 ── */
+      .dl-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin-bottom: 16px;
+      }
+      .dl-card {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 20px 22px;
+        border: 1px solid var(--line-2);
+        border-radius: 12px;
+        background: linear-gradient(180deg, var(--surface), var(--bg-2));
+        text-decoration: none;
+        color: var(--ink);
+        transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+      }
+      .dl-card:hover {
+        border-color: var(--accent);
+        transform: translateY(-3px);
+        box-shadow: 0 16px 40px -16px var(--glow);
+      }
+      .dl-ico {
+        width: 44px;
+        height: 44px;
+        border-radius: 10px;
+        background: var(--accent-soft);
+        color: var(--accent-2);
+        display: grid;
+        place-items: center;
+        font-size: 20px;
+        flex-shrink: 0;
+      }
+      .dl-text { display: flex; flex-direction: column; gap: 3px; }
+      .dl-name { font-weight: 600; font-size: 16px; }
+      .dl-sub {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--ink-3);
+      }
+      .dl-note {
+        color: var(--ink-3);
+        font-size: 14px;
+      }
+      .dl-note a { color: var(--accent-2); }
+      .src-build {
+        margin-top: 28px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--bg-2);
+        overflow: hidden;
+      }
+      .src-build summary {
+        padding: 16px 20px;
+        cursor: pointer;
+        font-family: var(--mono);
+        font-size: 13px;
+        color: var(--ink-2);
+        list-style: none;
+        user-select: none;
+      }
+      .src-build summary::-webkit-details-marker { display: none; }
+      .src-build summary::before {
+        content: "▸";
+        display: inline-block;
+        margin-right: 10px;
+        transition: transform 0.2s;
+        color: var(--accent-2);
+      }
+      .src-build[open] summary::before { transform: rotate(90deg); }
+      .src-build[open] summary { border-bottom: 1px solid var(--line); }
+      .src-build .install {
+        border: 0;
+        border-radius: 0;
+        margin: 0;
+      }
+      @media (max-width: 640px) {
+        .dl-row { grid-template-columns: 1fr; }
+      }
+
       .install {
         border: 1px solid var(--line);
         border-radius: 14px;
@@ -582,7 +663,7 @@
             下载 v1.0.6
             <span class="kbd-hint">Windows</span>
           </a>
-          <a class="btn btn-ghost" href="#install">从源码构建</a>
+          <a class="btn btn-ghost" href="#install">查看安装方式</a>
         </div>
 
         <div class="stage" id="stage">
@@ -717,16 +798,39 @@
     <section id="install">
       <div class="wrap">
         <div class="eyebrow">Get it</div>
-        <h2>三行命令，从源码跑起来。</h2>
+        <h2>Windows 用户，下载即用。</h2>
         <p class="section-lede">
-          需 Node.js 18+ 与 Rust 1.77+。本仓库暂未提供 CI 预编译包，请用 Tauri 本地构建。
+          v1.0.6 提供 NSIS 与 MSI 两种安装包，双击安装，无需额外运行环境。
         </p>
-        <div class="install">
-          <div class="install-head">
-            <span class="d"></span><span class="d"></span><span class="d"></span>
-            <span style="margin-left:8px">bash — prompt-pocket</span>
-          </div>
-          <pre><span class="c"># 克隆并安装依赖</span>
+        <div class="dl-row">
+          <a class="dl-card" href="https://github.com/techdou/prompt-pocket/releases/download/v1.0.6/Prompt.Pocket_1.0.6_x64-setup.exe">
+            <span class="dl-ico">⬇</span>
+            <span class="dl-text">
+              <span class="dl-name">Windows 安装程序</span>
+              <span class="dl-sub">NSIS · .exe · 约 2.7 MB</span>
+            </span>
+          </a>
+          <a class="dl-card" href="https://github.com/techdou/prompt-pocket/releases/download/v1.0.6/Prompt.Pocket_1.0.6_x64_en-US.msi">
+            <span class="dl-ico">⬇</span>
+            <span class="dl-text">
+              <span class="dl-name">MSI 安装包</span>
+              <span class="dl-sub">.msi · 约 3.8 MB</span>
+            </span>
+          </a>
+        </div>
+        <p class="dl-note">
+          其他平台或想自行编译？看下面的源码步骤，或前往
+          <a href="https://github.com/techdou/prompt-pocket/releases">全部 Releases</a>。
+        </p>
+
+        <details class="src-build">
+          <summary>从源码构建（需 Node.js 18+ 与 Rust 1.77+）</summary>
+          <div class="install">
+            <div class="install-head">
+              <span class="d"></span><span class="d"></span><span class="d"></span>
+              <span style="margin-left:8px">bash — prompt-pocket</span>
+            </div>
+            <pre><span class="c"># 克隆并安装依赖</span>
 <span class="cmd">git clone</span> https://github.com/techdou/prompt-pocket.git
 <span class="cmd">cd</span> prompt-pocket
 <span class="cmd">npm install</span>
@@ -734,12 +838,8 @@
 <span class="c"># 开发模式（热重载）或打包发布</span>
 <span class="cmd">npm run</span> tauri:dev
 <span class="cmd">npm run</span> tauri:build   <span class="c"># 产物在 src-tauri/target/release/bundle/</span></pre>
-        </div>
-        <p style="margin-top:24px; color:var(--ink-3); font-size:14px;">
-          想要预编译安装包？前往
-          <a href="https://github.com/techdou/prompt-pocket/releases" style="color:var(--accent-2)">Releases 页面</a>
-          查看最新版本。
-        </p>
+          </div>
+        </details>
       </div>
     </section>
 
