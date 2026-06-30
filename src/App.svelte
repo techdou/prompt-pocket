@@ -24,6 +24,12 @@
   import Editor from "./lib/Editor.svelte";
   import Settings from "./lib/Settings.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
+  import {
+    canReorderPromptList,
+    getReorderCategory,
+    getReorderDisabledReason,
+    movePathOrder,
+  } from "./lib/reorder";
 
   let allPrompts: Prompt[] = $state([]);
   let categories: CategoryCount[] = $state([]);
@@ -77,6 +83,12 @@
   );
 
   let visiblePrompts = $derived(filterPrompts(categoryFiltered, query));
+  let canReorderPrompts = $derived(
+    canReorderPromptList(query, selectedCategory, visiblePrompts),
+  );
+  let reorderDisabledReason = $derived(
+    getReorderDisabledReason(query, selectedCategory, visiblePrompts),
+  );
 
   let selectedIndex = $state(0);
   // PromptList 上报的滚动函数（键盘导航用）
@@ -116,12 +128,26 @@
     }
   }
 
+  // 拖拽重排进行中标志：reorderPrompts 把新顺序写盘前，若 sync-finished
+  // 抵达并触发 refresh()，会读到旧 .order.json 把刚拖的顺序冲掉。
+  // 用该标志让写盘期间的 refresh 延迟到写盘完成后，避免竞态。
+  let reorderInFlight = false;
+  let pendingRefresh = false;
+  async function guardedRefresh() {
+    if (reorderInFlight) {
+      // 重排写盘中：标记需要补刷，等 doReorder 完成后自己刷
+      pendingRefresh = true;
+      return;
+    }
+    await refresh();
+  }
+
   // 监听后端 sync-finished 事件，自动刷新
   let unlisten: (() => void) | null = null;
   $effect(() => {
     import("@tauri-apps/api/event").then(({ listen }) => {
       listen("sync-finished", () => {
-        void refresh();
+        void guardedRefresh();
         void getSyncStatus().then((s) => (syncStatus = s));
       }).then((fn) => (unlisten = fn));
     });
@@ -278,35 +304,48 @@
     }
   }
 
-  // 拖拽排序：本地重排 + 持久化
+  // 拖拽排序：原生 DnD 直接给出 from/to（基于当前分类列表的索引）。
+  // from = 被拖项索引，to = 目标插入点（移动后插到该 index 之前，允许等于 length）。
+  // 这里基于 visiblePrompts 重排得到新顺序，更新该分类各 prompt 的 order 字段，
+  // 然后对整个 allPrompts 稳定重排（保持全局 category 字母序，避免「全部」视图闪错序）。
   async function doReorder(from: number, to: number) {
-    if (from === to || from < 0 || to < 0) return;
-    // 只在非搜索、非"全部"视图下允许拖拽
-    if (query.trim() || selectedCategory === "__all__") return;
+    if (query.trim()) return;
+    const categoryName = getReorderCategory(selectedCategory, visiblePrompts);
+    if (!categoryName) return;
+    const newPathOrder = movePathOrder(visiblePrompts, from, to);
+    if (!newPathOrder) return;
 
-    // 基于当前可见列表重排（完整边界 clamp）
-    const list = [...visiblePrompts];
-    if (list.length === 0 || from >= list.length) return;
-    // to 允许等于 length（插入到末尾后），clamp 到 [0, length]
-    const clampedTo = Math.max(0, Math.min(to, list.length));
-    if (clampedTo === from || clampedTo === from + 1) return;
+    // 乐观更新：按新顺序给该分类各项赋 order，再全局稳定排序
+    // （category 字母序 → order 升序 → updated 倒序，与后端 scan_prompts 一致）
+    const orderMap = new Map(newPathOrder.map((path, i) => [path, i]));
+    allPrompts = allPrompts
+      .map((p) =>
+        p.category === categoryName
+          ? { ...p, order: orderMap.has(p.path) ? orderMap.get(p.path) : undefined }
+          : p,
+      )
+      .sort((a, b) => {
+        const c = a.category.localeCompare(b.category);
+        if (c !== 0) return c;
+        const oa = a.order ?? Number.MAX_SAFE_INTEGER;
+        const ob = b.order ?? Number.MAX_SAFE_INTEGER;
+        if (oa !== ob) return oa - ob;
+        return b.meta.updated.localeCompare(a.meta.updated);
+      });
 
-    const [moved] = list.splice(from, 1);
-    const insertAt = clampedTo > from ? clampedTo - 1 : clampedTo;
-    list.splice(insertAt, 0, moved);
-
-    const categoryName = selectedCategory;
-    const newPathOrder = list.map((p) => p.path);
-
-    // 用新顺序替换 allPrompts 中该分类的部分（其他分类保持不变）
-    const others = allPrompts.filter((p) => p.category !== categoryName);
-    allPrompts = [...others, ...list];
-
+    reorderInFlight = true;
+    pendingRefresh = false;
     try {
       await reorderPrompts(categoryName, newPathOrder);
     } catch (e) {
       showError(String(e));
       await refresh();
+    } finally {
+      reorderInFlight = false;
+      if (pendingRefresh) {
+        pendingRefresh = false;
+        await refresh();
+      }
     }
   }
 
@@ -509,7 +548,8 @@
         prompts={visiblePrompts}
         {selectedPath}
         {selectedIndex}
-        draggable={!query.trim() && selectedCategory !== "__all__"}
+        draggable={canReorderPrompts}
+        disabledReason={reorderDisabledReason}
         onmounted={(fn) => (scrollToIndexFn = fn)}
         onselect={(path) => {
           selectedPath = path;
@@ -675,6 +715,7 @@
     display: flex;
     flex-direction: column;
     height: 100vh;
+    overflow: hidden;
     background: var(--bg);
     color: var(--fg);
     font-size: 14px;
@@ -682,8 +723,8 @@
 
   .topbar {
     flex-shrink: 0;
-    padding: 12px 16px 10px;
-    border-bottom: 1px solid var(--border);
+    padding: 14px 18px 10px;
+    border-bottom: 1px solid transparent;
     background: var(--bg);
   }
   .search-wrap {
@@ -692,17 +733,21 @@
     gap: 8px;
     background: var(--bg-elevated);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0 10px;
-    height: 34px;
-    transition: border-color 0.12s;
+    border-radius: 10px;
+    padding: 0 8px 0 12px;
+    height: 42px;
+    box-shadow: 0 1px 2px rgba(31, 42, 68, 0.04);
+    transition:
+      border-color 0.12s,
+      box-shadow 0.12s;
   }
   .search-wrap:focus-within {
-    border-color: var(--fg);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .icon {
     color: var(--muted);
-    font-size: 16px;
+    font-size: 17px;
     line-height: 1;
   }
   #search-input {
@@ -718,35 +763,41 @@
     color: var(--muted);
   }
   .new-btn {
-    width: 24px;
-    height: 24px;
-    border-radius: 6px;
-    border: none;
-    background: var(--bg-active);
-    color: var(--fg);
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    background: var(--accent-soft);
+    color: var(--accent);
     font-size: 18px;
     line-height: 1;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: background 0.12s;
+    transition:
+      background 0.12s,
+      border-color 0.12s,
+      color 0.12s;
   }
   .new-btn:hover {
-    background: var(--fg);
-    color: var(--bg);
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #ffffff;
   }
 
   .sync-indicator {
-    width: 8px;
-    height: 8px;
+    width: 9px;
+    height: 9px;
     border-radius: 50%;
     background: #22a06b;
     flex-shrink: 0;
     cursor: help;
+    box-shadow: 0 0 0 3px rgba(34, 160, 107, 0.12);
   }
   .sync-indicator.syncing {
-    background: #4a7cf7;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
     animation: sync-pulse 1s infinite;
   }
   .sync-indicator.error {
@@ -761,16 +812,24 @@
   .body {
     flex: 1;
     display: grid;
-    grid-template-columns: 300px 1fr;
+    grid-template-columns: 312px 1fr;
+    grid-template-rows: minmax(0, 1fr);
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg);
+  }
+  .body :global(.list),
+  .body :global(.editor) {
+    min-width: 0;
     min-height: 0;
   }
 
   .tabs {
     flex-shrink: 0;
-    height: 40px;
+    height: 44px;
     border-bottom: 1px solid var(--border);
-    background: var(--bg);
-    padding: 0 16px;
+    background: var(--bg-elevated);
+    padding: 0 18px;
   }
 
   .state {
@@ -786,7 +845,7 @@
     width: 28px;
     height: 28px;
     border: 2px solid var(--border);
-    border-top-color: var(--fg);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin 0.8s linear infinite;
   }
@@ -801,10 +860,13 @@
     bottom: 24px;
     left: 50%;
     transform: translateX(-50%);
-    background: var(--fg);
-    color: var(--bg);
-    padding: 8px 16px;
-    border-radius: 6px;
+    background: var(--bg-elevated);
+    color: var(--fg);
+    padding: 10px 16px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 10px;
+    box-shadow: var(--shadow-soft);
     font-size: 13px;
     z-index: 100;
   }
@@ -839,7 +901,7 @@
   .backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.35);
+    background: rgba(31, 42, 68, 0.24);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -849,10 +911,10 @@
   .dialog {
     width: 380px;
     max-width: 90vw;
-    background: var(--bg);
+    background: var(--bg-elevated);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+    border-radius: 12px;
+    box-shadow: var(--shadow-soft);
     padding: 20px;
     display: flex;
     flex-direction: column;
@@ -880,14 +942,15 @@
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 7px 10px;
     font-size: 13px;
     outline: none;
   }
   .dialog-row input:focus,
   .dialog-row select:focus {
-    border-color: var(--fg);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
   }
   .dialog-actions {
     display: flex;
@@ -899,10 +962,10 @@
     position: fixed;
     z-index: 160;
     min-width: 140px;
-    background: var(--bg);
+    background: var(--bg-elevated);
     border: 1px solid var(--border);
-    border-radius: 8px;
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+    border-radius: 10px;
+    box-shadow: var(--shadow-soft);
     padding: 4px;
   }
   .cat-menu-item {
@@ -915,13 +978,14 @@
     color: var(--fg);
     font-size: 13px;
     padding: 7px 10px;
-    border-radius: 5px;
+    border-radius: 7px;
     cursor: pointer;
     text-align: left;
     font-family: inherit;
   }
   .cat-menu-item:hover {
     background: var(--bg-hover);
+    color: var(--accent);
   }
   .cat-menu-item .ico {
     width: 16px;

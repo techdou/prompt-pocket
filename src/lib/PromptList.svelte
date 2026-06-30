@@ -1,7 +1,5 @@
 <script lang="ts">
   import type { Prompt } from "./types";
-  import { dndzone } from "svelte-dnd-action";
-  import type { DndEvent } from "svelte-dnd-action";
 
   let {
     prompts,
@@ -11,88 +9,187 @@
     oncontextmenu,
     onreorder,
     draggable = true,
+    disabledReason = "",
   }: {
     prompts: Prompt[];
     selectedPath: string | null;
     selectedIndex: number;
     onselect: (path: string) => void;
     oncontextmenu: (prompt: Prompt, x: number, y: number) => void;
-    onreorder: (from: number, to: number) => void;
+    /** 拖拽结束回调：把 fromIndex 处的项移动到 toIndex 之前 */
+    onreorder: (fromIndex: number, toIndex: number) => void;
     draggable?: boolean;
+    disabledReason?: string;
   } = $props();
 
-  // dnd-action 需要带 id 的项
-  type Item = { id: string; data: Prompt };
-  let items = $state<Item[]>([]);
+  // 用 Pointer Events 实现排序，不依赖 HTML5 Drag and Drop 的 dataTransfer/drop。
+  // Tauri/WebView2 里原生 DnD 容易被桌面壳和系统拖拽链路影响；指针事件只关心
+  // 鼠标按下、移动、松开，落点由 elementFromPoint + getBoundingClientRect 实时计算。
+  let listEl: HTMLUListElement | null = null;
+  let dragFromIndex = $state(-1); // 正在拖动的项索引
+  let isDragging = $state(false); // 是否在拖拽中（驱动 CSS）
+  let dropLineIndex = $state(-1); // 落点指示线位置（-1 = 不显示）
+  let dropLineBefore = $state(true); // 指示线画在该项之前还是之后
+  let dropToIndex = $state(-1); // 松手时插入到哪个 index 之前
+  let activePointerId = -1;
+
+  function onHandlePointerDown(e: PointerEvent, index: number) {
+    if (!draggable || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    activePointerId = e.pointerId;
+    dragFromIndex = index;
+    isDragging = true;
+    updateDropTarget(e.clientX, e.clientY);
+
+    window.addEventListener("pointermove", onWindowPointerMove, { passive: false });
+    window.addEventListener("pointerup", onWindowPointerUp, { passive: false });
+    window.addEventListener("pointercancel", onWindowPointerCancel);
+  }
+
+  function onWindowPointerMove(e: PointerEvent) {
+    if (e.pointerId !== activePointerId || dragFromIndex < 0) return;
+    e.preventDefault();
+    updateDropTarget(e.clientX, e.clientY);
+  }
+
+  function onWindowPointerUp(e: PointerEvent) {
+    if (e.pointerId !== activePointerId) return;
+    e.preventDefault();
+    finishPointerDrag(true);
+  }
+
+  function onWindowPointerCancel(e: PointerEvent) {
+    if (e.pointerId !== activePointerId) return;
+    finishPointerDrag(false);
+  }
+
+  function updateDropTarget(clientX: number, clientY: number) {
+    const target = document.elementFromPoint(clientX, clientY);
+    const itemEl =
+      target instanceof Element ? target.closest<HTMLElement>("[data-idx]") : null;
+    if (itemEl && listEl?.contains(itemEl)) {
+      const index = Number(itemEl.dataset.idx);
+      const rect = itemEl.getBoundingClientRect();
+      const before = clientY - rect.top < rect.height / 2;
+      dropLineIndex = index;
+      dropLineBefore = before;
+      dropToIndex = before ? index : index + 1;
+      return;
+    }
+
+    const listRect = listEl?.getBoundingClientRect();
+    if (
+      listRect &&
+      clientX >= listRect.left &&
+      clientX <= listRect.right &&
+      clientY >= listRect.top &&
+      clientY <= listRect.bottom &&
+      prompts.length > 0
+    ) {
+      // 落在列表空白区时放到末尾，并在最后一项下方显示落点线。
+      dropLineIndex = prompts.length - 1;
+      dropLineBefore = false;
+      dropToIndex = prompts.length;
+      return;
+    }
+
+    dropLineIndex = -1;
+    dropLineBefore = true;
+    dropToIndex = -1;
+  }
+
+  function finishPointerDrag(commit: boolean) {
+    const from = dragFromIndex;
+    const to = dropToIndex;
+    resetDrag();
+
+    if (!commit || from < 0 || to < 0) return;
+    // 落在原位（自身上方或自身正下方）→ 无变化
+    if (to === from || to === from + 1) return;
+    onreorder(from, to);
+  }
+
+  function resetDrag() {
+    window.removeEventListener("pointermove", onWindowPointerMove);
+    window.removeEventListener("pointerup", onWindowPointerUp);
+    window.removeEventListener("pointercancel", onWindowPointerCancel);
+
+    activePointerId = -1;
+    isDragging = false;
+    dragFromIndex = -1;
+    dropToIndex = -1;
+    dropLineIndex = -1;
+    dropLineBefore = true;
+  }
+
+  function onNativeDragStart(e: DragEvent) {
+    // 防止图片/文字触发浏览器原生拖拽，排序统一走 pointer 事件。
+    e.preventDefault();
+  }
+
+  // 指示线：在某项之前/之后显示
+  function showDropLineBefore(index: number): boolean {
+    return isDragging && dropLineIndex === index && dropLineBefore && index !== dragFromIndex;
+  }
+  function showDropLineAfter(index: number): boolean {
+    return isDragging && dropLineIndex === index && !dropLineBefore && index !== dragFromIndex;
+  }
+
   $effect(() => {
-    items = prompts.map((p) => ({ id: p.path, data: p }));
+    if (!draggable && isDragging) resetDrag();
   });
-
-  // dndzone 配置
-  const flipDurationMs = 200;
-
-  function onConsidered(e: CustomEvent<DndEvent>) {
-    const newItems = e.detail.items as Item[];
-    items = newItems;
-  }
-
-  function onDropped(e: CustomEvent<DndEvent>) {
-    const newItems = e.detail.items as Item[];
-    // 找到被移动项的原始位置和新位置
-    const oldPaths = prompts.map((p) => p.path);
-    const newPaths = newItems.map((i) => i.id);
-    // 找第一个不同的位置
-    let from = -1;
-    let to = -1;
-    for (let i = 0; i < oldPaths.length; i++) {
-      if (oldPaths[i] !== newPaths[i]) {
-        from = i;
-        break;
-      }
-    }
-    if (from < 0) return;
-    const movedId = oldPaths[from];
-    to = newPaths.indexOf(movedId);
-    if (to >= 0 && to !== from) {
-      items = newItems;
-      onreorder(from, to);
-    }
-  }
 </script>
 
 <ul
+  bind:this={listEl}
   class="list"
   role="listbox"
-  use:dndzone={{ items, flipDurationMs }}
-  onconsidered={onConsidered}
-  ondropped={onDropped}
+  ondragstart={onNativeDragStart}
 >
-  {#each items as item, i (item.id)}
+  {#each prompts as p, i (p.path)}
     <li
+      data-idx={i}
       role="option"
       tabindex="-1"
-      aria-selected={item.id === selectedPath}
+      aria-selected={p.path === selectedPath}
       class="item"
-      class:active={item.id === selectedPath}
-      onclick={() => onselect(item.id)}
+      class:active={p.path === selectedPath}
+      class:disabled={!draggable}
+      class:dragging={isDragging && i === dragFromIndex}
+      class:drop-before={showDropLineBefore(i)}
+      class:drop-after={showDropLineAfter(i)}
+      draggable="false"
+      onclick={() => onselect(p.path)}
       onkeydown={(e) => {
         if (e.key === " " || e.key === "Enter") {
           e.preventDefault();
-          onselect(item.id);
+          onselect(p.path);
         }
       }}
       oncontextmenu={(e) => {
         e.preventDefault();
-        oncontextmenu(item.data, e.clientX, e.clientY);
+        oncontextmenu(p, e.clientX, e.clientY);
       }}
     >
       <div class="main">
         <div class="title-row">
-          <span class="drag-handle" title="拖拽排序">⠿</span>
-          <span class="title">{item.data.title}</span>
+          <button
+            type="button"
+            class="drag-handle"
+            title={draggable ? "拖拽排序" : disabledReason}
+            aria-label={draggable ? "拖拽排序" : disabledReason}
+            disabled={!draggable}
+            onpointerdown={(e) => onHandlePointerDown(e, i)}
+            onclick={(e) => e.stopPropagation()}
+          >
+            ⠿
+          </button>
+          <span class="title">{p.title}</span>
         </div>
         <div class="sub">
-          <span class="cat">{item.data.category}</span>
+          <span class="cat">{p.category}</span>
         </div>
       </div>
       <button
@@ -102,7 +199,7 @@
         onclick={(e) => {
           e.stopPropagation();
           const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-          oncontextmenu(item.data, rect.right, rect.bottom);
+          oncontextmenu(p, rect.right, rect.bottom);
         }}
       >
         ⋯
@@ -117,10 +214,13 @@
   .list {
     list-style: none;
     margin: 0;
-    padding: 6px;
+    padding: 8px;
     border-right: 1px solid var(--border);
+    height: 100%;
+    max-height: 100%;
     overflow-y: auto;
     min-height: 0;
+    background: var(--bg-elevated);
   }
 
   .item {
@@ -128,13 +228,18 @@
     align-items: center;
     gap: 4px;
     padding: 9px 10px;
-    border-radius: 6px;
+    border: 1px solid transparent;
+    border-radius: 9px;
     cursor: pointer;
-    transition: background 0.1s;
+    transition:
+      background 0.12s,
+      border-color 0.12s,
+      box-shadow 0.12s;
     position: relative;
   }
   .item:hover {
     background: var(--bg-hover);
+    border-color: var(--border);
   }
   .item:hover .more-btn {
     opacity: 1;
@@ -144,6 +249,8 @@
   }
   .item.active {
     background: var(--bg-active);
+    border-color: #c9dafc;
+    box-shadow: 0 1px 2px rgba(37, 99, 235, 0.08);
   }
   .item.active .more-btn {
     opacity: 0.7;
@@ -151,10 +258,35 @@
   .item.active .drag-handle {
     opacity: 0.4;
   }
+  .item.disabled .drag-handle {
+    opacity: 0;
+    cursor: default;
+  }
+  .item.disabled:hover .drag-handle {
+    opacity: 0;
+  }
 
-  /* svelte-dnd-action 拖拽中的项 */
-  .item:global(.monaco-dragged) {
+  /* 拖拽中：被拖的项半透明 */
+  .item.dragging {
     opacity: 0.4;
+  }
+  /* 落点指示线 */
+  .item.drop-before::before,
+  .item.drop-after::after {
+    content: "";
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    height: 2px;
+    background: var(--accent);
+    border-radius: 1px;
+    pointer-events: none;
+  }
+  .item.drop-before::before {
+    top: -3px;
+  }
+  .item.drop-after::after {
+    bottom: -3px;
   }
 
   .main {
@@ -167,6 +299,15 @@
     gap: 5px;
   }
   .drag-handle {
+    width: 12px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    font-family: inherit;
     font-size: 13px;
     color: var(--muted);
     opacity: 0;
@@ -179,7 +320,8 @@
   }
   .title {
     font-size: 13.5px;
-    font-weight: 500;
+    font-weight: 600;
+    color: var(--fg);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -206,14 +348,14 @@
     font-size: 16px;
     line-height: 1;
     padding: 2px 4px;
-    border-radius: 4px;
+    border-radius: 7px;
     cursor: pointer;
     opacity: 0;
     transition: opacity 0.12s, background 0.12s;
   }
   .more-btn:hover {
-    background: var(--bg-active);
-    color: var(--fg);
+    background: var(--accent-soft);
+    color: var(--accent);
   }
 
   .empty {

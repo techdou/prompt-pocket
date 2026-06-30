@@ -16,7 +16,7 @@ const scored = (prompt: Prompt, query: string): number => {
     " " +
     prompt.category +
     " " +
-    prompt.meta.tags.join(" ")
+    (prompt.meta.tags?.join(" ") ?? "")
   ).toLowerCase();
   const q = query.toLowerCase();
 

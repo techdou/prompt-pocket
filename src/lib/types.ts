@@ -2,6 +2,8 @@
 export interface PromptMeta {
   /** 标题，缺省时取文件名（去扩展名） */
   title: string;
+  /** 旧版 frontmatter 兼容字段；新文件不再写入 */
+  tags?: string[];
   /** 复制时是否先转纯文本：markdown 渲染成纯文本 / 原样 */
   copy_mode: "markdown" | "plain";
   /** 创建时间 ISO 字符串 */
