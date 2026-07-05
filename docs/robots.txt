@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://techdou.github.io/prompt-pocket/sitemap.xml

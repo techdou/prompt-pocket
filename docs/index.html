@@ -6,14 +6,20 @@
     <title>Prompt Pocket — 全局秒唤的提示词口袋</title>
     <meta
       name="description"
-      content="轻量级提示词管理工具：全局快捷键秒唤，Markdown 存储，坚果云同步。Tauri + Rust，1.6MB 安装包。"
+      content="轻量级提示词管理工具：全局快捷键秒唤，Enter 智能复制粘贴，Markdown 本地存储，坚果云 WebDAV 手动同步。"
     />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=Geist:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap"
-      rel="stylesheet"
+    <link rel="canonical" href="https://techdou.github.io/prompt-pocket/" />
+    <meta name="theme-color" content="#2563eb" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Prompt Pocket — 全局秒唤的提示词口袋" />
+    <meta
+      property="og:description"
+      content="Ctrl+Alt+P 唤出，Enter 复制；原焦点在输入框时自动粘贴回去。"
     />
+    <meta property="og:image" content="https://techdou.github.io/prompt-pocket/screenshots/list.png" />
+    <meta property="og:url" content="https://techdou.github.io/prompt-pocket/" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preload" as="image" href="screenshots/list.png" />
     <!-- favicon：与应用图标一致的深色圆角口袋方块 -->
     <link
       rel="icon"
@@ -37,9 +43,9 @@
         --glow: rgba(37, 99, 235, 0.18);
         --shadow-soft: 0 10px 32px rgba(31, 42, 68, 0.08);
         --shadow-lift: 0 24px 60px -24px rgba(31, 42, 68, 0.22);
-        --display: "Bricolage Grotesque", "Noto Sans SC", sans-serif;
-        --body: "Geist", "Noto Sans SC", sans-serif;
-        --mono: "JetBrains Mono", ui-monospace, monospace;
+        --display: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+        --body: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+        --mono: "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
       }
 
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -56,15 +62,29 @@
         overflow-x: hidden;
       }
 
-      /* ── 背景氛围：极淡蓝光斑 + 细网格，克制 ── */
+      .skip-link {
+        position: fixed;
+        left: 16px;
+        top: 12px;
+        z-index: 100;
+        transform: translateY(-160%);
+        padding: 8px 12px;
+        border-radius: 8px;
+        background: var(--ink);
+        color: #fff;
+        text-decoration: none;
+        transition: transform 0.15s;
+      }
+      .skip-link:focus { transform: translateY(0); }
+
+      /* ── 背景氛围：浅色纸面 + 细网格，克制且加载快 ── */
       .bg-fx {
         position: fixed;
         inset: 0;
         z-index: -1;
         pointer-events: none;
         background:
-          radial-gradient(900px 600px at 82% -10%, var(--accent-soft), transparent 60%),
-          radial-gradient(700px 520px at 4% 8%, rgba(37, 99, 235, 0.06), transparent 58%),
+          linear-gradient(135deg, rgba(37, 99, 235, 0.08), transparent 34%),
           linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
       }
       .bg-fx::before {
@@ -633,9 +653,10 @@
     </style>
   </head>
   <body>
+    <a class="skip-link" href="#features">跳到主要内容</a>
     <div class="bg-fx"></div>
 
-    <nav id="nav">
+    <nav id="nav" aria-label="主导航">
       <div class="wrap">
         <a class="brand" href="#top">
           <span class="brand-mark" aria-hidden="true"></span>
@@ -656,13 +677,13 @@
       <div class="wrap">
         <div class="badge">
           <span class="tag">Tauri + Rust</span>
-          1.6MB 安装包 · 坚果云同步 · 数据归你所有
+          Windows 安装包 · 手动同步 · 数据归你所有
         </div>
         <h1>把提示词<br />装进口袋，<span class="accent">秒唤即用。</span></h1>
         <p class="lede">
           按 <code>Ctrl+Alt+P</code> 从任意应用唤出，搜索 → 选中 →
-          <code>Enter</code> 复制，回到原应用粘贴即用。一个 Markdown
-          文件即一条提示词，文件夹即分类，用你自己的坚果云同步到所有设备。
+          <code>Enter</code> 复制；如果唤出前焦点就在输入框，会自动粘贴回去。一个 Markdown
+          文件即一条提示词，文件夹即分类，用你自己的坚果云手动同步到所有设备。
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/latest">
@@ -683,7 +704,13 @@
               <kbd id="hotkey">Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>P</kbd>
             </span>
           </div>
-          <img id="hero-shot" src="screenshots/list.png" alt="Prompt Pocket 主界面：搜索栏、分类标签、提示词列表与编辑器" />
+          <img
+            id="hero-shot"
+            src="screenshots/list.png"
+            alt="Prompt Pocket 主界面：搜索栏、分类标签、提示词列表与编辑器"
+            decoding="async"
+            fetchpriority="high"
+          />
         </div>
       </div>
     </header>
@@ -703,7 +730,7 @@
             <span class="glyph">⚡</span>
             <h3>全局<span class="hi">秒唤</span>，失焦即收</h3>
             <p>
-              <code>Ctrl+Alt+P</code> 从任意应用唤出 spotlight 窗口，复制完自动隐藏，失焦也会收起。不抢焦点、不占任务栏，像系统自带的搜索一样轻盈。
+              <code>Ctrl+Alt+P</code> 从任意应用唤出 spotlight 窗口，复制完自动隐藏，失焦也会收起。不占任务栏，像系统自带的搜索一样轻盈。
             </p>
           </div>
 
@@ -712,7 +739,7 @@
             <span class="glyph">🔍</span>
             <h3>模糊搜索 · 键盘全程可达</h3>
             <p>
-              标题 / 分类 / 正文实时检索，<code>Ctrl+F</code> 聚焦、<code>↑↓</code> 选择、<code>Enter</code> 复制——从唤出到粘贴，一次都不必碰鼠标。
+              标题 / 分类 / 正文实时检索，<code>Ctrl+F</code> 聚焦、<code>↑↓</code> 选择、<code>Enter</code> 复制或粘贴——从唤出到输入，一次都不必碰鼠标。
             </p>
           </div>
 
@@ -730,7 +757,7 @@
             <span class="glyph">☁️</span>
             <h3>坚果云 WebDAV 多端同步</h3>
             <p>
-              内置设置界面，填账号 + 应用密码即可。启动自动拉取、保存自动推送。
+              内置设置界面，填账号 + 应用密码即可。上传和下载都由你手动触发，避免误覆盖。
             </p>
           </div>
 
@@ -746,9 +773,9 @@
           <div class="feat big">
             <div class="feat-num">06 / 轻量</div>
             <span class="glyph">🪶</span>
-            <h3>1.6MB 安装包，~42MB 内存</h3>
+            <h3>轻量安装包，低占用常驻</h3>
             <p>
-              Tauri v2 + Rust 后端，无 Electron、无内嵌浏览器。没有数据库，没有云端账号——数据完全归你所有，用你自己的坚果云同步到所有设备。CPU 占用近乎为零，常驻后台毫无负担。
+              Tauri v2 + Rust 后端，无 Electron。没有数据库，没有云端账号——数据完全归你所有，用你自己的坚果云同步到所有设备。CPU 占用近乎为零，常驻后台负担很低。
             </p>
           </div>
         </div>
@@ -813,14 +840,14 @@
             <span class="dl-ico">⬇</span>
             <span class="dl-text">
               <span class="dl-name">Windows 安装程序</span>
-              <span class="dl-sub">NSIS · .exe · 约 2.7 MB</span>
+              <span class="dl-sub">NSIS · .exe</span>
             </span>
           </a>
           <a class="dl-card" href="https://github.com/techdou/prompt-pocket/releases/latest">
             <span class="dl-ico">⬇</span>
             <span class="dl-text">
               <span class="dl-name">MSI 安装包</span>
-              <span class="dl-sub">.msi · 约 3.8 MB</span>
+              <span class="dl-sub">.msi</span>
             </span>
           </a>
         </div>
@@ -917,7 +944,7 @@
       });
 
       // 点击 hotkey 提示也能触发（移动端友好）
-      document.querySelector(".stage-prompt").addEventListener("click", triggerSummon);
+      document.querySelector(".stage-prompt")?.addEventListener("click", triggerSummon);
 
       // ── 滚动渐显 ──
       const io = new IntersectionObserver(
