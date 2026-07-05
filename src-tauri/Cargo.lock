@@ -816,6 +816,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "enigo"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71c6c56e50f7acae2906a0dcbb34529ca647e40421119ad5d12e7f8ba6e50010"
+dependencies = [
+ "core-foundation 0.10.1",
+ "core-graphics",
+ "foreign-types-shared 0.3.1",
+ "libc",
+ "log",
+ "nom",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "windows",
+ "x11rb",
+ "xkbcommon",
+ "xkeysym",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1992,6 +2013,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "memoffset"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2679,6 +2709,7 @@ name = "prompt-pocket"
 version = "1.1.0"
 dependencies = [
  "dirs 5.0.1",
+ "enigo",
  "reqwest 0.12.28",
  "reqwest_dav",
  "sanitize-filename",
@@ -2692,6 +2723,7 @@ dependencies = [
  "tauri-plugin-global-shortcut",
  "tokio",
  "walkdir",
+ "windows",
 ]
 
 [[package]]
@@ -5476,6 +5508,17 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "xkbcommon"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7a974f48060a14e95705c01f24ad9c3345022f4d97441b8a36beb7ed5c4a02d"
+dependencies = [
+ "libc",
+ "memmap2",
+ "xkeysym",
+]
 
 [[package]]
 name = "xkeysym"

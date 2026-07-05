@@ -33,6 +33,16 @@ reqwest_dav = "0.2"
 reqwest = "0.12"
 # async runtime（Tauri 自带，这里显式声明用于 spawn 后台同步）
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+# 模拟系统级键盘输入（注入 Ctrl+V 到原输入框）
+enigo = "0.6"
+# Windows API：检测前台窗口是否有文本光标（caret）以决定是否注入
+# 版本与 enigo 传递依赖一致（0.61），避免双版本拉取
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 opt-level = "s"

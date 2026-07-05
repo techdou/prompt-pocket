@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import type { CategoryCount, Prompt, PromptMeta, SyncStatus } from "./lib/types";
   import {
-    copyText,
+    copyOrPaste,
     createCategory,
     createPrompt,
     deletePrompt,
@@ -208,10 +209,10 @@
   async function doCopy(mode: "markdown" | "plain") {
     if (!selectedPrompt) return;
     try {
-      await copyText(editingBody);
+      // copyOrPaste 内部：写剪贴板 → 隐藏窗口 → 按快捷键来源决定是否注入 Ctrl+V
+      await copyOrPaste(editingBody, mode);
       copiedFlash = true;
       setTimeout(() => (copiedFlash = false), 800);
-      await hideWindow();
     } catch (e) {
       showError(String(e));
     }
@@ -494,12 +495,63 @@
     });
   }
 
+  // 无边框窗口自定义 resize：8 个边缘热区，mousedown 触发系统缩放手柄。
+  // Tauri v2 的 ResizeDirection 使用方位词，不是 CSS 的 top/left 命名。
+  const RESIZE_EDGES = [
+    "top",
+    "right",
+    "bottom",
+    "left",
+    "top-left",
+    "top-right",
+    "bottom-left",
+    "bottom-right",
+  ] as const;
+  type ResizeDirection =
+    | "East"
+    | "North"
+    | "NorthEast"
+    | "NorthWest"
+    | "South"
+    | "SouthEast"
+    | "SouthWest"
+    | "West";
+  const EDGE_TO_DIRECTION: Record<(typeof RESIZE_EDGES)[number], ResizeDirection> = {
+    top: "North",
+    right: "East",
+    bottom: "South",
+    left: "West",
+    "top-left": "NorthWest",
+    "top-right": "NorthEast",
+    "bottom-left": "SouthWest",
+    "bottom-right": "SouthEast",
+  };
+  function startResize(edge: (typeof RESIZE_EDGES)[number]) {
+    void getCurrentWindow().startResizeDragging(EDGE_TO_DIRECTION[edge]);
+  }
+
   onMount(bootstrap);
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
 <div class="app" role="application" aria-label="Prompt Pocket">
+  <!-- 无边框窗口的 resize 热区：8 个透明按钮贴在窗口边缘 -->
+  {#each RESIZE_EDGES as edge}
+    <button
+      type="button"
+      class="resize-edge"
+      data-edge={edge}
+      aria-label={`调整窗口大小：${edge}`}
+      tabindex="-1"
+      onmousedown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        startResize(edge);
+      }}
+    ></button>
+  {/each}
   {#if loading}
     <div class="state">
       <div class="spinner"></div>
@@ -996,5 +1048,71 @@
     width: 16px;
     text-align: center;
     opacity: 0.8;
+  }
+
+  /* 无边框窗口的 resize 热区：8 个透明条/角，z-index 置顶不挡视觉 */
+  .resize-edge {
+    position: fixed;
+    z-index: 9999;
+    padding: 0;
+    border: 0;
+    appearance: none;
+    background: transparent;
+  }
+  .resize-edge[data-edge="top"] {
+    top: 0;
+    left: 8px;
+    right: 8px;
+    height: 6px;
+    cursor: ns-resize;
+  }
+  .resize-edge[data-edge="bottom"] {
+    bottom: 0;
+    left: 8px;
+    right: 8px;
+    height: 6px;
+    cursor: ns-resize;
+  }
+  .resize-edge[data-edge="left"] {
+    top: 8px;
+    bottom: 8px;
+    left: 0;
+    width: 6px;
+    cursor: ew-resize;
+  }
+  .resize-edge[data-edge="right"] {
+    top: 8px;
+    bottom: 8px;
+    right: 0;
+    width: 6px;
+    cursor: ew-resize;
+  }
+  .resize-edge[data-edge="top-left"] {
+    top: 0;
+    left: 0;
+    width: 14px;
+    height: 14px;
+    cursor: nwse-resize;
+  }
+  .resize-edge[data-edge="top-right"] {
+    top: 0;
+    right: 0;
+    width: 14px;
+    height: 14px;
+    cursor: nesw-resize;
+  }
+  .resize-edge[data-edge="bottom-left"] {
+    bottom: 0;
+    left: 0;
+    width: 14px;
+    height: 14px;
+    cursor: nesw-resize;
+  }
+  .resize-edge[data-edge="bottom-right"] {
+    bottom: 0;
+    right: 0;
+    width: 14px;
+    height: 14px;
+    cursor: nwse-resize;
   }
 </style>

@@ -1,11 +1,13 @@
 // prompt 数据结构，与 Rust 端 Prompt struct 一一对应（serde 自动转 camelCase）
+export type CopyMode = "markdown" | "plain";
+
 export interface PromptMeta {
   /** 标题，缺省时取文件名（去扩展名） */
   title: string;
   /** 旧版 frontmatter 兼容字段；新文件不再写入 */
   tags?: string[];
   /** 复制时是否先转纯文本：markdown 渲染成纯文本 / 原样 */
-  copy_mode: "markdown" | "plain";
+  copy_mode: CopyMode;
   /** 创建时间 ISO 字符串 */
   created: string;
   /** 更新时间 ISO 字符串 */
@@ -66,6 +68,6 @@ export interface PromptContent {
 /** save_prompt 接收的结构化保存请求（前端表单直接构造） */
 export interface SaveRequest {
   title: string;
-  copy_mode: "markdown" | "plain";
+  copy_mode: CopyMode;
   body: string;
 }

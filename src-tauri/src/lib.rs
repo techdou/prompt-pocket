@@ -22,6 +22,8 @@ use crate::store::{
 };
 use crate::sync::{push_all_to_remote, CloudConfig, SyncStatus};
 
+const GLOBAL_HOTKEY: &str = "Ctrl+Alt+P";
+
 // ────────────────────────────────────────────────────────────
 // 配置持久化：config.json 存在 %APPDATA%/prompt-pocket/ 下
 // ────────────────────────────────────────────────────────────
@@ -43,12 +45,30 @@ struct AppState {
     last_sync: Mutex<Option<String>>,
     last_error: Mutex<Option<String>>,
     syncing: Mutex<bool>,
+    last_hotkey_had_text_input: Mutex<bool>,
 }
 
 impl AppState {
     fn cloud_config(&self) -> CloudConfig {
         // 毒锁时取出内部数据而非 panic（读操作安全）
         self.cloud.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn set_last_hotkey_had_text_input(&self, had_text_input: bool) {
+        *self
+            .last_hotkey_had_text_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = had_text_input;
+    }
+
+    fn take_last_hotkey_had_text_input(&self) -> bool {
+        let mut guard = self
+            .last_hotkey_had_text_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let had_text_input = *guard;
+        *guard = false;
+        had_text_input
     }
 
     fn set_cloud_config(&self, cfg: CloudConfig) -> Result<(), String> {
@@ -78,8 +98,16 @@ impl AppState {
         SyncStatus {
             configured: cfg.is_configured(),
             enabled: cfg.enabled,
-            last_sync: self.last_sync.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            last_error: self.last_error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            last_sync: self
+                .last_sync
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            last_error: self
+                .last_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             syncing: *self.syncing.lock().unwrap_or_else(|e| e.into_inner()),
         }
     }
@@ -104,12 +132,17 @@ fn resolve_config_file(app: &tauri::AppHandle) -> PathBuf {
 /// 启动时加载配置
 fn load_cloud_config(config_file: &std::path::Path) -> CloudConfig {
     let raw = std::fs::read_to_string(config_file).ok();
-    let parsed = raw
-        .and_then(|s| serde_json::from_str::<PersistedConfig>(&s).ok());
+    let parsed = raw.and_then(|s| serde_json::from_str::<PersistedConfig>(&s).ok());
 
     CloudConfig {
-        username: parsed.as_ref().and_then(|p| p.username.clone()).unwrap_or_default(),
-        password: parsed.as_ref().and_then(|p| p.password.clone()).unwrap_or_default(),
+        username: parsed
+            .as_ref()
+            .and_then(|p| p.username.clone())
+            .unwrap_or_default(),
+        password: parsed
+            .as_ref()
+            .and_then(|p| p.password.clone())
+            .unwrap_or_default(),
         remote_root: parsed
             .as_ref()
             .and_then(|p| p.remote_root.clone())
@@ -137,7 +170,11 @@ fn init_app(state: tauri::State<'_, AppState>) -> Result<(), String> {
 }
 
 fn walkdir_has_md(dir: &std::path::Path) -> bool {
-    for entry in walkdir::WalkDir::new(dir).min_depth(1).into_iter().flatten() {
+    for entry in walkdir::WalkDir::new(dir)
+        .min_depth(1)
+        .into_iter()
+        .flatten()
+    {
         if entry.path().extension().and_then(|e| e.to_str()) == Some("md") {
             return true;
         }
@@ -152,10 +189,7 @@ fn scan_prompts(state: tauri::State<'_, AppState>) -> Result<ScanResult, String>
 }
 
 #[tauri::command]
-fn read_prompt(
-    path: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<PromptContent, String> {
+fn read_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<PromptContent, String> {
     let abs = resolve_abs(&state.local_dir, &path);
     read_prompt_disk(&abs).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -227,10 +261,7 @@ fn rename_category(
 }
 
 #[tauri::command]
-fn create_category(
-    name: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+fn create_category(name: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     create_category_disk(&state.local_dir, &name).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -253,10 +284,7 @@ fn create_prompt(
 }
 
 #[tauri::command]
-fn delete_prompt(
-    path: String,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
+fn delete_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let abs = resolve_abs(&state.local_dir, &path);
     delete_prompt_disk(&abs).map_err(|e| e.to_string())?;
     Ok(())
@@ -276,6 +304,203 @@ fn reorder(
 #[tauri::command]
 async fn copy_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
+/// 智能复制/注入：写剪贴板 → 隐藏窗口 → 等焦点回归 → 按快捷键来源决定是否注入。
+/// - Ctrl+Alt+P 按下时外部前台有 caret：模拟 Ctrl+V 把内容注入原输入框
+/// - Ctrl+Alt+P 按下时不在输入框：纯复制到剪贴板，不误粘贴
+///
+/// mode 参数当前未区分转换（前端传 editingBody 原文），保留以兼容现有调用契约。
+#[tauri::command]
+async fn copy_or_paste(
+    text: String,
+    mode: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    // mode 当前未做格式转换（前端传原文），保留参数以兼容现有调用契约。
+    let _ = mode;
+    // 1. 写剪贴板（无论后续是否注入，剪贴板都得有内容）
+    app.clipboard()
+        .write_text(&text)
+        .map_err(|e| e.to_string())?;
+
+    // 2. 隐藏当前窗口，让 OS 焦点回归到用户原本聚焦的应用
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+
+    // 3. 等焦点切换完成。hide() 后 OS 把焦点交还前一个窗口是异步的，
+    //    立即注入会打到还没拿到焦点的窗口上。80ms 是实测起点，可微调。
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+    // 4. 只有“全局快捷键按下时原本就在输入框”才允许注入；
+    //    再确认隐藏后焦点确实回到了带 caret 的目标输入框。
+    let invoked_from_text_input = state.take_last_hotkey_had_text_input();
+    if !should_inject_after_hotkey(invoked_from_text_input, foreground_has_text_input_focus()) {
+        return Ok(()); // 不在输入框：剪贴板已是内容，纯复制完成
+    }
+
+    // 5. 模拟 Ctrl+V 注入
+    simulate_paste().map_err(|e| format!("注入失败: {e}"))?;
+    Ok(())
+}
+
+fn should_inject_after_hotkey(invoked_from_text_input: bool, returned_to_text_input: bool) -> bool {
+    invoked_from_text_input && returned_to_text_input
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextFocusSignal {
+    None,
+    GuiCaret,
+    UiaTextInput,
+}
+
+fn is_text_input_signal(signal: TextFocusSignal) -> bool {
+    !matches!(signal, TextFocusSignal::None)
+}
+
+fn is_uia_text_input_candidate(
+    is_keyboard_focusable: bool,
+    is_edit_control: bool,
+    is_document_control: bool,
+    has_value_pattern: bool,
+    has_text_pattern: bool,
+    has_text_edit_pattern: bool,
+) -> bool {
+    if !is_keyboard_focusable {
+        return false;
+    }
+
+    is_edit_control
+        || has_text_edit_pattern
+        || (is_document_control && (has_value_pattern || has_text_pattern))
+        || (has_value_pattern && has_text_pattern)
+}
+
+fn foreground_has_text_input_focus() -> bool {
+    is_text_input_signal(foreground_text_focus_signal())
+}
+
+#[cfg(windows)]
+fn foreground_text_focus_signal() -> TextFocusSignal {
+    if uia_focused_element_is_text_input() == Some(true) {
+        return TextFocusSignal::UiaTextInput;
+    }
+    if foreground_has_caret() {
+        return TextFocusSignal::GuiCaret;
+    }
+    TextFocusSignal::None
+}
+
+#[cfg(not(windows))]
+fn foreground_text_focus_signal() -> TextFocusSignal {
+    TextFocusSignal::None
+}
+
+#[cfg(windows)]
+fn uia_focused_element_is_text_input() -> Option<bool> {
+    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
+        UIA_TextEditPatternId, UIA_TextPatternId, UIA_ValuePatternId,
+    };
+
+    unsafe {
+        let coinit = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let should_uninitialize = coinit.is_ok();
+        if coinit.is_err() && coinit != RPC_E_CHANGED_MODE {
+            return None;
+        }
+
+        let result = (|| -> windows::core::Result<bool> {
+            let automation: IUIAutomation =
+                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
+            let element = automation.GetFocusedElement()?;
+            let is_keyboard_focusable = element.CurrentIsKeyboardFocusable()?.as_bool();
+            let control_type = element.CurrentControlType()?;
+            let is_edit_control = control_type == UIA_EditControlTypeId;
+            let is_document_control = control_type == UIA_DocumentControlTypeId;
+            let has_value_pattern = element.GetCurrentPattern(UIA_ValuePatternId).is_ok();
+            let has_text_pattern = element.GetCurrentPattern(UIA_TextPatternId).is_ok();
+            let has_text_edit_pattern = element.GetCurrentPattern(UIA_TextEditPatternId).is_ok();
+
+            Ok(is_uia_text_input_candidate(
+                is_keyboard_focusable,
+                is_edit_control,
+                is_document_control,
+                has_value_pattern,
+                has_text_pattern,
+                has_text_edit_pattern,
+            ))
+        })();
+
+        if should_uninitialize {
+            CoUninitialize();
+        }
+
+        result.ok()
+    }
+}
+
+/// 检测前台窗口是否正聚焦在一个有文本光标(caret)的控件上。
+/// 用 GetGUIThreadInfo 查询前台窗口所属线程的 caret 信息。
+#[cfg(windows)]
+fn foreground_has_caret() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
+    };
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        // hwnd 为 0/无效说明无前台窗口（罕见）
+        if hwnd.is_invalid() {
+            return false;
+        }
+        let thread_id = GetWindowThreadProcessId(hwnd, None);
+        let mut info = GUITHREADINFO {
+            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        if GetGUIThreadInfo(thread_id, &mut info).is_err() {
+            return false;
+        }
+        // hwndCaret 非空 → 前台窗口里有个正在编辑的文本控件
+        !info.hwndCaret.is_invalid()
+    }
+}
+
+#[cfg(not(windows))]
+fn foreground_has_caret() -> bool {
+    false
+}
+
+/// 用 enigo 模拟一次 Ctrl+V 粘贴（跨平台，macOS 需改 Meta，此处先支持 Windows/Linux）
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+
+    let mut enigo = Enigo::new(&Settings::default())?;
+    enigo.key(Key::Control, Direction::Press)?;
+    enigo.key(Key::Unicode('v'), Direction::Click)?;
+    enigo.key(Key::Control, Direction::Release)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
+    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+
+    let mut enigo = Enigo::new(&Settings::default())?;
+    enigo.key(Key::Meta, Direction::Press)?;
+    enigo.key(Key::Unicode('v'), Direction::Click)?;
+    enigo.key(Key::Meta, Direction::Release)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -467,11 +692,17 @@ fn open_url(url: String) -> Result<(), String> {
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(&url).spawn().map_err(|e| e.to_string())?;
+        std::process::Command::new("open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open").arg(&url).spawn().map_err(|e| e.to_string())?;
+        std::process::Command::new("xdg-open")
+            .arg(&url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -612,8 +843,6 @@ fn position_window_at_cursor(win: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let hotkey = "Ctrl+Alt+P";
-
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -633,19 +862,32 @@ pub fn run() {
                 last_sync: Mutex::new(None),
                 last_error: Mutex::new(None),
                 syncing: Mutex::new(false),
+                last_hotkey_had_text_input: Mutex::new(false),
             });
 
             // v1.0.1：同步改为纯手动，启动时不再自动拉取
 
             // 注册全局快捷键（解析失败则降级为无快捷键，不 panic）
             let app_handle = app.handle().clone();
-            match hotkey.parse::<Shortcut>() {
+            match GLOBAL_HOTKEY.parse::<Shortcut>() {
                 Ok(shortcut) => {
-                    if let Err(e) = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-                        if event.state == ShortcutState::Pressed {
-                            toggle_main_window(&app_handle);
-                        }
-                    }) {
+                    if let Err(e) = app.global_shortcut().on_shortcut(
+                        shortcut,
+                        move |_app, _shortcut, event| {
+                            if event.state == ShortcutState::Pressed {
+                                let window_is_visible = app_handle
+                                    .get_webview_window("main")
+                                    .and_then(|win| win.is_visible().ok())
+                                    .unwrap_or(false);
+                                let hotkey_had_text_input =
+                                    !window_is_visible && foreground_has_text_input_focus();
+                                app_handle
+                                    .state::<AppState>()
+                                    .set_last_hotkey_had_text_input(hotkey_had_text_input);
+                                toggle_main_window(&app_handle);
+                            }
+                        },
+                    ) {
                         eprintln!("[启动] 全局快捷键注册失败（可能被占用）: {e}");
                     }
                 }
@@ -693,6 +935,7 @@ pub fn run() {
             delete_prompt,
             reorder,
             copy_text,
+            copy_or_paste,
             hide_window,
             reveal_in_finder,
             get_sync_status,
@@ -705,4 +948,55 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_injection_requires_hotkey_origin_and_returned_caret() {
+        assert!(should_inject_after_hotkey(true, true));
+        assert!(!should_inject_after_hotkey(false, true));
+        assert!(!should_inject_after_hotkey(true, false));
+        assert!(!should_inject_after_hotkey(false, false));
+    }
+
+    #[test]
+    fn text_focus_signal_accepts_uia_and_legacy_caret() {
+        assert!(is_text_input_signal(TextFocusSignal::UiaTextInput));
+        assert!(is_text_input_signal(TextFocusSignal::GuiCaret));
+        assert!(!is_text_input_signal(TextFocusSignal::None));
+    }
+
+    #[test]
+    fn uia_candidate_detects_modern_text_inputs_without_legacy_caret() {
+        assert!(is_uia_text_input_candidate(
+            true, true, false, false, false, false,
+        ));
+        assert!(is_uia_text_input_candidate(
+            true, false, true, false, true, false,
+        ));
+        assert!(is_uia_text_input_candidate(
+            true, false, false, false, false, true,
+        ));
+    }
+
+    #[test]
+    fn uia_candidate_rejects_non_focusable_or_weak_value_controls() {
+        assert!(!is_uia_text_input_candidate(
+            false, true, false, true, true, true,
+        ));
+        assert!(!is_uia_text_input_candidate(
+            true, false, false, true, false, false,
+        ));
+        assert!(!is_uia_text_input_candidate(
+            true, false, false, false, true, false,
+        ));
+    }
+
+    #[test]
+    fn global_hotkey_stays_ctrl_alt_p() {
+        assert_eq!(GLOBAL_HOTKEY, "Ctrl+Alt+P");
+    }
 }
