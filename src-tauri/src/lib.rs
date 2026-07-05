@@ -23,6 +23,8 @@ use crate::store::{
 use crate::sync::{push_all_to_remote, CloudConfig, SyncStatus};
 
 const GLOBAL_HOTKEY: &str = "Ctrl+Alt+P";
+const FOCUS_RESTORE_TIMEOUT_MS: u64 = 120;
+const FOCUS_RESTORE_POLL_MS: u64 = 10;
 
 // ────────────────────────────────────────────────────────────
 // 配置持久化：config.json 存在 %APPDATA%/prompt-pocket/ 下
@@ -325,20 +327,27 @@ async fn copy_or_paste(
         .write_text(&text)
         .map_err(|e| e.to_string())?;
 
+    let invoked_from_text_input = state.take_last_hotkey_had_text_input();
+
     // 2. 隐藏当前窗口，让 OS 焦点回归到用户原本聚焦的应用
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
     }
 
-    // 3. 等焦点切换完成。hide() 后 OS 把焦点交还前一个窗口是异步的，
-    //    立即注入会打到还没拿到焦点的窗口上。80ms 是实测起点，可微调。
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    // 3. 不来自输入框时立即结束：剪贴板已写好，不做任何粘贴尝试。
+    if !invoked_from_text_input {
+        return Ok(());
+    }
 
-    // 4. 只有“全局快捷键按下时原本就在输入框”才允许注入；
-    //    再确认隐藏后焦点确实回到了带 caret 的目标输入框。
-    let invoked_from_text_input = state.take_last_hotkey_had_text_input();
-    if !should_inject_after_hotkey(invoked_from_text_input, foreground_has_text_input_focus()) {
-        return Ok(()); // 不在输入框：剪贴板已是内容，纯复制完成
+    // 4. hide() 后焦点回归是异步的。短轮询比固定等待更快：
+    //    输入框一恢复焦点就粘贴，最长只等一小段时间。
+    let returned_to_text_input = wait_for_text_input_focus(
+        std::time::Duration::from_millis(FOCUS_RESTORE_TIMEOUT_MS),
+        std::time::Duration::from_millis(FOCUS_RESTORE_POLL_MS),
+    )
+    .await;
+    if !should_inject_after_hotkey(invoked_from_text_input, returned_to_text_input) {
+        return Ok(());
     }
 
     // 5. 模拟 Ctrl+V 注入
@@ -348,6 +357,20 @@ async fn copy_or_paste(
 
 fn should_inject_after_hotkey(invoked_from_text_input: bool, returned_to_text_input: bool) -> bool {
     invoked_from_text_input && returned_to_text_input
+}
+
+async fn wait_for_text_input_focus(timeout: std::time::Duration, poll: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if foreground_has_text_input_focus() {
+            return true;
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return false;
+        }
+        tokio::time::sleep(std::cmp::min(poll, timeout - elapsed)).await;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -960,6 +983,13 @@ mod tests {
         assert!(!should_inject_after_hotkey(false, true));
         assert!(!should_inject_after_hotkey(true, false));
         assert!(!should_inject_after_hotkey(false, false));
+    }
+
+    #[test]
+    fn focus_restore_polling_is_short_and_bounded() {
+        assert!(FOCUS_RESTORE_POLL_MS <= 10);
+        assert!(FOCUS_RESTORE_TIMEOUT_MS <= 120);
+        assert!(FOCUS_RESTORE_TIMEOUT_MS >= FOCUS_RESTORE_POLL_MS);
     }
 
     #[test]
