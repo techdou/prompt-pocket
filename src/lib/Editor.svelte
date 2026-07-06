@@ -1,5 +1,9 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import type { CategoryCount, Prompt } from "./types";
+  import { renderMarkdown } from "./markdown";
+  import { renderRich } from "./renderers";
+  import { openUrl } from "./api";
 
   let {
     prompt,
@@ -51,90 +55,25 @@
     newCategoryName = "";
   }
 
-  // 极简 Markdown → HTML 渲染
-  function renderMarkdown(src: string): string {
-    if (!src || !src.trim()) return '<p class="empty-body">（无内容）</p>';
-    const esc = (s: string) =>
-      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // preview 容器引用，供 renderRich 扫描 DOM
+  let previewEl: HTMLDivElement | undefined = $state();
 
-    const lines = esc(src).split("\n");
-    let html = "";
-    let inCode = false;
-    let inList = false;
-    let inOrder = false;
-
-    const closeList = () => {
-      if (inList) {
-        html += "</ul>";
-        inList = false;
-      }
-      if (inOrder) {
-        html += "</ol>";
-        inOrder = false;
-      }
-    };
-
-    for (const line of lines) {
-      if (line.trim().startsWith("```")) {
-        closeList();
-        if (inCode) {
-          html += "</code></pre>";
-          inCode = false;
-        } else {
-          html += "<pre><code>";
-          inCode = true;
-        }
-        continue;
-      }
-      if (inCode) {
-        html += line + "\n";
-        continue;
-      }
-      const h = line.match(/^(#{1,4})\s+(.*)$/);
-      if (h) {
-        closeList();
-        const level = h[1].length + 1;
-        html += `<h${level}>${inline(h[2])}</h${level}>`;
-        continue;
-      }
-      if (/^\d+\.\s+/.test(line)) {
-        if (!inOrder) {
-          closeList();
-          html += "<ol>";
-          inOrder = true;
-        }
-        html += `<li>${inline(line.replace(/^\d+\.\s+/, ""))}</li>`;
-        continue;
-      }
-      if (/^[-*]\s+/.test(line)) {
-        if (!inList) {
-          closeList();
-          html += "<ul>";
-          inList = true;
-        }
-        html += `<li>${inline(line.replace(/^[-*]\s+/, ""))}</li>`;
-        continue;
-      }
-      closeList();
-      if (line.trim() !== "") {
-        html += `<p>${inline(line)}</p>`;
-      }
-    }
-    closeList();
-    if (inCode) html += "</code></pre>";
-    return html;
+  // 链接点击拦截：<a> 走 openUrl 在系统浏览器打开，而非 webview 内导航
+  function onPreviewClick(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    const anchor = target.closest("a");
+    if (!anchor) return;
+    const href = anchor.getAttribute("href");
+    if (!href || href === "#") return;
+    e.preventDefault();
+    void openUrl(href);
   }
 
-  function inline(s: string): string {
-    return s
-      .replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-      .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-      .replace(
-        /\[([^\]]+)\]\(([^)]+)\)/g,
-        '<a href="$2" target="_blank">$1</a>',
-      );
-  }
+  // body 变化 → marked 同步渲染（秒出 GFM）→ tick 后异步 CDN 增强（mermaid/katex/高亮）
+  $effect(() => {
+    if (!previewEl || mode !== "view") return;
+    void tick().then(() => renderRich(previewEl!));
+  });
 </script>
 
 {#if !prompt}
@@ -173,7 +112,13 @@
 
     {#if mode === "view"}
       <!-- 预览 + 复制 -->
-      <div class="preview prose">
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="preview prose"
+        bind:this={previewEl}
+        onclick={onPreviewClick}
+      >
         {@html renderMarkdown(body)}
       </div>
       <footer class="editor-foot">
@@ -574,5 +519,107 @@
   }
   .prose :global(a) {
     color: var(--accent);
+    cursor: pointer;
+  }
+
+  /* ── GFM 扩展语法 ── */
+  .prose :global(blockquote) {
+    margin: 10px 0;
+    padding: 6px 14px;
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 0 6px 6px 0;
+    color: var(--muted);
+  }
+  .prose :global(blockquote p) {
+    margin: 4px 0;
+  }
+  .prose :global(hr) {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 16px 0;
+  }
+  .prose :global(del) {
+    color: var(--muted);
+  }
+  .prose :global(table) {
+    border-collapse: collapse;
+    width: auto;
+    max-width: 100%;
+    margin: 10px 0;
+    font-size: 13.5px;
+  }
+  .prose :global(th),
+  .prose :global(td) {
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    text-align: left;
+  }
+  .prose :global(th) {
+    background: var(--bg-hover);
+    font-weight: 600;
+  }
+  .prose :global(tr:nth-child(2n) td) {
+    background: rgba(0, 0, 0, 0.015);
+  }
+  /* 任务列表：去掉默认圆点，复选框居左 */
+  .prose :global(li input[type="checkbox"]) {
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+  .prose :global(li:has(input[type="checkbox"])) {
+    list-style: none;
+    margin-left: -18px;
+  }
+
+  /* ── 代码高亮（highlight.js atom-one-dark 主题由 CDN 注入，这里只兜底背景）── */
+  .prose :global(pre code.hljs) {
+    background: transparent;
+    padding: 0;
+  }
+
+  /* ── Mermaid 容器 ── */
+  .prose :global(.mermaid) {
+    display: flex;
+    justify-content: center;
+    padding: 12px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 10px 0;
+    overflow-x: auto;
+  }
+  .prose :global(.mermaid svg) {
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* ── KaTeX 占位与渲染结果 ── */
+  .prose :global(.katex-placeholder) {
+    background: var(--accent-soft);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .prose :global(.katex-block) {
+    display: block;
+    margin: 12px 0;
+    overflow-x: auto;
+    text-align: center;
+  }
+
+  /* ── CDN 加载失败的源码回退 ── */
+  .prose :global(.render-fallback) {
+    background: #fff5f5;
+    border: 1px solid #f5c2c2;
+    border-left: 3px solid var(--danger);
+    color: #666;
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    overflow-x: auto;
+    margin: 10px 0;
   }
 </style>
