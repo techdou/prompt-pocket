@@ -303,6 +303,12 @@ fn reorder(
     Ok(())
 }
 
+/// 分类拖拽排序：重写 .category-order.json
+#[tauri::command]
+fn reorder_categories(names: Vec<String>, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    store::save_category_order(&state.local_dir, &names).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn copy_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
@@ -957,6 +963,7 @@ pub fn run() {
             create_prompt,
             delete_prompt,
             reorder,
+            reorder_categories,
             copy_text,
             copy_or_paste,
             hide_window,

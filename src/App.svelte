@@ -14,6 +14,7 @@
     readPrompt,
     renamePrompt,
     renameCategory,
+    reorderCategories,
     reorderPrompts,
     revealInFinder,
     savePrompt,
@@ -29,6 +30,7 @@
     canReorderPromptList,
     getReorderCategory,
     getReorderDisabledReason,
+    moveCategoryOrder,
     movePathOrder,
   } from "./lib/reorder";
 
@@ -129,8 +131,8 @@
     }
   }
 
-  // 拖拽重排进行中标志：reorderPrompts 把新顺序写盘前，若 sync-finished
-  // 抵达并触发 refresh()，会读到旧 .order.json 把刚拖的顺序冲掉。
+  // 拖拽重排进行中标志：重排把新顺序写盘前，若 sync-finished
+  // 抵达并触发 refresh()，会读到旧 order 文件把刚拖的顺序冲掉。
   // 用该标志让写盘期间的 refresh 延迟到写盘完成后，避免竞态。
   let reorderInFlight = false;
   let pendingRefresh = false;
@@ -338,6 +340,29 @@
     pendingRefresh = false;
     try {
       await reorderPrompts(categoryName, newPathOrder);
+    } catch (e) {
+      showError(String(e));
+      await refresh();
+    } finally {
+      reorderInFlight = false;
+      if (pendingRefresh) {
+        pendingRefresh = false;
+        await refresh();
+      }
+    }
+  }
+
+  // 分类拖拽重排：from/to 都是 categories 数组索引（不含"全部"）。
+  // 乐观更新本地顺序 → 写盘 .category-order.json。失败回滚靠 refresh 重读后端。
+  async function doReorderCategory(from: number, to: number) {
+    const next = moveCategoryOrder(categories, from, to);
+    if (!next) return;
+
+    categories = next;
+    reorderInFlight = true;
+    pendingRefresh = false;
+    try {
+      await reorderCategories(next.map((c) => c.name));
     } catch (e) {
       showError(String(e));
       await refresh();
@@ -589,7 +614,7 @@
       </div>
     </header>
 
-    <nav class="tabs" data-tauri-drag-region>
+    <nav class="tabs">
       <CategoryTabs
         {categories}
         total={allPrompts.length}
@@ -597,6 +622,7 @@
         oncreate={onCreateCategory}
         onrename={onRenameCategory}
         oncontextmenu={onCatContextMenu}
+        onreorder={doReorderCategory}
       />
     </nav>
 
