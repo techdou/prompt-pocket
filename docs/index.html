@@ -20,11 +20,9 @@
     <meta property="og:url" content="https://techdou.github.io/prompt-pocket/" />
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="preload" as="image" href="screenshots/list.png" />
-    <!-- favicon：与应用图标一致的深色圆角口袋方块 -->
-    <link
-      rel="icon"
-      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='18' fill='%231e1e20'/></svg>"
-    />
+    <!-- favicon：应用真实图标 -->
+    <link rel="icon" href="icon.png" />
+    <link rel="apple-touch-icon" href="icon.png" />
     <style>
       :root {
         /* 与 app.css 同款亮色 token，保持品牌一致 */
@@ -136,12 +134,12 @@
         text-decoration: none;
         color: var(--ink);
       }
-      /* 品牌标：与应用图标一致的深色圆角口袋方块 */
+      /* 品牌标：应用真实图标 */
       .brand-mark {
         width: 30px;
         height: 30px;
-        border-radius: 6px; /* 30px × 0.18 ≈ 5.4，取 6 贴近图标比例 */
-        background: #1e1e20;
+        border-radius: 7px;
+        background: url("icon.png") center / contain no-repeat, #1e1e20;
         box-shadow: 0 0 0 4px var(--accent-soft);
         flex-shrink: 0;
       }
@@ -425,6 +423,8 @@
         overflow: hidden;
         background: var(--surface);
         transition: transform 0.25s, border-color 0.25s, box-shadow 0.25s;
+        display: flex;
+        flex-direction: column;
       }
       .shot:hover {
         transform: scale(1.012);
@@ -432,10 +432,19 @@
         box-shadow: var(--shadow-soft);
       }
       .shot.tall { grid-row: span 2; }
+      .shot-img {
+        width: 100%;
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg-2);
+        overflow: hidden;
+      }
       .shot img {
         width: 100%;
-        height: 100%;
-        object-fit: cover;
+        height: auto;
         display: block;
       }
       .shot-cap {
@@ -650,6 +659,15 @@
         .hero { padding: 56px 0 40px; }
         section { padding: 70px 0; }
       }
+      @media (max-width: 640px) {
+        .wrap { padding: 0 18px; }
+        .hero { padding: 36px 0 28px; }
+        section { padding: 52px 0; }
+        .cta-row { flex-direction: column; align-items: stretch; }
+        .cta-row .btn { width: 100%; justify-content: center; }
+        .final { padding: 72px 0 56px; }
+        footer .wrap { flex-direction: column; text-align: center; }
+      }
     </style>
   </head>
   <body>
@@ -744,11 +762,11 @@
           </div>
 
           <div class="feat sm">
-            <div class="feat-num">03 / 存储</div>
-            <span class="glyph">📝</span>
-            <h3>Markdown 文件 + 填空编辑</h3>
+            <div class="feat-num">03 / 渲染</div>
+            <span class="glyph">🎨</span>
+            <h3>富 Markdown 渲染</h3>
             <p>
-              一条 Prompt 一个 <code>.md</code>，文件夹即分类。标题/分类用表单填，无需手写 YAML。
+              GFM 全语法离线可用，Mermaid 图表、KaTeX 公式、代码高亮按需从 CDN 加载，加载失败优雅降级。
             </p>
           </div>
 
@@ -764,9 +782,9 @@
           <div class="feat sm">
             <div class="feat-num">05 / 排序</div>
             <span class="glyph">🔀</span>
-            <h3>原生拖拽排序</h3>
+            <h3>双向拖拽排序</h3>
             <p>
-              按住列表项手柄拖到目标位置，落点指示线实时跟随。
+              提示词与分类都支持原生拖拽重排，顺序持久化并随云同步。
             </p>
           </div>
 
@@ -775,7 +793,7 @@
             <span class="glyph">🪶</span>
             <h3>轻量安装包，低占用常驻</h3>
             <p>
-              Tauri v2 + Rust 后端，无 Electron。没有数据库，没有云端账号——数据完全归你所有，用你自己的坚果云同步到所有设备。CPU 占用近乎为零，常驻后台负担很低。
+              Tauri v2 + Rust 后端，无 Electron。一条 Prompt 一个 <code>.md</code> 文件，文件夹即分类——没有数据库，没有云端账号，数据完全归你所有，用你自己的坚果云同步到所有设备。CPU 占用近乎为零，常驻后台负担很低。
             </p>
           </div>
         </div>
@@ -793,15 +811,15 @@
 
         <div class="gallery">
           <div class="shot tall">
-            <img src="screenshots/editor-long.jpg" alt="长 prompt 编辑器：正文滚动，复制按钮固定底部" loading="lazy" />
+            <div class="shot-img"><img src="screenshots/editor-long.jpg" alt="长 prompt 编辑器：正文滚动，复制按钮固定底部" loading="lazy" /></div>
             <div class="shot-cap"><span>editor / 长 prompt</span><span>03</span></div>
           </div>
           <div class="shot">
-            <img src="screenshots/edit-form.jpg" alt="填空式编辑表单：标题、分类、复制模式、正文" loading="lazy" />
+            <div class="shot-img"><img src="screenshots/edit-form.jpg" alt="填空式编辑表单：标题、分类、复制模式、正文" loading="lazy" /></div>
             <div class="shot-cap"><span>edit / 填空式表单</span><span>04</span></div>
           </div>
           <div class="shot">
-            <img src="screenshots/settings.png" alt="坚果云同步设置面板" loading="lazy" />
+            <div class="shot-img"><img src="screenshots/settings.png" alt="坚果云同步设置面板" loading="lazy" /></div>
             <div class="shot-cap"><span>settings / 坚果云</span><span>05</span></div>
           </div>
         </div>
@@ -891,7 +909,7 @@
 
     <footer>
       <div class="wrap">
-        <span>Prompt Pocket · MIT License</span>
+        <span>Prompt Pocket · Apache License 2.0</span>
         <span>
           <a href="https://github.com/techdou/prompt-pocket">GitHub</a> ·
           <a href="https://github.com/techdou/prompt-pocket/releases">Releases</a> ·

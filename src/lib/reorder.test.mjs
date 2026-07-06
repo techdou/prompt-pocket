@@ -2,8 +2,10 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   canReorderPromptList,
+  getHorizontalCategoryDropTarget,
   getReorderDisabledReason,
   getReorderCategory,
+  moveCategoryOrder,
   movePathOrder,
 } from "./reorder.ts";
 
@@ -68,5 +70,39 @@ describe("reorder helpers", () => {
       "写作/a.md",
     ]);
     assert.equal(movePathOrder(prompts, 1, 2), null);
+  });
+
+  it("moves a category by insertion point", () => {
+    const categories = ["写作", "编程", "翻译"];
+
+    assert.deepEqual(moveCategoryOrder(categories, 0, 3), ["编程", "翻译", "写作"]);
+    assert.deepEqual(moveCategoryOrder(categories, 2, 0), ["翻译", "写作", "编程"]);
+    assert.equal(moveCategoryOrder(categories, 1, 2), null);
+  });
+
+  it("keeps horizontal category drop targets valid in tab gaps and trailing space", () => {
+    const tabs = [
+      { tabIdx: -1, left: 0, right: 58 },
+      { tabIdx: 0, left: 64, right: 124 },
+      { tabIdx: 1, left: 130, right: 190 },
+      { tabIdx: 2, left: 196, right: 256 },
+    ];
+
+    assert.deepEqual(getHorizontalCategoryDropTarget(tabs, 61), {
+      lineIndex: -1,
+      lineBefore: false,
+      toIndex: 0,
+    });
+    assert.deepEqual(getHorizontalCategoryDropTarget(tabs, 127), {
+      lineIndex: 0,
+      lineBefore: false,
+      toIndex: 1,
+    });
+    assert.deepEqual(getHorizontalCategoryDropTarget(tabs, 280), {
+      lineIndex: 2,
+      lineBefore: false,
+      toIndex: 3,
+    });
+    assert.equal(getHorizontalCategoryDropTarget(tabs, 10), null);
   });
 });

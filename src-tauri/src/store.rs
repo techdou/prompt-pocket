@@ -247,16 +247,49 @@ pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
             .then_with(|| b.meta.updated.cmp(&a.meta.updated))
     });
 
-    let categories = cat_counts
-        .into_iter()
-        .map(|(name, count)| CategoryCount { name, count })
-        .collect();
+    let categories = build_category_counts(cat_counts, root);
 
     Ok(ScanResult { prompts, categories })
 }
 
+/// 按自定义顺序构建分类计数列表。
+/// - 在 category_order 里的：按该顺序排列
+/// - 不在里面的（含新建分类）：按字母序追加到末尾
+fn build_category_counts(
+    cat_counts: BTreeMap<String, usize>,
+    root: &Path,
+) -> Vec<CategoryCount> {
+    let order = load_category_order(root);
+    let mut ordered: Vec<CategoryCount> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    // 先按自定义顺序收集
+    for name in &order {
+        if let Some(&count) = cat_counts.get(name) {
+            ordered.push(CategoryCount {
+                name: name.clone(),
+                count,
+            });
+            seen.insert(name.as_str());
+        }
+    }
+    // 未列入的按字母序（BTreeMap 已是字母序）追加
+    for (name, count) in &cat_counts {
+        if !seen.contains(name.as_str()) {
+            ordered.push(CategoryCount {
+                name: name.clone(),
+                count: *count,
+            });
+        }
+    }
+    ordered
+}
+
 /// .order.json 文件名
 pub const ORDER_FILE: &str = ".order.json";
+
+/// .category-order.json 文件名：分类的自定义显示顺序（纯数组）
+pub const CATEGORY_ORDER_FILE: &str = ".category-order.json";
 
 /// 加载 order 映射：{ 分类名: [相对路径, ...] }
 fn load_order_map(root: &Path) -> std::collections::HashMap<String, Vec<String>> {
@@ -281,6 +314,42 @@ pub fn reorder_category(
     map.insert(category.to_string(), ordered_paths.to_vec());
     let json = serde_json::to_string_pretty(&map).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     fs::write(&path, json)
+}
+
+/// 读取分类自定义顺序（.category-order.json）。失败或不存在返回空 Vec。
+pub fn load_category_order(root: &Path) -> Vec<String> {
+    std::fs::read_to_string(root.join(CATEGORY_ORDER_FILE))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 写入分类顺序到 .category-order.json
+pub fn save_category_order(root: &Path, names: &[String]) -> io::Result<()> {
+    let path = root.join(CATEGORY_ORDER_FILE);
+    let json = serde_json::to_string_pretty(names)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(&path, json)
+}
+
+/// 重命名分类时同步更新 .category-order.json：旧名替换为新名。
+/// 若旧名不在列表里（用户从没拖过该分类），不做任何事——它会按字母序排到末尾。
+pub fn rename_category_in_order(root: &Path, old_name: &str, new_name: &str) -> io::Result<()> {
+    let mut order = load_category_order(root);
+    let changed = order
+        .iter_mut()
+        .any(|n| {
+            if n == old_name {
+                *n = new_name.to_string();
+                true
+            } else {
+                false
+            }
+        });
+    if changed {
+        save_category_order(root, &order)?;
+    }
+    Ok(())
 }
 
 fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
@@ -537,6 +606,8 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
     } else {
         fs::rename(&old_dir, &new_dir)?;
     }
+    // 同步更新 .category-order.json 里的旧名为新名（若存在）
+    let _ = rename_category_in_order(root, old_name, new_name);
     Ok(())
 }
 
@@ -873,6 +944,105 @@ mod tests {
             !res.categories.iter().any(|c| c.name == ".trash"),
             ".trash 不应是分类"
         );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 验证分类自定义顺序：写入 .category-order.json 后 scan 按该顺序返回
+    #[test]
+    fn category_order_controls_display_sequence() {
+        let dir = std::env::temp_dir().join("pp_test_cat_order");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        create_category(&dir, "写作").unwrap();
+        create_category(&dir, "编程").unwrap();
+        create_category(&dir, "翻译").unwrap();
+
+        // 写入自定义顺序：翻译 → 编程 → 写作
+        save_category_order(&dir, &["翻译".into(), "编程".into(), "写作".into()]).unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+        let names: Vec<_> = res.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["翻译", "编程", "写作"], "应按自定义顺序排列");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 不在 order 里的分类按字母序追加到末尾
+    #[test]
+    fn unlisted_categories_appended_alphabetically() {
+        let dir = std::env::temp_dir().join("pp_test_cat_order_unlisted");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        create_category(&dir, "alpha").unwrap();
+        create_category(&dir, "beta").unwrap();
+        create_category(&dir, "gamma").unwrap();
+        create_category(&dir, "delta").unwrap();
+
+        // order 只列了 gamma 和 alpha
+        save_category_order(&dir, &["gamma".into(), "alpha".into()]).unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+        let names: Vec<_> = res.categories.iter().map(|c| c.name.as_str()).collect();
+        // gamma、alpha 按 order；beta、delta 不在 order 里，按字母序追加
+        assert_eq!(names, vec!["gamma", "alpha", "beta", "delta"]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 没有 .category-order.json 时，回退到全字母序
+    #[test]
+    fn category_order_missing_falls_back_to_alphabetical() {
+        let dir = std::env::temp_dir().join("pp_test_cat_order_missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        create_category(&dir, "zebra").unwrap();
+        create_category(&dir, "apple").unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+        let names: Vec<_> = res.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["apple", "zebra"]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 重命名分类时，.category-order.json 里的旧名同步更新
+    #[test]
+    fn rename_category_updates_order_file() {
+        let dir = std::env::temp_dir().join("pp_test_cat_rename_order");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        create_category(&dir, "旧名").unwrap();
+        create_category(&dir, "其他").unwrap();
+        save_category_order(&dir, &["旧名".into(), "其他".into()]).unwrap();
+
+        rename_category(&dir, "旧名", "新名").unwrap();
+
+        let order = load_category_order(&dir);
+        assert_eq!(order, vec!["新名", "其他"], "旧名应已替换为新名");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// .category-order.json 损坏时容错（返回空，回退字母序）
+    #[test]
+    fn category_order_corrupt_file_is_ignored() {
+        let dir = std::env::temp_dir().join("pp_test_cat_order_corrupt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        create_category(&dir, "beta").unwrap();
+        create_category(&dir, "alpha").unwrap();
+        // 写入损坏的 JSON
+        std::fs::write(dir.join(CATEGORY_ORDER_FILE), "{ not valid json").unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+        let names: Vec<_> = res.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"], "损坏文件应被忽略，回退字母序");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

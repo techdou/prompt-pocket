@@ -125,6 +125,11 @@ export async function reorderPrompts(
   return invoke<void>("reorder", { category, paths });
 }
 
+/** 分类拖拽排序：重写 .category-order.json */
+export async function reorderCategories(names: string[]): Promise<void> {
+  return invoke<void>("reorder_categories", { names });
+}
+
 // ── 剪贴板 / 窗口 ──
 
 export async function copyText(text: string): Promise<void> {

@@ -35,7 +35,10 @@ reqwest = "0.12"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 # 模拟系统级键盘输入（注入 Ctrl+V 到原输入框）
 enigo = "0.6"
+
 # Windows API：检测前台窗口是否有文本光标（caret）以决定是否注入
+# 仅 Windows 需要，放 target-specific 避免在 macOS/Linux 拉取无用的 windows crate
+[target.'cfg(windows)'.dependencies]
 # 版本与 enigo 传递依赖一致（0.61），避免双版本拉取
 windows = { version = "0.61", features = [
     "Win32_Foundation",

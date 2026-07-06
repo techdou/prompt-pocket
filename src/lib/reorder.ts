@@ -57,3 +57,81 @@ export function movePathOrder(
   next.splice(insertAt, 0, moved);
   return next.map((prompt) => prompt.path);
 }
+
+export function moveCategoryOrder<T>(items: T[], from: number, to: number): T[] | null {
+  if (from < 0 || from >= items.length || to < 0 || to > items.length) {
+    return null;
+  }
+  if (to === from || to === from + 1) {
+    return null;
+  }
+
+  const next = [...items];
+  const [moved] = next.splice(from, 1);
+  const insertAt = to > from ? to - 1 : to;
+  next.splice(insertAt, 0, moved);
+  return next;
+}
+
+export interface HorizontalCategoryTabRect {
+  tabIdx: number;
+  left: number;
+  right: number;
+}
+
+export interface HorizontalCategoryDropTarget {
+  lineIndex: number;
+  lineBefore: boolean;
+  toIndex: number;
+}
+
+function targetBeforeTab(
+  tab: HorizontalCategoryTabRect,
+): HorizontalCategoryDropTarget | null {
+  if (tab.tabIdx === ALL_CATEGORY_TAB_INDEX) return null;
+  return {
+    lineIndex: tab.tabIdx,
+    lineBefore: true,
+    toIndex: tab.tabIdx,
+  };
+}
+
+function targetAfterTab(tab: HorizontalCategoryTabRect): HorizontalCategoryDropTarget {
+  return {
+    lineIndex: tab.tabIdx,
+    lineBefore: false,
+    toIndex: tab.tabIdx === ALL_CATEGORY_TAB_INDEX ? 0 : tab.tabIdx + 1,
+  };
+}
+
+export const ALL_CATEGORY_TAB_INDEX = -1;
+
+export function getHorizontalCategoryDropTarget(
+  tabs: HorizontalCategoryTabRect[],
+  clientX: number,
+): HorizontalCategoryDropTarget | null {
+  const sortedTabs = [...tabs].sort((a, b) => a.left - b.left);
+  if (sortedTabs.length === 0 || clientX < sortedTabs[0].left) {
+    return null;
+  }
+
+  for (const tab of sortedTabs) {
+    if (clientX >= tab.left && clientX <= tab.right) {
+      const before = clientX - tab.left < (tab.right - tab.left) / 2;
+      return before ? targetBeforeTab(tab) : targetAfterTab(tab);
+    }
+  }
+
+  for (let i = 0; i < sortedTabs.length - 1; i += 1) {
+    const leftTab = sortedTabs[i];
+    const rightTab = sortedTabs[i + 1];
+    if (clientX > leftTab.right && clientX < rightTab.left) {
+      const gapMidpoint = (leftTab.right + rightTab.left) / 2;
+      return clientX <= gapMidpoint
+        ? targetAfterTab(leftTab)
+        : targetBeforeTab(rightTab);
+    }
+  }
+
+  return targetAfterTab(sortedTabs[sortedTabs.length - 1]);
+}
