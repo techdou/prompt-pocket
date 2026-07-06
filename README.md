@@ -171,28 +171,6 @@ cd docs && python -m http.server 8010
 | 云同步 | `reqwest_dav` + 坚果云 WebDAV |
 | 数据 | Markdown + YAML frontmatter |
 
-## 附录：界面预览
-
-### 主界面 / 搜索
-
-![主界面](docs/screenshots/list.png)
-
-### 填空式编辑表单
-
-![编辑表单](docs/screenshots/edit-form.jpg)
-
-### 长提示词编辑器
-
-![长提示词编辑器](docs/screenshots/editor-long.jpg)
-
-### 坚果云同步设置
-
-![设置](docs/screenshots/settings.png)
-
-### 拖拽排序
-
-![拖拽排序](docs/screenshots/drag-handle.png)
-
 ## License
 
 [Apache License 2.0](LICENSE)
