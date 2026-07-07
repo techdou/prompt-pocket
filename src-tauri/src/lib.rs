@@ -463,6 +463,7 @@ async fn wait_for_text_input_focus(
     }
 }
 
+#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TextFocusSignal {
     None,
@@ -470,10 +471,12 @@ enum TextFocusSignal {
     UiaTextInput,
 }
 
+#[cfg(any(windows, test))]
 fn is_text_input_signal(signal: TextFocusSignal) -> bool {
     !matches!(signal, TextFocusSignal::None)
 }
 
+#[cfg(any(windows, test))]
 fn is_uia_text_input_candidate(
     is_keyboard_focusable: bool,
     is_edit_control: bool,
@@ -492,8 +495,14 @@ fn is_uia_text_input_candidate(
         || (has_value_pattern && has_text_pattern)
 }
 
+#[cfg(windows)]
 fn foreground_has_text_input_focus() -> bool {
     is_text_input_signal(foreground_text_focus_signal())
+}
+
+#[cfg(not(windows))]
+fn foreground_has_text_input_focus() -> bool {
+    false
 }
 
 #[cfg(windows)]
@@ -504,11 +513,6 @@ fn foreground_text_focus_signal() -> TextFocusSignal {
     if foreground_has_caret() {
         return TextFocusSignal::GuiCaret;
     }
-    TextFocusSignal::None
-}
-
-#[cfg(not(windows))]
-fn foreground_text_focus_signal() -> TextFocusSignal {
     TextFocusSignal::None
 }
 
@@ -588,11 +592,6 @@ fn foreground_has_caret() -> bool {
     }
 }
 
-#[cfg(not(windows))]
-fn foreground_has_caret() -> bool {
-    false
-}
-
 /// 判断指定 Tauri 窗口当前是否为 Win32 前台窗口。
 ///
 /// 用途：拖拽 / 缩放窗口时，WebView 可能误报 `Focused(false)`，
@@ -620,6 +619,7 @@ fn is_window_in_foreground(_win: &tauri::Window) -> bool {
     false
 }
 
+#[cfg(any(windows, test))]
 fn foreground_matches_app_window(is_same_window: bool, is_child_window: bool) -> bool {
     is_same_window || is_child_window
 }
@@ -853,14 +853,14 @@ fn open_external_url(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(&url)
+            .arg(url)
             .spawn()
             .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "linux")]
     {
         std::process::Command::new("xdg-open")
-            .arg(&url)
+            .arg(url)
             .spawn()
             .map_err(|e| e.to_string())?;
     }

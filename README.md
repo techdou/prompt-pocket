@@ -33,8 +33,8 @@ Prompt Pocket 是一个轻量级桌面提示词管理工具。它像系统搜索
 
 从 GitHub Releases 下载 Windows 安装包：
 
-- `Prompt Pocket_2.0.1_x64-setup.exe`：推荐，普通安装器
-- `Prompt Pocket_2.0.1_x64_en-US.msi`：MSI 安装包
+- `Prompt Pocket_2.0.2_x64-setup.exe`：推荐，普通安装器
+- `Prompt Pocket_2.0.2_x64_en-US.msi`：MSI 安装包
 - `prompt-pocket.exe`：release 构建出的可执行文件
 
 首次启动会显示主窗口；之后默认隐藏到后台，可用快捷键或托盘打开。
