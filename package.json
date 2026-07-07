@@ -1,6 +1,6 @@
 {
   "name": "prompt-pocket",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "轻量级提示词管理工具，全局快捷键秒唤，Markdown 存储，云盘同步。",
   "type": "module",
   "scripts": {

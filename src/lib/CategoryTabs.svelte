@@ -2,6 +2,7 @@
   import {
     ALL_CATEGORY_TAB_INDEX,
     getHorizontalCategoryDropTarget,
+    getHorizontalCategoryDropTargetWithFallback,
   } from "./reorder";
   import type { CategoryCount } from "./types";
 
@@ -85,14 +86,7 @@
 
   function updateDropTarget(clientX: number, clientY: number) {
     const scrollRect = scrollEl?.getBoundingClientRect();
-    if (
-      !scrollEl ||
-      !scrollRect ||
-      clientX < scrollRect.left ||
-      clientX > scrollRect.right ||
-      clientY < scrollRect.top ||
-      clientY > scrollRect.bottom
-    ) {
+    if (!scrollEl || !scrollRect || clientX < scrollRect.left || clientX > scrollRect.right) {
       dropLineIndex = -1;
       dropToIndex = -1;
       return;
@@ -108,7 +102,16 @@
         };
       })
       .filter((tab) => Number.isFinite(tab.tabIdx));
-    const target = getHorizontalCategoryDropTarget(tabs, clientX);
+    const fallback =
+      dropToIndex >= 0
+        ? { lineIndex: dropLineIndex, lineBefore: dropLineBefore, toIndex: dropToIndex }
+        : null;
+    const target = getHorizontalCategoryDropTargetWithFallback(
+      tabs,
+      clientX,
+      fallback,
+      clientY >= scrollRect.top && clientY <= scrollRect.bottom,
+    );
     dropLineIndex = target?.lineIndex ?? -1;
     dropLineBefore = target?.lineBefore ?? true;
     dropToIndex = target?.toIndex ?? -1;

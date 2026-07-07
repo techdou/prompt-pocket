@@ -1,6 +1,6 @@
 [package]
 name = "prompt-pocket"
-version = "2.0.0"
+version = "2.0.1"
 description = "轻量级提示词管理工具"
 authors = ["you"]
 edition = "2021"
@@ -14,7 +14,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
@@ -31,6 +32,8 @@ dirs = "5"
 # 坚果云 WebDAV 同步
 reqwest_dav = "0.2"
 reqwest = "0.12"
+# 系统凭据库：WebDAV 应用密码不落入 config.json 明文
+keyring = "4"
 # async runtime（Tauri 自带，这里显式声明用于 spawn 后台同步）
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 # 模拟系统级键盘输入（注入 Ctrl+V 到原输入框）
@@ -44,6 +47,7 @@ windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

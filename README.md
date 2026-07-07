@@ -1,47 +1,57 @@
 # Prompt Pocket
 
 <p align="center">
-  <img src="docs/screenshots/list.png" alt="Prompt Pocket 主界面" width="720" />
+  <img src="docs/screenshots/list.png" alt="Prompt Pocket main window" width="720" />
 </p>
 
-> 全局秒唤的提示词口袋：`Ctrl+Alt+P` 从任意应用唤出，搜索 → 选中 → `Enter` 复制或自动粘贴。一条提示词一个 Markdown 文件，文件夹即分类，坚果云手动同步。
+Prompt Pocket 是一个轻量级桌面提示词管理工具。它像系统搜索一样用 `Ctrl+Alt+P` 秒唤，选中提示词后按 `Enter` 即可复制；如果唤出前焦点在输入框里，还会自动粘贴回原输入框。
 
-**官网**：<https://techdou.github.io/prompt-pocket/>
-
----
+官网：<https://techdou.github.io/prompt-pocket/>
 
 ## 适合谁
 
-- 经常在 ChatGPT、IDE、浏览器输入框、文档编辑器之间复用提示词的人
-- 想用本地 Markdown 文件管理提示词，而不是把数据交给第三方服务的人
-- 希望提示词工具像系统搜索一样：随叫随到，用完自动消失的人
+- 经常在 ChatGPT、浏览器、IDE、文档编辑器之间复用提示词的人
+- 想把提示词保存为本地 Markdown 文件，而不是交给第三方服务的人
+- 想要一个随叫随到、用完自动隐藏的提示词口袋的人
 
-## 核心能力
+## 核心特性
 
 | 能力 | 说明 |
 | --- | --- |
-| 全局秒唤 | `Ctrl+Alt+P` 从任意应用唤出 Prompt Pocket |
-| 智能复制 / 粘贴 | `Enter` 写入剪贴板；唤出前焦点在输入框时自动粘贴回原输入框 |
-| Markdown 存储 | 一条提示词一个 `.md` 文件，文件夹即分类，便于备份、搜索、迁移 |
-| 富 Markdown 渲染 | 预览支持 GFM 全语法（表格 / 引用 / 删除线 / 任务列表），Mermaid 图表、KaTeX 公式、代码高亮按需从 CDN 加载 |
-| 双向拖拽排序 | 提示词与分类都支持原生拖拽重排，顺序持久化到本地、随云同步 |
-| 键盘优先 | `Ctrl+F` 搜索、`↑` / `↓` 选择、`Enter` 复制，全流程可不碰鼠标 |
-| 手动云同步 | 通过坚果云 WebDAV 上传 / 下载，避免自动同步误覆盖 |
+| 全局秒唤 | `Ctrl+Alt+P` 从任意应用唤出或隐藏 |
+| 智能复制 / 粘贴 | `Enter` 写剪贴板；唤出前在输入框时自动粘贴 |
+| Markdown 存储 | 一条提示词一个 `.md` 文件，文件夹就是分类 |
+| 富 Markdown 预览 | 支持 GFM 表格、任务列表、代码块；Mermaid、KaTeX、highlight.js 按需加载 |
+| 提示词排序 | 在单个分类里拖动列表项左侧手柄，顺序写入 `.order.json` |
+| 分类排序 | 横向拖动分类标签手柄，顺序写入 `.category-order.json` |
+| 手动 WebDAV 同步 | 通过坚果云上传 / 下载，避免自动同步误覆盖 |
+| 安全凭据存储 | WebDAV 应用密码保存到系统凭据库，不写入明文 JSON |
+| 托盘与单实例 | 快捷键被占用时仍可从托盘打开；重复启动会唤醒已有窗口 |
 | 轻量桌面壳 | Tauri v2 + Rust 后端，不使用 Electron |
 
-## 使用流程
+## 安装
+
+从 GitHub Releases 下载 Windows 安装包：
+
+- `Prompt Pocket_2.0.1_x64-setup.exe`：推荐，普通安装器
+- `Prompt Pocket_2.0.1_x64_en-US.msi`：MSI 安装包
+- `prompt-pocket.exe`：release 构建出的可执行文件
+
+首次启动会显示主窗口；之后默认隐藏到后台，可用快捷键或托盘打开。
+
+## 快速使用
 
 1. 在任意应用的输入框里放好光标
 2. 按 `Ctrl+Alt+P` 唤出 Prompt Pocket
-3. 搜索或用 `↑` / `↓` 选中提示词
+3. 搜索或用方向键选中提示词
 4. 按 `Enter`
 
 结果：
 
-- **唤出前焦点在输入框**：提示词写入剪贴板，并自动粘贴到原输入框
-- **唤出前焦点不在输入框**：只写入剪贴板，不模拟粘贴
+- 如果唤出前焦点在输入框：写入剪贴板，并自动粘贴回原输入框
+- 如果唤出前焦点不在输入框：只写入剪贴板，不模拟粘贴
 
-输入框识别在 Windows 上优先使用 UI Automation 识别现代输入框，失败时回退到传统 caret 检测。
+Windows 上输入框识别优先使用 UI Automation（用户界面自动化）识别现代输入框，失败时回退到传统 caret（文本光标）检测。
 
 ## 快捷键
 
@@ -54,17 +64,17 @@
 | 复制选中项 | `Enter` |
 | 隐藏窗口 | `Esc` |
 
-## 数据格式
+## 数据结构
 
-本地数据默认保存在：
+默认数据目录：
 
 ```text
-%APPDATA%/com.promptpocket.app/PromptPocket/        # Windows
-~/Library/Application Support/com.promptpocket.app/ # macOS
-~/.config/com.promptpocket.app/                     # Linux
+Windows: %APPDATA%/com.promptpocket.app/PromptPocket/
+macOS:   ~/Library/Application Support/com.promptpocket.app/PromptPocket/
+Linux:   ~/.config/com.promptpocket.app/PromptPocket/
 ```
 
-目录结构示例：
+目录示例：
 
 ```text
 PromptPocket/
@@ -73,11 +83,11 @@ PromptPocket/
 │   └── 周报模板.md
 ├── 编程/
 │   └── 代码审查.md
-├── .order.json          # 提示词排序（按分类）
+├── .order.json          # 每个分类内的提示词排序
 └── .category-order.json # 分类排序
 ```
 
-每个提示词文件都是普通 Markdown：
+提示词文件格式：
 
 ```markdown
 ---
@@ -92,84 +102,113 @@ updated: 2026-06-27T00:00:00Z
 > 待改写内容
 ```
 
-### 富 Markdown 渲染说明
+## 拖拽排序
 
-预览采用**分层渲染**，兼顾离线可用与体积：
+提示词排序和分类排序都使用 Pointer Events（指针事件），不依赖浏览器原生 Drag and Drop（拖放 API）。原因很简单：Tauri/WebView2 里原生拖放容易被桌面壳、窗口拖动和系统事件链路干扰。
 
-- **离线（打包进应用）**：GFM 全语法——标题、表格、引用、分割线、删除线、任务列表、代码块。raw HTML 一律转义，`javascript:` 等危险协议链接会被替换为 `#`，无需额外 sanitizer。
-- **联网（按需 CDN）**：检测到对应语法才加载
-  - ` ```mermaid ` 代码块 → 加载 [Mermaid](https://mermaid.js.org/) 渲染流程图 / 时序图
-  - `$...$` / `$$...$$` → 加载 [KaTeX](https://katex.org/) 渲染数学公式
-  - ` ```js ` 等带语言代码块 → 加载 [highlight.js](https://highlightjs.org/) 高亮
+- 提示词排序：只在单个分类视图可用，搜索结果和多分类「全部」视图会禁用排序
+- 分类排序：「全部」固定首位不可拖，其他分类可横向重排
+- 写盘策略：前端先乐观更新，再调用 Rust 后端写入排序 JSON
+- 竞态保护：排序写盘期间如果同步完成触发刷新，会延迟到写盘后再刷新，避免顺序被旧文件冲掉
 
-加载失败或离线时，对应内容退化为源码展示，绝不白屏。核心内容（GFM）始终离线可用，保证「秒唤」体验。
+## 富 Markdown 预览
 
-### 拖拽排序说明
+预览分两层：
 
-- **提示词排序**：在单个分类视图下，按住列表项左侧 `⠿` 手柄拖动，落点指示线实时跟随。顺序写入 `.order.json`。
-- **分类排序**：按住分类标签上的 `⠿` 手柄横向拖动。「全部」标签固定首位不可拖。顺序写入 `.category-order.json`。
-- 两种顺序文件都会随云同步自动上传。
+- 离线内置：GitHub Flavored Markdown（GFM），包括表格、引用、删除线、任务列表、代码块
+- 联网增强：检测到对应语法时，按需从 CDN 加载 Mermaid、KaTeX、highlight.js
 
-搜索结果、「全部」视图下的提示词列表会自动禁用排序，避免隐藏项错序。
+安全处理：
+
+- raw HTML 一律转义显示
+- `javascript:` 等危险链接会替换为 `#`
+- Mermaid / KaTeX 占位元素会分别做文本转义和属性转义，避免属性注入
+- CDN 加载失败时降级显示源码，不影响核心阅读和复制
 
 ## 坚果云同步
 
-Prompt Pocket 通过 WebDAV 连接坚果云。
+Prompt Pocket 通过坚果云 WebDAV 手动同步。
 
-**配置方式**：
+配置步骤：
 
-1. 登录坚果云 → 账户信息 → 安全选项 → 第三方应用管理
-2. 添加应用并生成**应用密码**（不是登录密码）
-3. 在 Prompt Pocket 的设置里填写账号、应用密码、远程目录
-4. 用「上传到坚果云」或「下载到本地」手动同步
+1. 登录坚果云
+2. 打开「账户信息 → 安全选项 → 第三方应用管理」
+3. 添加应用并生成应用密码
+4. 在 Prompt Pocket 设置中填写账号、应用密码和远程目录
+5. 选择「上传到坚果云」或「下载到本地」
 
-**同步策略**：
+同步规则：
 
 - 上传：把本地提示词推送到云端，不删除云端已有文件
 - 下载：以云端为准拉取到本地，并清理云端已删除的本地文件
-- `.trash`、隐藏目录和 `.sync_meta.json` 会被过滤，避免备份或内部元数据混入列表
+- `.trash`、隐藏目录和 `.sync_meta.json` 会被过滤
+- 应用密码保存到系统凭据库；旧版本明文 JSON 中的密码会在读取时迁移出去
 
 ## 开发
 
-**前置依赖**：Node.js 18+、Rust 1.77+，以及 [Tauri v2 要求的平台工具链](https://v2.tauri.app/start/prerequisites/)。
+前置依赖：
+
+- Node.js 18+
+- Rust 1.77+
+- Tauri v2 平台工具链：<https://v2.tauri.app/start/prerequisites/>
+
+安装依赖：
 
 ```bash
 npm install
-npm run tauri:dev    # 开发
-npm run tauri:build  # 打包
 ```
 
-测试：
+开发运行：
 
 ```bash
-node --experimental-strip-types --test src/lib/reorder.test.mjs src/lib/api.test.mjs
+npm run tauri:dev
+```
+
+生产构建：
+
+```bash
+npm run tauri:build
+```
+
+## 验证命令
+
+```bash
+node --experimental-strip-types --test src/lib/*.test.mjs
+npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+npm run tauri:build
 ```
 
 ## GitHub Pages
 
-落地页位于 `docs/index.html`，截图资源位于 `docs/screenshots/`。GitHub Pages 配置为 `main` 分支的 `/docs` 目录；推送到 `main` 后自动重新发布。
+落地页位于 `docs/index.html`，截图资源位于 `docs/screenshots/`。
+
+GitHub Pages 配置为 `main` 分支的 `/docs` 目录。推送到 `main` 后，Pages 会按仓库配置重新发布。
 
 本地预览：
 
 ```bash
-cd docs && python -m http.server 8010
+cd docs
+python -m http.server 8010
 ```
 
 ## 技术栈
 
 | 层 | 技术 |
 | --- | --- |
-| 桌面 | Tauri v2 |
+| 桌面壳 | Tauri v2 |
 | 后端 | Rust |
 | 前端 | Svelte 5 + Vite + TypeScript |
-| Markdown | marked + 分层 CDN（Mermaid / KaTeX / highlight.js） |
-| 快捷键 | `tauri-plugin-global-shortcut` |
-| 剪贴板 | `tauri-plugin-clipboard-manager` |
-| 输入框识别 | Windows UI Automation + legacy caret fallback |
-| 键盘注入 | `enigo` |
-| 云同步 | `reqwest_dav` + 坚果云 WebDAV |
-| 数据 | Markdown + YAML frontmatter |
+| Markdown | marked + marked-highlight |
+| 富内容增强 | Mermaid / KaTeX / highlight.js CDN 按需加载 |
+| 快捷键 | tauri-plugin-global-shortcut |
+| 剪贴板 | tauri-plugin-clipboard-manager |
+| 托盘 | Tauri tray icon |
+| 单实例 | tauri-plugin-single-instance |
+| 凭据存储 | keyring + 系统凭据库 |
+| 云同步 | reqwest_dav + 坚果云 WebDAV |
+| 数据格式 | Markdown + YAML frontmatter |
 
 ## License
 

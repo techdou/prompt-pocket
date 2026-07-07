@@ -135,3 +135,13 @@ export function getHorizontalCategoryDropTarget(
 
   return targetAfterTab(sortedTabs[sortedTabs.length - 1]);
 }
+
+export function getHorizontalCategoryDropTargetWithFallback(
+  tabs: HorizontalCategoryTabRect[],
+  clientX: number,
+  fallback: HorizontalCategoryDropTarget | null,
+  insideVerticalBounds = true,
+): HorizontalCategoryDropTarget | null {
+  if (!insideVerticalBounds) return fallback;
+  return getHorizontalCategoryDropTarget(tabs, clientX) ?? fallback;
+}

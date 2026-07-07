@@ -85,6 +85,18 @@ describe("renderMarkdown - XSS 防护", () => {
     assert.ok(includes(html, "&lt;img"));
   });
 
+  it("mermaid 占位属性里的双引号被转义", () => {
+    const html = renderMarkdown('```mermaid\n" onclick="alert(1)\n```');
+    assert.ok(includes(html, '&quot; onclick=&quot;alert(1)'));
+    assert.ok(!includes(html, 'onclick="alert(1)"'));
+  });
+
+  it("KaTeX 占位属性里的双引号被转义", () => {
+    const html = renderMarkdown('$" autofocus="autofocus$');
+    assert.ok(includes(html, '&quot; autofocus=&quot;autofocus'));
+    assert.ok(!includes(html, 'autofocus="autofocus"'));
+  });
+
   it("javascript: 协议链接 href 被替换为 #", () => {
     const html = renderMarkdown("[点我](javascript:alert(1))");
     assert.ok(includes(html, 'href="#"'));

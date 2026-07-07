@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   canReorderPromptList,
   getHorizontalCategoryDropTarget,
+  getHorizontalCategoryDropTargetWithFallback,
   getReorderDisabledReason,
   getReorderCategory,
   moveCategoryOrder,
@@ -104,5 +105,28 @@ describe("reorder helpers", () => {
       toIndex: 3,
     });
     assert.equal(getHorizontalCategoryDropTarget(tabs, 10), null);
+  });
+
+  it("keeps the last horizontal category drop target when pointer drifts vertically", () => {
+    const tabs = [
+      { tabIdx: -1, left: 0, right: 58 },
+      { tabIdx: 0, left: 64, right: 124 },
+      { tabIdx: 1, left: 130, right: 190 },
+      { tabIdx: 2, left: 196, right: 256 },
+    ];
+    const lastTarget = { lineIndex: 1, lineBefore: false, toIndex: 2 };
+
+    assert.deepEqual(
+      getHorizontalCategoryDropTargetWithFallback(tabs, 127, lastTarget),
+      {
+        lineIndex: 0,
+        lineBefore: false,
+        toIndex: 1,
+      },
+    );
+    assert.deepEqual(
+      getHorizontalCategoryDropTargetWithFallback(tabs, 127, lastTarget, false),
+      lastTarget,
+    );
   });
 });

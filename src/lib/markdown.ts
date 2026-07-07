@@ -5,8 +5,10 @@
 import { Marked } from "marked";
 import { markedHighlight } from "marked-highlight";
 
-const esc = (s: string): string =>
+const escHtml = (s: string): string =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const escAttr = (s: string): string => escHtml(s).replace(/"/g, "&quot;");
 
 // 链接协议白名单：仅放行 http(s)/mailto/ftp/相对路径/锚点
 const SAFE_HREF = /^(https?:|mailto:|ftp:|\/|#|\.\/|\.\.\/)/i;
@@ -24,7 +26,7 @@ const blockKatexRule = /^(\${1,2})\n((?:\\[^]|[^\\])+?)\n\1(?:\n|$)/;
 function katexPlaceholder(tex: string, displayMode: boolean): string {
   // 用 <code> 兜底：katex 未加载时至少显示等宽原文，不裸露 $ 符号干扰阅读
   const mode = displayMode ? "block" : "inline";
-  return `<code class="katex-placeholder katex-${mode}" data-tex="${esc(tex)}" data-display="${displayMode}">${esc(tex)}</code>`;
+  return `<code class="katex-placeholder katex-${mode}" data-tex="${escAttr(tex)}" data-display="${displayMode}">${escHtml(tex)}</code>`;
 }
 
 // marked-highlight：代码高亮 hook。mermaid 语言原样返回，留给 DOM 阶段处理。
@@ -44,12 +46,12 @@ marked.use({
   // raw HTML 块/行内 HTML 一律转义，杜绝 <script>/<iframe>/<img onerror> 注入
   renderer: {
     html({ text }: { text: string }): string {
-      return esc(text);
+      return escHtml(text);
     },
     // mermaid 代码块输出占位 div，交给 DOM 阶段 renderMermaid() 渲染
     code({ text, lang }: { text: string; lang?: string }): string | false {
       if ((lang || "").trim() === "mermaid") {
-        return `<div class="mermaid" data-source="${esc(text)}">${esc(text)}</div>`;
+        return `<div class="mermaid" data-source="${escAttr(text)}">${escHtml(text)}</div>`;
       }
       return false; // 回退默认 renderer（产出 <pre><code class="language-xxx">）
     },

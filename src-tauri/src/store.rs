@@ -140,7 +140,7 @@ fn parse_yaml_frontmatter(fm_raw: &str) -> PromptMeta {
             if let Ok(generic) = serde_yaml::from_str::<serde_yaml::Value>(fm_raw) {
                 let mut meta = PromptMeta::default();
                 if let Some(map) = generic.as_mapping() {
-                    if let Some(t) = map.get(&serde_yaml::Value::String("title".into())) {
+                    if let Some(t) = map.get(serde_yaml::Value::String("title".into())) {
                         if let Some(s) = t.as_str() {
                             meta.title = s.to_string();
                         }
@@ -249,16 +249,16 @@ pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
 
     let categories = build_category_counts(cat_counts, root);
 
-    Ok(ScanResult { prompts, categories })
+    Ok(ScanResult {
+        prompts,
+        categories,
+    })
 }
 
 /// 按自定义顺序构建分类计数列表。
 /// - 在 category_order 里的：按该顺序排列
 /// - 不在里面的（含新建分类）：按字母序追加到末尾
-fn build_category_counts(
-    cat_counts: BTreeMap<String, usize>,
-    root: &Path,
-) -> Vec<CategoryCount> {
+fn build_category_counts(cat_counts: BTreeMap<String, usize>, root: &Path) -> Vec<CategoryCount> {
     let order = load_category_order(root);
     let mut ordered: Vec<CategoryCount> = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -301,18 +301,14 @@ fn load_order_map(root: &Path) -> std::collections::HashMap<String, Vec<String>>
 }
 
 /// 重写某分类的顺序到 .order.json
-pub fn reorder_category(
-    root: &Path,
-    category: &str,
-    ordered_paths: &[String],
-) -> io::Result<()> {
+pub fn reorder_category(root: &Path, category: &str, ordered_paths: &[String]) -> io::Result<()> {
     let path = root.join(ORDER_FILE);
     let mut map: std::collections::HashMap<String, Vec<String>> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     map.insert(category.to_string(), ordered_paths.to_vec());
-    let json = serde_json::to_string_pretty(&map).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(&map).map_err(io::Error::other)?;
     fs::write(&path, json)
 }
 
@@ -327,8 +323,7 @@ pub fn load_category_order(root: &Path) -> Vec<String> {
 /// 写入分类顺序到 .category-order.json
 pub fn save_category_order(root: &Path, names: &[String]) -> io::Result<()> {
     let path = root.join(CATEGORY_ORDER_FILE);
-    let json = serde_json::to_string_pretty(names)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(names).map_err(io::Error::other)?;
     fs::write(&path, json)
 }
 
@@ -336,16 +331,14 @@ pub fn save_category_order(root: &Path, names: &[String]) -> io::Result<()> {
 /// 若旧名不在列表里（用户从没拖过该分类），不做任何事——它会按字母序排到末尾。
 pub fn rename_category_in_order(root: &Path, old_name: &str, new_name: &str) -> io::Result<()> {
     let mut order = load_category_order(root);
-    let changed = order
-        .iter_mut()
-        .any(|n| {
-            if n == old_name {
-                *n = new_name.to_string();
-                true
-            } else {
-                false
-            }
-        });
+    let changed = order.iter_mut().any(|n| {
+        if n == old_name {
+            *n = new_name.to_string();
+            true
+        } else {
+            false
+        }
+    });
     if changed {
         save_category_order(root, &order)?;
     }
@@ -445,10 +438,7 @@ fn maybe_rename_to_title(abs: &Path, title: &str) -> PathBuf {
     if safe_title.is_empty() {
         return abs.to_path_buf();
     }
-    let current_stem = abs
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let current_stem = abs.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     // 标题与当前文件名一致，无需重命名
     if safe_title == current_stem {
         return abs.to_path_buf();
@@ -653,10 +643,7 @@ fn format_iso_utc(secs: u64) -> String {
     let s = rem % 60;
 
     let (y, mo, d) = civil_from_days(days as i64);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        y, mo, d, h, m, s
-    )
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
 }
 
 /// Howard Hinnant 的 days_from_civil 逆运算，把 epoch 起的天数转成 (年,月,日)
@@ -749,7 +736,9 @@ mod tests {
         // 扫描，空分类应该出现
         let res = scan_prompts(&dir).unwrap();
         assert!(
-            res.categories.iter().any(|c| c.name == "空分类" && c.count == 0),
+            res.categories
+                .iter()
+                .any(|c| c.name == "空分类" && c.count == 0),
             "空分类应出现在列表中，实际分类: {:?}",
             res.categories
         );
@@ -805,15 +794,14 @@ mod tests {
         let p2_rel = path_to_unix(p2.strip_prefix(&dir).unwrap());
 
         // 写入自定义顺序：乙 在 甲 前面
-        reorder_category(
-            &dir,
-            "写作",
-            &[p2_rel.clone(), p1_rel.clone()],
-        )
-        .unwrap();
+        reorder_category(&dir, "写作", &[p2_rel.clone(), p1_rel.clone()]).unwrap();
 
         let res = scan_prompts(&dir).unwrap();
-        let cat_prompts: Vec<_> = res.prompts.iter().filter(|p| p.category == "写作").collect();
+        let cat_prompts: Vec<_> = res
+            .prompts
+            .iter()
+            .filter(|p| p.category == "写作")
+            .collect();
         assert_eq!(cat_prompts.len(), 2);
         assert_eq!(cat_prompts[0].title, "乙", "乙应在前面");
         assert_eq!(cat_prompts[1].title, "甲");
@@ -839,7 +827,11 @@ mod tests {
         reorder_category(&dir, "写作", &[p1_rel]).unwrap();
 
         let res = scan_prompts(&dir).unwrap();
-        let cat: Vec<_> = res.prompts.iter().filter(|p| p.category == "写作").collect();
+        let cat: Vec<_> = res
+            .prompts
+            .iter()
+            .filter(|p| p.category == "写作")
+            .collect();
         assert_eq!(cat[0].title, "甲");
         // 甲有 order=0，乙和丙 order=None 排其后
         assert_eq!(cat[0].order, Some(0));
@@ -932,7 +924,12 @@ mod tests {
         let res = scan_prompts(&dir).unwrap();
 
         // 只有 1 个真实 prompt，.trash 和隐藏目录的都不算
-        assert_eq!(res.prompts.len(), 1, "应只扫到 1 个真实 prompt，实际: {:?}", res.prompts.iter().map(|p| &p.path).collect::<Vec<_>>());
+        assert_eq!(
+            res.prompts.len(),
+            1,
+            "应只扫到 1 个真实 prompt，实际: {:?}",
+            res.prompts.iter().map(|p| &p.path).collect::<Vec<_>>()
+        );
         assert_eq!(res.prompts[0].category, "写作");
         // 任何 prompt 的分类都不应是 .trash
         assert!(
@@ -1047,4 +1044,3 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
-

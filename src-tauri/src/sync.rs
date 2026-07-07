@@ -21,7 +21,7 @@ const JIANGUO_HOST: &str = "https://dav.jianguoyun.com/dav";
 #[derive(Debug, Clone, Default)]
 pub struct CloudConfig {
     pub username: String,
-    pub password: String, // 应用密码（App Password）
+    pub password: String,    // 应用密码（App Password）
     pub remote_root: String, // 远程根路径，如 "PromptPocket"
     pub enabled: bool,
 }
@@ -49,7 +49,7 @@ pub fn build_client(cfg: &CloudConfig) -> Result<Client, DavError> {
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(60))
         .build()
-        .map_err(|e| DavError::Reqwest(e))?;
+        .map_err(DavError::Reqwest)?;
     ClientBuilder::new()
         .set_agent(agent)
         .set_host(JIANGUO_HOST.to_string())
@@ -157,11 +157,7 @@ struct RemoteFile {
 /// - 跳过 `.trash` 目录（含其所有后代）
 /// - 跳过根目录自身（depth=1 会把被列目录自己也返回一次）
 /// - 单个目录列举失败不中断整树：记录到 errors，继续其它目录
-async fn walk_remote(
-    client: &Client,
-    root: &str,
-    errors: &mut Vec<String>,
-) -> Vec<RemoteFile> {
+async fn walk_remote(client: &Client, root: &str, errors: &mut Vec<String>) -> Vec<RemoteFile> {
     let mut files: Vec<RemoteFile> = Vec::new();
     // 待访问的远程相对目录路径队列（相对 root，空串表示根目录）
     let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
@@ -228,7 +224,8 @@ async fn walk_remote(
 /// 判断相对路径是否落在 .trash 或任意隐藏目录下（不参与同步）
 /// 例：".trash/x.md" / "a/.trash/b.md" / ".hidden/y.md" 均返回 true
 fn is_trash_or_hidden_rel(rel: &str) -> bool {
-    rel.split('/').any(|seg| seg == ".trash" || seg.starts_with('.'))
+    rel.split('/')
+        .any(|seg| seg == ".trash" || seg.starts_with('.'))
 }
 
 /// 全量上传：把本地所有文件推送到远程（只增不删，不删除云端多余文件）
@@ -236,7 +233,7 @@ fn is_trash_or_hidden_rel(rel: &str) -> bool {
 ///   上传前算本地内容哈希(FNV-1a)，与 .sync_meta.json 里记录的「上次上传哈希」比对：
 ///   - 哈希相同 → 内容未变 → 跳过
 ///   - 哈希不同 或 无记录 → 上传，上传成功后更新记录
-/// 这完全不依赖服务端 ETag 算法，100% 由客户端掌控，准确可靠。
+///     这完全不依赖服务端 ETag 算法，100% 由客户端掌控，准确可靠。
 pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
     let root = sanitize_remote_path(&cfg.remote_root);
@@ -358,7 +355,6 @@ fn fnv1a_hash(data: &[u8]) -> u64 {
     hash
 }
 
-
 // ────────────────────────────────────────────────
 // 辅助函数
 // ────────────────────────────────────────────────
@@ -434,7 +430,12 @@ fn urlencoding_decode(s: &str) -> Option<String> {
 }
 
 /// 下载单个远程文件到本地
-async fn download_file(client: &Client, root: &str, rel: &str, local_path: &Path) -> Result<(), String> {
+async fn download_file(
+    client: &Client,
+    root: &str,
+    rel: &str,
+    local_path: &Path,
+) -> Result<(), String> {
     if let Some(parent) = local_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -442,7 +443,10 @@ async fn download_file(client: &Client, root: &str, rel: &str, local_path: &Path
         .get(&format!("/{root}/{rel}"))
         .await
         .map_err(|e| format!("GET 失败: {e}"))?;
-    let bytes = resp.bytes().await.map_err(|e| format!("读取响应失败: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取响应失败: {e}"))?;
     std::fs::write(local_path, &bytes).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -491,7 +495,9 @@ fn clean_local_extra(
                 let _ = std::fs::create_dir_all(&trash_dir);
                 let backup_name = format!(
                     "{}_{}.md",
-                    path.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled"),
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("untitled"),
                     now_iso_compact()
                 );
                 let backup_path = trash_dir.join(backup_name);
@@ -546,7 +552,10 @@ mod tests {
             urlencoding_decode("/dav/PromptPocket/%E5%86%99%E4%BD%9C/a.md"),
             Some("/dav/PromptPocket/写作/a.md".to_string())
         );
-        assert_eq!(urlencoding_decode("/dav/a/b.md"), Some("/dav/a/b.md".to_string()));
+        assert_eq!(
+            urlencoding_decode("/dav/a/b.md"),
+            Some("/dav/a/b.md".to_string())
+        );
     }
 
     #[test]
