@@ -6,6 +6,7 @@ dist/
 # Tauri / Rust
 src-tauri/target/
 src-tauri/gen/
+release-assets/
 
 # 编辑器
 .vscode/

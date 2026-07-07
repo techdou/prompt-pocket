@@ -5,6 +5,9 @@
     getHorizontalCategoryDropTargetWithFallback,
   } from "./reorder";
   import type { CategoryCount } from "./types";
+  import { createTranslator, type Translator } from "./i18n";
+
+  const fallbackT = createTranslator("zh");
 
   let {
     categories,
@@ -14,6 +17,7 @@
     onrename,
     oncontextmenu,
     onreorder,
+    t = fallbackT,
   }: {
     categories: CategoryCount[];
     total: number;
@@ -23,10 +27,15 @@
     oncontextmenu: (name: string, x: number, y: number) => void;
     /** 拖拽结束回调：把 fromIndex 的分类移到 toIndex 前 */
     onreorder: (fromIndex: number, toIndex: number) => void;
+    t?: Translator;
   } = $props();
 
   function pick(name: string) {
     selected = name;
+  }
+
+  function categoryLabel(name: string): string {
+    return name === "未分类" ? t("common.uncategorized") : name;
   }
 
   let creating = $state(false);
@@ -172,7 +181,7 @@
       draggable="false"
       onclick={(e) => onTabClick(e, "__all__")}
     >
-      全部<span class="num">{total}</span>
+      {t("category.all")}<span class="num">{total}</span>
     </button>
 
     {#each categories as cat, i (cat.name)}
@@ -190,12 +199,12 @@
           e.preventDefault();
           oncontextmenu(cat.name, e.clientX, e.clientY);
         }}
-        title={cat.name}
+        title={categoryLabel(cat.name)}
       >
         <span
           class="drag-handle"
-          title="拖拽排序"
-          aria-label="拖拽排序"
+          title={t("category.dragSort")}
+          aria-label={t("category.dragSort")}
           role="button"
           tabindex="-1"
           onpointerdown={(e) => onHandlePointerDown(e, i)}
@@ -203,7 +212,7 @@
         >
           ⠿
         </span>
-        <span class="name">{cat.name}</span><span class="num">{cat.count}</span>
+        <span class="name">{categoryLabel(cat.name)}</span><span class="num">{cat.count}</span>
       </button>
     {/each}
   </div>
@@ -213,7 +222,7 @@
       <input
         type="text"
         bind:value={newName}
-        placeholder="分类名"
+        placeholder={t("category.namePlaceholder")}
         onkeydown={(e) => {
           if (e.key === "Enter") submitCreate();
           if (e.key === "Escape") {
@@ -238,7 +247,7 @@
     <button
       type="button"
       class="add-btn"
-      title="新建分类"
+      title={t("category.add")}
       onclick={() => {
         creating = true;
         newName = "";

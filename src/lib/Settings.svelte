@@ -2,6 +2,11 @@
   import { fade, scale } from "svelte/transition";
   import type { CloudConfigView, SyncStatus } from "./types";
   import {
+    createTranslator,
+    type Language,
+    type Translator,
+  } from "./i18n";
+  import {
     downloadAll,
     getCloudConfig,
     getSyncStatus,
@@ -11,12 +16,20 @@
     uploadAll,
   } from "./api";
 
+  const fallbackT = createTranslator("zh");
+
   let {
     open = $bindable(false),
     onsynced,
+    language = "zh",
+    onlanguagechange = (_language: Language) => {},
+    t = fallbackT,
   }: {
     open: boolean;
     onsynced: () => void;
+    language?: Language;
+    onlanguagechange?: (language: Language) => void;
+    t?: Translator;
   } = $props();
 
   let config = $state<CloudConfigView | null>(null);
@@ -71,16 +84,19 @@
 
   async function doTest() {
     if (!username.trim() || !password.trim()) {
-      message = { type: "err", text: "请填写账号和应用密码" };
+      message = { type: "err", text: t("settings.fillCredentials") };
       return;
     }
     testing = true;
     message = null;
     try {
       await testCloudConnection(username.trim(), password.trim(), remoteRoot.trim() || "PromptPocket");
-      message = { type: "ok", text: "✓ 连接成功！账号和应用密码有效" };
+      message = { type: "ok", text: t("settings.testOk") };
     } catch (e) {
-      message = { type: "err", text: "连接失败：" + String(e) };
+      message = {
+        type: "err",
+        text: t("settings.connectionFailed", { error: String(e) }),
+      };
     } finally {
       testing = false;
     }
@@ -88,13 +104,13 @@
 
   async function doSave() {
     if (!username.trim()) {
-      message = { type: "err", text: "请填写坚果云账号" };
+      message = { type: "err", text: t("settings.fillUsername") };
       return;
     }
     const pwd = password.trim();
     // 已配置且未进入密码编辑模式 → 保留旧密码；否则必须填密码
     if (editingPassword && !pwd) {
-      message = { type: "err", text: "请填写应用密码" };
+      message = { type: "err", text: t("settings.fillPassword") };
       return;
     }
     saving = true;
@@ -107,7 +123,7 @@
         finalPwd,
         remoteRoot.trim() || "PromptPocket",
       );
-      message = { type: "ok", text: "✓ 配置已保存" };
+      message = { type: "ok", text: t("settings.configSaved") };
       await load();
     } catch (e) {
       message = { type: "err", text: String(e) };
@@ -168,24 +184,45 @@
   >
     <div class="modal" transition:scale={{ duration: 150, start: 0.96 }}>
       <header class="modal-head">
-        <h2>坚果云同步设置</h2>
-        <button class="close" onclick={close} aria-label="关闭">×</button>
+        <h2>{t("settings.title")}</h2>
+        <button class="close" onclick={close} aria-label={t("common.close")}>×</button>
       </header>
 
       <div class="modal-body">
+        <section class="field">
+          <span class="field-label">{t("settings.language")}</span>
+          <div class="language-segment" role="group" aria-label={t("settings.language")}>
+            <button
+              type="button"
+              class:active={language === "zh"}
+              onclick={() => onlanguagechange("zh")}
+            >
+              {t("settings.languageZh")}
+            </button>
+            <button
+              type="button"
+              class:active={language === "en"}
+              onclick={() => onlanguagechange("en")}
+            >
+              {t("settings.languageEn")}
+            </button>
+          </div>
+          <p class="hint">{t("settings.languageHint")}</p>
+        </section>
+
         <!-- 同步状态 -->
         {#if status}
           <div class="status-box" class:syncing={status.syncing} class:error={status.lastError}>
             {#if status.syncing}
-              <span class="dot syncing-dot"></span> 正在同步…
+              <span class="dot syncing-dot"></span> {t("settings.statusSyncing")}
             {:else if !status.configured}
-              <span class="dot off-dot"></span> 未配置
+              <span class="dot off-dot"></span> {t("settings.statusNotConfigured")}
             {:else if status.lastError}
-              <span class="dot err-dot"></span> 同步出错
+              <span class="dot err-dot"></span> {t("settings.statusError")}
             {:else if status.lastSync}
               <span class="dot ok-dot"></span> {status.lastSync}
             {:else}
-              <span class="dot off-dot"></span> 已配置，等待同步
+              <span class="dot off-dot"></span> {t("settings.statusWaiting")}
             {/if}
           </div>
           {#if status.lastError}
@@ -195,27 +232,27 @@
 
         <!-- 配置表单 -->
         <section class="field">
-          <span class="field-label">坚果云账号</span>
+          <span class="field-label">{t("settings.account")}</span>
           <input
             class="form-input"
             type="text"
             bind:value={username}
-            placeholder="你的坚果云登录邮箱 / 手机号"
+            placeholder={t("settings.accountPlaceholder")}
             spellcheck="false"
           />
         </section>
 
         <section class="field">
           <span class="field-label">
-            应用密码
+            {t("settings.appPassword")}
             <button class="help-link" onclick={() => void openUrl(HELP_URL)}>
-              如何获取？
+              {t("settings.help")}
             </button>
           </span>
           {#if hasPassword && !editingPassword}
             <!-- 已保存：显示状态 + 修改按钮（明确告知密码已持久化）-->
             <div class="pwd-saved">
-              <span class="pwd-saved-text">✓ 已保存（无需重复输入）</span>
+              <span class="pwd-saved-text">{t("settings.passwordSaved")}</span>
               <button
                 class="pwd-edit-btn"
                 onclick={() => {
@@ -223,7 +260,7 @@
                   password = "";
                 }}
               >
-                修改
+                {t("settings.editPassword")}
               </button>
             </div>
           {:else}
@@ -232,22 +269,22 @@
               class="form-input"
               type="password"
               bind:value={password}
-              placeholder="在坚果云官网生成的应用密码"
+              placeholder={t("settings.passwordPlaceholder")}
               spellcheck="false"
               autocomplete="off"
             />
           {/if}
           <p class="hint">
-            应用密码会本地加密保存，下次上传/下载无需重复输入。不是登录密码，需在
+            {t("settings.passwordHintBefore")}
             <button class="inline-link" onclick={() => void openUrl(HELP_URL)}>
-              坚果云官网 → 账户信息 → 安全选项 → 第三方应用管理
+              {t("settings.passwordHintLink")}
             </button>
-            中添加应用生成。
+            {t("settings.passwordHintAfter")}
           </p>
         </section>
 
         <section class="field">
-          <span class="field-label">远程存储路径</span>
+          <span class="field-label">{t("settings.remoteRoot")}</span>
           <input
             class="form-input"
             type="text"
@@ -255,32 +292,30 @@
             placeholder="PromptPocket"
             spellcheck="false"
           />
-          <p class="hint">提示词会存在坚果云的这个文件夹下。</p>
+          <p class="hint">{t("settings.remoteRootHint")}</p>
         </section>
 
         <!-- 手动同步操作区 -->
         {#if status?.configured}
           <section class="sync-actions">
-            <span class="field-label">手动同步</span>
+            <span class="field-label">{t("settings.manualSync")}</span>
             <div class="sync-btns">
               <button
                 class="sync-btn upload"
                 onclick={doUpload}
                 disabled={transferring !== null}
               >
-                {#if transferring === "upload"}上传中…{:else}↑ 上传到坚果云{/if}
+                {#if transferring === "upload"}{t("settings.uploading")}{:else}{t("settings.upload")}{/if}
               </button>
               <button
                 class="sync-btn download"
                 onclick={doDownload}
                 disabled={transferring !== null}
               >
-                {#if transferring === "download"}下载中…{:else}↓ 下载到本地{/if}
+                {#if transferring === "download"}{t("settings.downloading")}{:else}{t("settings.download")}{/if}
               </button>
             </div>
-            <p class="hint">
-              上传：本地文件推送到云端（不删除云端已有）。下载：云端覆盖本地（含清理）。
-            </p>
+            <p class="hint">{t("settings.syncHint")}</p>
           </section>
         {/if}
 
@@ -293,12 +328,12 @@
 
       <footer class="modal-foot">
         <div class="spacer"></div>
-        <button class="ghost" onclick={close}>关闭</button>
+        <button class="ghost" onclick={close}>{t("common.close")}</button>
         <button class="ghost" onclick={doTest} disabled={testing || saving || transferring !== null}>
-          {testing ? "测试中…" : "测试连接"}
+          {testing ? t("settings.testing") : t("settings.testConnection")}
         </button>
         <button class="primary" onclick={doSave} disabled={saving || testing}>
-          {saving ? "保存中…" : "保存配置"}
+          {saving ? t("settings.saving") : t("settings.saveConfig")}
         </button>
       </footer>
     </div>
@@ -423,6 +458,35 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+  }
+  .language-segment {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .language-segment button {
+    height: 28px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .language-segment button:hover {
+    color: var(--fg);
+    background: var(--bg-hover);
+  }
+  .language-segment button.active {
+    border-color: var(--border);
+    background: var(--bg-elevated);
+    color: var(--accent);
+    box-shadow: 0 1px 2px rgba(31, 42, 68, 0.06);
   }
   .help-link {
     background: transparent;

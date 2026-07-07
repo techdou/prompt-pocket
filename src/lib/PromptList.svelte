@@ -1,5 +1,8 @@
 <script lang="ts">
   import type { Prompt } from "./types";
+  import { createTranslator, type Translator } from "./i18n";
+
+  const fallbackT = createTranslator("zh");
 
   let {
     prompts,
@@ -10,6 +13,7 @@
     onreorder,
     draggable = true,
     disabledReason = "",
+    t = fallbackT,
   }: {
     prompts: Prompt[];
     selectedPath: string | null;
@@ -20,7 +24,12 @@
     onreorder: (fromIndex: number, toIndex: number) => void;
     draggable?: boolean;
     disabledReason?: string;
+    t?: Translator;
   } = $props();
+
+  function categoryLabel(name: string): string {
+    return name === "未分类" ? t("common.uncategorized") : name;
+  }
 
   // 用 Pointer Events 实现排序，不依赖 HTML5 Drag and Drop 的 dataTransfer/drop。
   // Tauri/WebView2 里原生 DnD 容易被桌面壳和系统拖拽链路影响；指针事件只关心
@@ -178,8 +187,8 @@
           <button
             type="button"
             class="drag-handle"
-            title={draggable ? "拖拽排序" : disabledReason}
-            aria-label={draggable ? "拖拽排序" : disabledReason}
+            title={draggable ? t("prompt.dragSort") : disabledReason}
+            aria-label={draggable ? t("prompt.dragSort") : disabledReason}
             disabled={!draggable}
             onpointerdown={(e) => onHandlePointerDown(e, i)}
             onclick={(e) => e.stopPropagation()}
@@ -189,13 +198,13 @@
           <span class="title">{p.title}</span>
         </div>
         <div class="sub">
-          <span class="cat">{p.category}</span>
+          <span class="cat">{categoryLabel(p.category)}</span>
         </div>
       </div>
       <button
         class="more-btn"
-        title="更多操作"
-        aria-label="更多操作"
+        title={t("prompt.moreActions")}
+        aria-label={t("prompt.moreActions")}
         onclick={(e) => {
           e.stopPropagation();
           const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -206,7 +215,7 @@
       </button>
     </li>
   {:else}
-    <li class="empty">没有匹配的提示词</li>
+    <li class="empty">{t("prompt.empty")}</li>
   {/each}
 </ul>
 

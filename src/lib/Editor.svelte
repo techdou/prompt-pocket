@@ -4,6 +4,9 @@
   import { renderMarkdown } from "./markdown";
   import { renderRich } from "./renderers";
   import { openUrl } from "./api";
+  import { createTranslator, type Translator } from "./i18n";
+
+  const fallbackT = createTranslator("zh");
 
   let {
     prompt,
@@ -22,6 +25,7 @@
     onreveal,
     ondelete,
     oncreatecategory,
+    t = fallbackT,
   }: {
     prompt: Prompt | null;
     mode: "view" | "edit";
@@ -37,10 +41,15 @@
     onreveal: () => void;
     ondelete: () => void;
     oncreatecategory: (name: string) => void;
+    t?: Translator;
   } = $props();
 
   // 分类下拉里加一个"未分类"选项（根目录）
   let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name)]);
+
+  function categoryLabel(name: string): string {
+    return name === "未分类" ? t("common.uncategorized") : name;
+  }
 
   // 新建分类输入态
   let newCategoryName = $state("");
@@ -80,8 +89,8 @@
   <section class="editor empty">
     <div class="placeholder">
       <div class="big">📝</div>
-      <p>选中一条提示词查看详情</p>
-      <p class="hint">或按 Ctrl+N 新建</p>
+      <p>{t("editor.emptyTitle")}</p>
+      <p class="hint">{t("editor.emptyHint")}</p>
     </div>
   </section>
 {:else}
@@ -92,20 +101,20 @@
       </div>
       <div class="actions">
         {#if mode === "view"}
-          <button class="text-btn" onclick={onedit} title="编辑">编辑</button>
+          <button class="text-btn" onclick={onedit} title={t("editor.edit")}>{t("editor.edit")}</button>
           <button
             class="text-btn"
             onclick={onreveal}
-            title="在文件管理器中显示"
+            title={t("editor.reveal")}
           >
-            显示文件
+            {t("editor.reveal")}
           </button>
-          <button class="text-btn danger" onclick={ondelete} title="删除">
-            删除
+          <button class="text-btn danger" onclick={ondelete} title={t("editor.delete")}>
+            {t("editor.delete")}
           </button>
         {:else}
-          <button class="primary" onclick={onsave}>保存</button>
-          <button class="ghost" onclick={oncancel}>取消</button>
+          <button class="primary" onclick={onsave}>{t("editor.save")}</button>
+          <button class="ghost" onclick={oncancel}>{t("common.cancel")}</button>
         {/if}
       </div>
     </header>
@@ -125,40 +134,40 @@
         <button
           class="copy-action"
           onclick={() => oncopy("markdown")}
-          title="复制 (Enter)"
-          aria-label="复制提示词"
+          title={t("editor.copyTitle")}
+          aria-label={t("editor.copyAria")}
         >
           <span class="copy-icon" aria-hidden="true">⧉</span>
-          <span class="copy-label">复制</span>
+          <span class="copy-label">{t("editor.copyLabel")}</span>
           <kbd>Enter</kbd>
         </button>
         <span class="meta-info">
-          {prompt.category}
+          {categoryLabel(prompt.category)}
         </span>
       </footer>
     {:else}
       <!-- 填空式表单：结构化字段，用户完全不碰 YAML -->
       <div class="edit-area">
         <div class="form-row">
-          <label class="form-label" for="f-title">标题</label>
+          <label class="form-label" for="f-title">{t("editor.titleLabel")}</label>
           <input
             id="f-title"
             class="form-input"
             type="text"
             bind:value={title}
-            placeholder="给这条提示词起个名字"
+            placeholder={t("editor.titlePlaceholder")}
           />
         </div>
 
         <div class="form-row">
-          <label class="form-label" for="f-category">分类</label>
+          <label class="form-label" for="f-category">{t("editor.categoryLabel")}</label>
           <select
             id="f-category"
             class="form-input"
             bind:value={category}
           >
             {#each categoryOptions as c}
-              <option value={c}>{c}</option>
+              <option value={c}>{categoryLabel(c)}</option>
             {/each}
           </select>
         </div>
@@ -169,10 +178,10 @@
               class="form-input"
               type="text"
               bind:value={newCategoryName}
-              placeholder="新分类名"
+              placeholder={t("editor.newCategoryName")}
               onkeydown={(e) => e.key === "Enter" && addCategory()}
             />
-            <button class="ghost" onclick={addCategory}>添加</button>
+            <button class="ghost" onclick={addCategory}>{t("editor.add")}</button>
             <button
               class="ghost"
               onclick={() => {
@@ -180,23 +189,23 @@
                 newCategoryName = "";
               }}
             >
-              取消
+              {t("common.cancel")}
             </button>
           </div>
         {:else}
           <button class="link-btn" onclick={() => (addingCategory = true)}>
-            + 新建分类
+            {t("editor.addCategory")}
           </button>
         {/if}
 
         <div class="form-row form-row-body">
-          <label class="form-label" for="f-body">正文</label>
+          <label class="form-label" for="f-body">{t("editor.bodyLabel")}</label>
           <textarea
             id="f-body"
             class="body-input"
             bind:value={body}
             spellcheck="false"
-            placeholder="在这里写提示词内容…支持 Markdown 语法"
+            placeholder={t("editor.bodyPlaceholder")}
           ></textarea>
         </div>
       </div>

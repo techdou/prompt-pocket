@@ -1,6 +1,9 @@
 <script lang="ts">
   import { fly } from "svelte/transition";
   import type { CategoryCount, Prompt } from "./types";
+  import { createTranslator, type Translator } from "./i18n";
+
+  const fallbackT = createTranslator("zh");
 
   let {
     open = $bindable(false),
@@ -12,6 +15,7 @@
     onmove,
     ondelete,
     onclose,
+    t = fallbackT,
   }: {
     open: boolean;
     prompt: Prompt | null;
@@ -22,12 +26,17 @@
     onmove: (category: string) => void;
     ondelete: () => void;
     onclose: () => void;
+    t?: Translator;
   } = $props();
 
   // 移动分类子菜单
   let showMoveMenu = $state(false);
 
   let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name)]);
+
+  function categoryLabel(name: string): string {
+    return name === "未分类" ? t("common.uncategorized") : name;
+  }
 
   function handle(action: () => void) {
     action();
@@ -67,11 +76,11 @@
     transition:fly={{ y: -4, duration: 100 }}
   >
     <button class="item" onclick={() => handle(onrename)}>
-      <span class="ico">✎</span> 重命名…
+      <span class="ico">✎</span> {t("context.rename")}
     </button>
 
     <button class="item" onclick={() => (showMoveMenu = !showMoveMenu)}>
-      <span class="ico">📁</span> 移动到分类
+      <span class="ico">📁</span> {t("context.moveToCategory")}
       <span class="arrow">{showMoveMenu ? "▾" : "▸"}</span>
     </button>
 
@@ -83,7 +92,7 @@
             class:current={prompt.category === c}
             onclick={() => handle(() => onmove(c))}
           >
-            <span>{c}</span>
+            <span>{categoryLabel(c)}</span>
             {#if prompt.category === c}<span class="check">✓</span>{/if}
           </button>
         {/each}
@@ -93,7 +102,7 @@
     <div class="sep"></div>
 
     <button class="item danger" onclick={() => handle(ondelete)}>
-      <span class="ico">🗑</span> 删除…
+      <span class="ico">🗑</span> {t("context.delete")}
     </button>
   </div>
 {/if}

@@ -33,6 +33,13 @@
     moveCategoryOrder,
     movePathOrder,
   } from "./lib/reorder";
+  import {
+    createTranslator,
+    getStoredLanguage,
+    nextLanguage,
+    setStoredLanguage,
+    type Language,
+  } from "./lib/i18n";
 
   let allPrompts: Prompt[] = $state([]);
   let categories: CategoryCount[] = $state([]);
@@ -51,6 +58,8 @@
 
   let loading = $state(true);
   let error = $state<string | null>(null);
+  let language = $state<Language>("zh");
+  let t = $derived(createTranslator(language));
 
   // 统一错误提示：显示后 5 秒自动消失，不阻塞 UI
   function showError(msg: string) {
@@ -92,6 +101,9 @@
   let reorderDisabledReason = $derived(
     getReorderDisabledReason(query, selectedCategory, visiblePrompts),
   );
+  let reorderDisabledLabel = $derived(
+    translateReorderDisabledReason(reorderDisabledReason, language),
+  );
 
   let selectedIndex = $state(0);
   // PromptList 上报的滚动函数（键盘导航用）
@@ -111,6 +123,33 @@
       showError(String(e));
     } finally {
       loading = false;
+    }
+  }
+
+  function getLanguageStorage(): Storage | null {
+    return typeof window === "undefined" ? null : window.localStorage;
+  }
+
+  function changeLanguage(next: Language) {
+    language = next;
+    setStoredLanguage(getLanguageStorage(), next);
+  }
+
+  function toggleLanguage() {
+    changeLanguage(nextLanguage(language));
+  }
+
+  function translateReorderDisabledReason(reason: string, lang: Language): string {
+    const translateFor = createTranslator(lang);
+    switch (reason) {
+      case "至少需要 2 条提示词才能排序":
+        return translateFor("reorder.needTwoPrompts");
+      case "切到单个分类后可拖拽排序":
+        return translateFor("reorder.singleCategory");
+      case "搜索结果不支持拖拽排序":
+        return translateFor("reorder.searchDisabled");
+      default:
+        return reason;
     }
   }
 
@@ -225,7 +264,7 @@
     if (!selectedPrompt) return;
     try {
       const saved = await savePrompt(selectedPrompt.path, {
-        title: editingTitle.trim() || "未命名",
+        title: editingTitle.trim() || t("app.untitled"),
         copy_mode: editingCopyMode,
         body: editingBody,
       });
@@ -267,7 +306,7 @@
 
   async function doDelete() {
     if (!selectedPrompt) return;
-    if (!confirm(`确定删除「${selectedPrompt.title}」？此操作不可撤销。`)) return;
+    if (!confirm(t("app.deleteConfirm", { title: selectedPrompt.title }))) return;
     try {
       await deletePrompt(selectedPrompt.path);
       selectedPath = null;
@@ -378,7 +417,7 @@
   function onCtxDelete() {
     if (!contextMenu.prompt) return;
     const p = contextMenu.prompt;
-    if (!confirm(`确定删除「${p.title}」？此操作不可撤销。`)) return;
+    if (!confirm(t("app.deleteConfirm", { title: p.title }))) return;
     deletePrompt(p.path)
       .then(() => {
         if (selectedPath === p.path) {
@@ -395,7 +434,7 @@
     try {
       const newPrompt = await renamePrompt(
         renameDialog.path,
-        renameDialog.title.trim() || "未命名",
+        renameDialog.title.trim() || t("app.untitled"),
         renameDialog.category,
       );
       await refresh();
@@ -555,7 +594,10 @@
     void getCurrentWindow().startResizeDragging(EDGE_TO_DIRECTION[edge]);
   }
 
-  onMount(bootstrap);
+  onMount(() => {
+    language = getStoredLanguage(getLanguageStorage());
+    void bootstrap();
+  });
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -567,7 +609,7 @@
       type="button"
       class="resize-edge"
       data-edge={edge}
-      aria-label={`调整窗口大小：${edge}`}
+      aria-label={t("app.resizeWindow", { edge })}
       tabindex="-1"
       onmousedown={(e) => {
         if (e.button !== 0) return;
@@ -580,7 +622,7 @@
   {#if loading}
     <div class="state">
       <div class="spinner"></div>
-      <span>正在加载提示词…</span>
+      <span>{t("app.loading")}</span>
     </div>
   {:else}
     <header class="topbar" data-tauri-drag-region>
@@ -589,25 +631,33 @@
         <input
           id="search-input"
           type="text"
-          placeholder="搜索提示词…"
+          placeholder={t("app.searchPlaceholder")}
           bind:value={query}
           autocomplete="off"
           spellcheck="false"
         />
-        <button class="new-btn" onclick={doCreate} title="新建 (Ctrl+N)">+</button>
+        <button class="new-btn" onclick={doCreate} title={t("app.newPrompt")}>+</button>
         {#if syncStatus?.configured}
           <span
             class="sync-indicator"
             class:syncing={syncStatus.syncing}
             class:error={!!syncStatus.lastError}
-            title={syncStatus.lastError || syncStatus.lastSync || "已连接坚果云"}
+            title={syncStatus.lastError || syncStatus.lastSync || t("app.syncConnected")}
           ></span>
         {/if}
         <button
+          class="new-btn lang-btn"
+          onclick={toggleLanguage}
+          title={t("app.switchLanguageTitle")}
+          aria-label={t("app.switchLanguageAria")}
+        >
+          {language === "zh" ? "EN" : "中"}
+        </button>
+        <button
           class="new-btn"
           onclick={() => (settingsOpen = true)}
-          title="设置"
-          aria-label="设置"
+          title={t("app.settings")}
+          aria-label={t("app.settings")}
         >
           ⚙
         </button>
@@ -623,6 +673,7 @@
         onrename={onRenameCategory}
         oncontextmenu={onCatContextMenu}
         onreorder={doReorderCategory}
+        {t}
       />
     </nav>
 
@@ -632,7 +683,7 @@
         {selectedPath}
         {selectedIndex}
         draggable={canReorderPrompts}
-        disabledReason={reorderDisabledReason}
+        disabledReason={reorderDisabledLabel}
         onmounted={(fn) => (scrollToIndexFn = fn)}
         onselect={(path) => {
           selectedPath = path;
@@ -640,6 +691,7 @@
         }}
         oncontextmenu={openContextMenu}
         onreorder={doReorder}
+        {t}
       />
 
       <Editor
@@ -650,6 +702,7 @@
         bind:category={editingCategory}
         bind:copyMode={editingCopyMode}
         {categories}
+        {t}
         oncopy={(m) => doCopy(m)}
         onsave={doSave}
         oncancel={() => {
@@ -671,7 +724,7 @@
 
     {#if copiedFlash}
       <div class="toast" transition:fly={{ y: 20 }}>
-        ✓ 已复制，回到原应用粘贴
+        {t("app.copiedToast")}
       </div>
     {/if}
 
@@ -682,7 +735,13 @@
       </div>
     {/if}
 
-    <Settings bind:open={settingsOpen} onsynced={onSynced} />
+    <Settings
+      bind:open={settingsOpen}
+      onsynced={onSynced}
+      {language}
+      {t}
+      onlanguagechange={changeLanguage}
+    />
 
     <ContextMenu
       bind:open={contextMenu.open}
@@ -690,6 +749,7 @@
       x={contextMenu.x}
       y={contextMenu.y}
       {categories}
+      {t}
       onrename={onCtxRename}
       onmove={onCtxMove}
       ondelete={onCtxDelete}
@@ -707,15 +767,15 @@
         role="presentation"
       >
         <div class="dialog" transition:fly={{ y: -10, duration: 120 }}>
-          <h3>重命名 / 移动分类</h3>
+          <h3>{t("app.renameMoveTitle")}</h3>
           <div class="dialog-row">
-            <label for="rn-title">标题</label>
+            <label for="rn-title">{t("app.titleLabel")}</label>
             <input id="rn-title" type="text" bind:value={renameDialog.title} />
           </div>
           <div class="dialog-row">
-            <label for="rn-cat">分类</label>
+            <label for="rn-cat">{t("app.categoryLabel")}</label>
             <select id="rn-cat" bind:value={renameDialog.category}>
-              <option value={"未分类"}>未分类</option>
+              <option value={"未分类"}>{t("common.uncategorized")}</option>
               {#each categories as c}
                 <option value={c.name}>{c.name}</option>
               {/each}
@@ -723,9 +783,9 @@
           </div>
           <div class="dialog-actions">
             <button class="ghost" onclick={() => (renameDialog.open = false)}>
-              取消
+              {t("common.cancel")}
             </button>
-            <button class="primary" onclick={submitRename}>确定</button>
+            <button class="primary" onclick={submitRename}>{t("common.confirm")}</button>
           </div>
         </div>
       </div>
@@ -755,7 +815,7 @@
             catContextMenu.open = false;
           }}
         >
-          <span class="ico">✎</span> 重命名分类
+          <span class="ico">✎</span> {t("app.renameCategoryAction")}
         </button>
       </div>
     {/if}
@@ -771,9 +831,9 @@
         role="presentation"
       >
         <div class="dialog" transition:fly={{ y: -10, duration: 120 }}>
-          <h3>重命名分类</h3>
+          <h3>{t("app.categoryRenameTitle")}</h3>
           <div class="dialog-row">
-            <label for="cat-rn">新分类名</label>
+            <label for="cat-rn">{t("app.newCategoryName")}</label>
             <input
               id="cat-rn"
               type="text"
@@ -783,9 +843,9 @@
           </div>
           <div class="dialog-actions">
             <button class="ghost" onclick={() => (catRenameDialog.open = false)}>
-              取消
+              {t("common.cancel")}
             </button>
-            <button class="primary" onclick={submitCatRename}>确定</button>
+            <button class="primary" onclick={submitCatRename}>{t("common.confirm")}</button>
           </div>
         </div>
       </div>
@@ -867,6 +927,12 @@
     background: var(--accent);
     border-color: var(--accent);
     color: #ffffff;
+  }
+  .lang-btn {
+    width: 36px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0;
   }
 
   .sync-indicator {
