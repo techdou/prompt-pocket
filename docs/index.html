@@ -1103,7 +1103,7 @@
       function readInitialLanguage() {
         const queryLang = new URLSearchParams(window.location.search).get("lang");
         if (queryLang === "zh" || queryLang === "en") return queryLang;
-        const savedLang = window.localStorage.getItem("prompt-pocket-lang");
+        const savedLang = window.localStorage.getItem("prompt-pocket.language");
         if (savedLang === "zh" || savedLang === "en") return savedLang;
         return navigator.language && navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
       }
@@ -1117,7 +1117,7 @@
         description?.setAttribute("content", meta.description);
         ogTitle?.setAttribute("content", meta.title);
         ogDescription?.setAttribute("content", meta.description);
-        window.localStorage.setItem("prompt-pocket-lang", next);
+        window.localStorage.setItem("prompt-pocket.language", next);
 
         document.querySelectorAll("[data-set-lang]").forEach((button) => {
           const selected = button.dataset.setLang === next;
