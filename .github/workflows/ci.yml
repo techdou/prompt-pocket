@@ -1,0 +1,151 @@
+name: CI
+
+# 三平台 CI：Windows / macOS / Linux 上跑单元测试 + Tauri 构建
+# 目的：验证跨平台适配是否真成立（本地只能测 Windows）
+#
+# 触发：push 到任意分支、任意 PR。tag 推送不触发
+# 发版 workflow（带签名 + Release 上传）按需另写 release.yml
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# 同一分支新 push 时取消旧 run，省额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os-name }})
+    strategy:
+      fail-fast: false   # 一个平台挂了不连累其它平台继续跑
+      matrix:
+        include:
+          - os: windows-latest
+            os-name: Windows
+          - os: macos-latest
+            os-name: macOS
+          - os: ubuntu-22.04
+            os-name: Linux
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Linux：Tauri 2 需要的系统库
+      # - libwebkit2gtk-4.1-dev：Tauri 2 专用（不是 4.0）
+      # - libxdo-dev：enigo 模拟键盘输入
+      # - libsecret-1-dev：keyring crate 编译需要（运行时凭据存储）
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsecret-1-dev
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # 前端单测：Node 内置测试运行器跑 src/lib/*.test.mjs
+      # （i18n / markdown / reorder / api 四个套件，作者在 Mac 上用同命令跑过）
+      - name: Run frontend tests (node:test)
+        run: node --experimental-strip-types --test src/lib/*.test.mjs
+
+      # Rust 单元测试：store.rs / sync.rs / lib.rs
+      # 三平台真实验证"代码层面跨平台适配"是否成立
+      - name: Run cargo test
+        working-directory: src-tauri
+        run: cargo test --verbose
+
+      # 静态检查：clippy 警告视为错误
+      # 平台特定的死代码在非 Windows 上会被 clippy 抓出来（如未使用的 import）
+      - name: Run cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+  build:
+    name: Build (${{ matrix.os-name }})
+    needs: test   # 测试挂了就不浪费 build 时间
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            os-name: Windows
+          - os: macos-latest
+            os-name: macOS
+          - os: ubuntu-22.04
+            os-name: Linux
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # 验证 Tauri 应用在三平台都能打包（debug 模式更快，约 1-2 分钟）
+      # release 模式留给 release.yml（签名 + 发版时用）
+      - name: Build Tauri app (debug)
+        run: npx tauri build --debug

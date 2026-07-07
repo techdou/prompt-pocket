@@ -3,61 +3,87 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Prompt Pocket — 全局秒唤的提示词口袋</title>
+    <title>Prompt Pocket - Global prompt launcher</title>
     <meta
       name="description"
-      content="轻量级提示词管理工具：全局快捷键秒唤，Enter 智能复制粘贴，Markdown 本地存储，坚果云 WebDAV 手动同步。"
+      content="Prompt Pocket is a lightweight desktop prompt manager with global hotkey launch, local Markdown storage, drag sorting, rich preview, and Jianguoyun WebDAV sync."
     />
     <link rel="canonical" href="https://techdou.github.io/prompt-pocket/" />
-    <meta name="theme-color" content="#2563eb" />
+    <link rel="alternate" hreflang="zh-CN" href="https://techdou.github.io/prompt-pocket/?lang=zh" />
+    <link rel="alternate" hreflang="en" href="https://techdou.github.io/prompt-pocket/?lang=en" />
+    <meta name="theme-color" content="#155e75" />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Prompt Pocket — 全局秒唤的提示词口袋" />
+    <meta property="og:title" content="Prompt Pocket - Global prompt launcher" />
     <meta
       property="og:description"
-      content="Ctrl+Alt+P 唤出，Enter 复制；原焦点在输入框时自动粘贴回去。"
+      content="Open from anywhere with Ctrl+Alt+P, copy or auto-paste with Enter, and keep prompts as local Markdown files."
     />
     <meta property="og:image" content="https://techdou.github.io/prompt-pocket/screenshots/list.png" />
     <meta property="og:url" content="https://techdou.github.io/prompt-pocket/" />
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="preload" as="image" href="screenshots/list.png" />
-    <!-- favicon：应用真实图标 -->
     <link rel="icon" href="icon.png" />
     <link rel="apple-touch-icon" href="icon.png" />
     <style>
       :root {
-        /* 与 app.css 同款亮色 token，保持品牌一致 */
-        --bg: #f5f7fb;
-        --bg-2: #eef2f8;
-        --surface: #ffffff;
-        --surface-2: #f8fafd;
-        --line: #dde6f2;
-        --line-2: #c9d6e8;
-        --ink: #1f2a44;
-        --ink-2: #4a5670;
-        --ink-3: #748094;
-        --accent: #2563eb;
-        --accent-2: #1d4ed8;
-        --accent-soft: #eaf2ff;
-        --glow: rgba(37, 99, 235, 0.18);
-        --shadow-soft: 0 10px 32px rgba(31, 42, 68, 0.08);
-        --shadow-lift: 0 24px 60px -24px rgba(31, 42, 68, 0.22);
-        --display: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
-        --body: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+        color-scheme: light;
+        --page: #f7f8f4;
+        --paper: #fffefa;
+        --paper-2: #eef4ee;
+        --ink: #17212b;
+        --muted: #596673;
+        --soft: #7a8694;
+        --line: #d9dfd7;
+        --line-strong: #bdc9c2;
+        --blue: #155e75;
+        --blue-2: #0e7490;
+        --green: #42735b;
+        --green-soft: #e6f1e9;
+        --yellow: #f5c451;
+        --shadow: 0 22px 56px -34px rgba(23, 33, 43, 0.36);
+        --radius: 8px;
+        --font: "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
         --mono: "Cascadia Code", "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
       }
 
-      * { box-sizing: border-box; margin: 0; padding: 0; }
+      * {
+        box-sizing: border-box;
+      }
 
-      html { scroll-behavior: smooth; }
+      html {
+        scroll-behavior: smooth;
+      }
 
       body {
-        background: var(--bg);
+        margin: 0;
+        background:
+          linear-gradient(90deg, rgba(21, 94, 117, 0.04) 1px, transparent 1px),
+          linear-gradient(rgba(21, 94, 117, 0.04) 1px, transparent 1px),
+          linear-gradient(180deg, var(--page), #eef3f1 68%, #f7f8f4);
+        background-size: 64px 64px, 64px 64px, auto;
         color: var(--ink);
-        font-family: var(--body);
+        font-family: var(--font);
         font-size: 16px;
-        line-height: 1.6;
+        line-height: 1.65;
         -webkit-font-smoothing: antialiased;
-        overflow-x: hidden;
+      }
+
+      body[data-lang="zh"] .en,
+      body[data-lang="en"] .zh {
+        display: none !important;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      img {
+        max-width: 100%;
+      }
+
+      .wrap {
+        width: min(1120px, calc(100% - 40px));
+        margin: 0 auto;
       }
 
       .skip-link {
@@ -65,924 +91,1051 @@
         left: 16px;
         top: 12px;
         z-index: 100;
-        transform: translateY(-160%);
+        transform: translateY(-180%);
         padding: 8px 12px;
-        border-radius: 8px;
+        border-radius: 6px;
         background: var(--ink);
         color: #fff;
         text-decoration: none;
-        transition: transform 0.15s;
-      }
-      .skip-link:focus { transform: translateY(0); }
-
-      /* ── 背景氛围：浅色纸面 + 细网格，克制且加载快 ── */
-      .bg-fx {
-        position: fixed;
-        inset: 0;
-        z-index: -1;
-        pointer-events: none;
-        background:
-          linear-gradient(135deg, rgba(37, 99, 235, 0.08), transparent 34%),
-          linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
-      }
-      .bg-fx::before {
-        content: "";
-        position: absolute;
-        inset: 0;
-        background-image:
-          linear-gradient(var(--line) 1px, transparent 1px),
-          linear-gradient(90deg, var(--line) 1px, transparent 1px);
-        background-size: 72px 72px;
-        opacity: 0.45;
-        mask-image: radial-gradient(ellipse 80% 55% at 50% 0%, black 28%, transparent 72%);
       }
 
-      .wrap {
-        max-width: 1120px;
-        margin: 0 auto;
-        padding: 0 28px;
+      .skip-link:focus {
+        transform: translateY(0);
       }
 
-      /* ── 导航 ── */
-      nav {
+      .site-nav {
         position: sticky;
         top: 0;
-        z-index: 50;
-        backdrop-filter: blur(12px);
-        background: rgba(245, 247, 251, 0.72);
-        border-bottom: 1px solid transparent;
-        transition: border-color 0.3s, background 0.3s;
+        z-index: 40;
+        border-bottom: 1px solid rgba(217, 223, 215, 0.78);
+        background: rgba(247, 248, 244, 0.86);
+        backdrop-filter: blur(14px);
       }
-      nav.scrolled {
-        border-bottom-color: var(--line);
-        background: rgba(245, 247, 251, 0.88);
-      }
-      nav .wrap {
+
+      .nav-inner {
+        height: 64px;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        height: 64px;
+        gap: 24px;
       }
+
       .brand {
-        display: flex;
+        display: inline-flex;
         align-items: center;
         gap: 10px;
-        font-family: var(--display);
-        font-weight: 800;
-        font-size: 18px;
-        letter-spacing: -0.02em;
         text-decoration: none;
-        color: var(--ink);
+        font-weight: 800;
+        letter-spacing: 0;
       }
-      /* 品牌标：应用真实图标 */
+
       .brand-mark {
-        width: 30px;
-        height: 30px;
+        width: 32px;
+        height: 32px;
         border-radius: 7px;
-        background: url("icon.png") center / contain no-repeat, #1e1e20;
-        box-shadow: 0 0 0 4px var(--accent-soft);
-        flex-shrink: 0;
+        background: url("icon.png") center / contain no-repeat, #111827;
+        box-shadow: 0 0 0 1px var(--line-strong), 0 8px 18px -12px rgba(23, 33, 43, 0.6);
       }
+
+      .nav-actions {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+      }
+
       .nav-links {
         display: flex;
         align-items: center;
-        gap: 28px;
+        gap: 18px;
       }
-      .nav-links a {
-        color: var(--ink-2);
-        text-decoration: none;
-        font-size: 14px;
-        transition: color 0.15s;
-      }
-      .nav-links a:hover { color: var(--accent); }
-      .nav-cta {
-        padding: 8px 16px;
-        border-radius: 8px;
-        background: var(--ink);
-        color: #fff !important;
-        font-weight: 600;
-      }
-      .nav-cta:hover { background: #000; }
 
-      /* ── Hero ── */
-      .hero {
-        padding: 96px 0 56px;
-        position: relative;
+      .nav-links a {
+        color: var(--muted);
+        font-size: 14px;
+        text-decoration: none;
       }
-      .badge {
+
+      .nav-links a:hover {
+        color: var(--blue);
+      }
+
+      .lang-switch {
         display: inline-flex;
-        align-items: center;
-        gap: 8px;
-        padding: 6px 12px 6px 8px;
-        border: 1px solid var(--line-2);
+        padding: 3px;
+        border: 1px solid var(--line-strong);
         border-radius: 999px;
-        font-family: var(--mono);
-        font-size: 12px;
-        color: var(--ink-2);
-        background: var(--surface);
-        margin-bottom: 28px;
-        box-shadow: var(--shadow-soft);
-        animation: rise 0.7s both;
+        background: var(--paper);
       }
-      .badge .tag {
-        background: var(--accent-soft);
-        color: var(--accent);
-        padding: 2px 8px;
+
+      .lang-switch button {
+        border: 0;
         border-radius: 999px;
-        font-weight: 500;
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        font: 700 12px/1 var(--mono);
+        padding: 7px 10px;
       }
-      h1 {
-        font-family: var(--display);
-        font-weight: 800;
-        font-size: clamp(44px, 7vw, 84px);
-        line-height: 0.98;
-        letter-spacing: -0.035em;
-        margin-bottom: 24px;
-        animation: rise 0.7s 0.05s both;
+
+      body[data-lang="zh"] [data-set-lang="zh"],
+      body[data-lang="en"] [data-set-lang="en"] {
+        background: var(--ink);
+        color: #fff;
       }
-      h1 .accent {
-        background: linear-gradient(120deg, var(--accent), #60a5fa);
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
-        font-style: italic;
-        font-weight: 400;
-      }
-      .lede {
-        font-size: 19px;
-        color: var(--ink-2);
-        max-width: 600px;
-        margin-bottom: 40px;
-        animation: rise 0.7s 0.12s both;
-      }
-      .lede code {
-        font-family: var(--mono);
-        font-size: 15px;
-        background: var(--surface);
-        border: 1px solid var(--line-2);
-        padding: 2px 7px;
-        border-radius: 6px;
-        color: var(--accent);
-      }
-      .cta-row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 14px;
-        margin-bottom: 64px;
-        animation: rise 0.7s 0.18s both;
-      }
+
       .btn {
         display: inline-flex;
         align-items: center;
+        justify-content: center;
         gap: 10px;
-        padding: 14px 22px;
-        border-radius: 10px;
-        text-decoration: none;
-        font-weight: 600;
-        font-size: 15px;
-        transition: transform 0.12s, box-shadow 0.2s, background 0.2s, border-color 0.2s;
-        border: 1px solid transparent;
-      }
-      .btn-primary {
-        background: var(--accent);
-        color: #fff;
-        box-shadow: 0 10px 30px -8px var(--glow);
-      }
-      .btn-primary:hover {
-        background: var(--accent-2);
-        transform: translateY(-2px);
-        box-shadow: 0 16px 40px -8px var(--glow);
-      }
-      .btn-ghost {
-        background: var(--surface);
+        min-height: 44px;
+        padding: 11px 16px;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius);
+        background: var(--paper);
         color: var(--ink);
-        border-color: var(--line-2);
-      }
-      .btn-ghost:hover {
-        border-color: var(--accent);
-        color: var(--accent);
-      }
-      .btn .kbd-hint {
-        font-family: var(--mono);
-        font-size: 12px;
-        opacity: 0.8;
-        padding-left: 8px;
-        border-left: 1px solid rgba(255, 255, 255, 0.25);
+        font-weight: 800;
+        text-decoration: none;
+        transition: transform 0.16s, border-color 0.16s, background 0.16s, color 0.16s, box-shadow 0.16s;
       }
 
-      /* ── Hero 模拟窗口（唤出动效）── */
-      .stage {
-        position: relative;
-        border-radius: 16px;
-        border: 1px solid var(--line);
-        background: var(--surface);
-        padding: 14px;
-        box-shadow: var(--shadow-lift);
-        animation: rise 0.9s 0.25s both;
-      }
-      .stage-bar {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        padding: 4px 6px 12px;
-      }
-      .stage-dot {
-        width: 12px;
-        height: 12px;
-        border-radius: 50%;
-        background: var(--line-2);
-      }
-      .stage-prompt {
-        margin-left: auto;
-        font-family: var(--mono);
-        font-size: 12px;
-        color: var(--ink-3);
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        cursor: pointer;
-      }
-      .stage-prompt kbd {
-        font-family: var(--mono);
-        background: var(--bg-2);
-        border: 1px solid var(--line-2);
-        padding: 2px 6px;
-        border-radius: 5px;
-        font-size: 11px;
-        color: var(--ink-2);
-      }
-      .stage-prompt .pulse {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: var(--accent);
-        animation: blink 1.4s infinite;
-      }
-      .stage img {
-        display: block;
-        width: 100%;
-        border-radius: 9px;
-        border: 1px solid var(--line);
+      .btn:hover {
+        transform: translateY(-1px);
+        border-color: var(--blue);
       }
 
-      /* ── 章节通用 ── */
-      section { padding: 100px 0; }
+      .btn-primary {
+        border-color: var(--blue);
+        background: var(--blue);
+        color: #fff;
+        box-shadow: 0 18px 40px -24px rgba(21, 94, 117, 0.72);
+      }
+
+      .btn-primary:hover {
+        background: var(--blue-2);
+      }
+
+      .btn-small {
+        min-height: 38px;
+        padding: 8px 13px;
+        font-size: 14px;
+      }
+
+      .hero {
+        padding: 76px 0 36px;
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.92fr) minmax(420px, 1.08fr);
+        align-items: center;
+        gap: 48px;
+      }
+
       .eyebrow {
-        font-family: var(--mono);
-        font-size: 12px;
-        letter-spacing: 0.15em;
-        text-transform: uppercase;
-        color: var(--accent);
-        margin-bottom: 16px;
-        display: flex;
+        display: inline-flex;
         align-items: center;
         gap: 10px;
+        margin-bottom: 18px;
+        color: var(--green);
+        font: 800 12px/1.2 var(--mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
       }
+
       .eyebrow::before {
         content: "";
-        width: 24px;
-        height: 1px;
-        background: var(--accent);
+        width: 26px;
+        height: 2px;
+        background: var(--green);
       }
-      h2 {
-        font-family: var(--display);
-        font-weight: 800;
-        font-size: clamp(30px, 4.5vw, 48px);
-        letter-spacing: -0.03em;
-        line-height: 1.05;
-        margin-bottom: 18px;
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
         max-width: 720px;
+        margin-bottom: 22px;
+        font-size: clamp(42px, 6vw, 76px);
+        line-height: 0.98;
+        letter-spacing: 0;
       }
-      .section-lede {
-        color: var(--ink-2);
-        font-size: 18px;
+
+      h1 strong {
+        color: var(--blue);
+        font-weight: 900;
+      }
+
+      .lead {
         max-width: 620px;
-        margin-bottom: 56px;
+        margin-bottom: 28px;
+        color: var(--muted);
+        font-size: 19px;
       }
 
-      /* ── 特性网格 ── */
-      .features {
-        display: grid;
-        grid-template-columns: repeat(12, 1fr);
-        gap: 18px;
-      }
-      .feat {
-        border: 1px solid var(--line);
-        background: var(--surface);
-        border-radius: 14px;
-        padding: 28px;
-        transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
-      }
-      .feat:hover {
-        border-color: var(--accent);
-        transform: translateY(-3px);
-        box-shadow: var(--shadow-soft);
-      }
-      .feat.big { grid-column: span 7; }
-      .feat.med { grid-column: span 5; }
-      .feat.sm { grid-column: span 4; }
-      .feat-num {
-        font-family: var(--mono);
-        font-size: 12px;
-        color: var(--ink-3);
-        margin-bottom: 18px;
-      }
-      .feat h3 {
-        font-family: var(--display);
-        font-weight: 600;
-        font-size: 22px;
-        letter-spacing: -0.02em;
-        margin-bottom: 10px;
-      }
-      .feat p {
-        color: var(--ink-2);
-        font-size: 15px;
-      }
-      .feat .glyph {
-        font-size: 28px;
-        margin-bottom: 14px;
-        display: block;
-      }
-      .feat.featured {
-        background: linear-gradient(140deg, var(--accent-soft), var(--surface) 60%);
-        border-color: #bcd2fb;
-      }
-      .feat.featured h3 .hi {
-        color: var(--accent);
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 24px;
       }
 
-      /* ── 截图画廊 ── */
-      .gallery {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 20px;
-      }
-      .shot {
-        border-radius: 14px;
-        border: 1px solid var(--line);
-        overflow: hidden;
-        background: var(--surface);
-        transition: transform 0.25s, border-color 0.25s, box-shadow 0.25s;
+      .meta-strip {
         display: flex;
-        flex-direction: column;
-      }
-      .shot:hover {
-        transform: scale(1.012);
-        border-color: var(--line-2);
-        box-shadow: var(--shadow-soft);
-      }
-      .shot.tall { grid-row: span 2; }
-      .shot-img {
-        width: 100%;
-        flex: 1;
-        min-height: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: var(--bg-2);
-        overflow: hidden;
-      }
-      .shot img {
-        width: 100%;
-        height: auto;
-        display: block;
-      }
-      .shot-cap {
-        padding: 14px 18px;
-        font-family: var(--mono);
-        font-size: 12px;
-        color: var(--ink-3);
-        border-top: 1px solid var(--line);
-        display: flex;
-        justify-content: space-between;
-      }
-
-      /* ── 快捷键表 ── */
-      .keys {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        gap: 1px;
-        background: var(--line);
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        overflow: hidden;
-      }
-      .key-row {
-        background: var(--surface);
-        padding: 18px 22px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        transition: background 0.15s;
-      }
-      .key-row:hover { background: var(--surface-2); }
-      .key-row .what { color: var(--ink-2); font-size: 15px; }
-      .key-row kbd {
-        font-family: var(--mono);
-        font-size: 13px;
-        background: var(--bg-2);
-        border: 1px solid var(--line-2);
-        border-bottom-width: 2px;
-        padding: 4px 9px;
-        border-radius: 6px;
-        color: var(--ink);
-      }
-
-      /* ── 安装区 ── */
-      .dl-row {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 16px;
-        margin-bottom: 16px;
-      }
-      .dl-card {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        padding: 20px 22px;
-        border: 1px solid var(--line-2);
-        border-radius: 12px;
-        background: var(--surface);
-        text-decoration: none;
-        color: var(--ink);
-        transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
-      }
-      .dl-card:hover {
-        border-color: var(--accent);
-        transform: translateY(-3px);
-        box-shadow: 0 16px 40px -16px var(--glow);
-      }
-      .dl-ico {
-        width: 44px;
-        height: 44px;
-        border-radius: 10px;
-        background: var(--accent-soft);
-        color: var(--accent);
-        display: grid;
-        place-items: center;
-        font-size: 20px;
-        flex-shrink: 0;
-      }
-      .dl-text { display: flex; flex-direction: column; gap: 3px; }
-      .dl-name { font-weight: 600; font-size: 16px; }
-      .dl-sub {
-        font-family: var(--mono);
-        font-size: 12px;
-        color: var(--ink-3);
-      }
-      .dl-note {
-        color: var(--ink-3);
-        font-size: 14px;
-      }
-      .dl-note a { color: var(--accent); }
-      .src-build {
-        margin-top: 28px;
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        background: var(--surface);
-        overflow: hidden;
-      }
-      .src-build summary {
-        padding: 16px 20px;
-        cursor: pointer;
-        font-family: var(--mono);
-        font-size: 13px;
-        color: var(--ink-2);
-        list-style: none;
-        user-select: none;
-      }
-      .src-build summary::-webkit-details-marker { display: none; }
-      .src-build summary::before {
-        content: "▸";
-        display: inline-block;
-        margin-right: 10px;
-        transition: transform 0.2s;
-        color: var(--accent);
-      }
-      .src-build[open] summary::before { transform: rotate(90deg); }
-      .src-build[open] summary { border-bottom: 1px solid var(--line); }
-      .src-build .install {
-        border: 0;
-        border-radius: 0;
+        flex-wrap: wrap;
+        gap: 8px;
         margin: 0;
-      }
-      @media (max-width: 640px) {
-        .dl-row { grid-template-columns: 1fr; }
+        padding: 0;
+        list-style: none;
       }
 
-      .install {
+      .meta-strip li {
         border: 1px solid var(--line);
-        border-radius: 14px;
-        background: var(--bg-2);
-        overflow: hidden;
-        margin-top: 8px;
+        border-radius: 999px;
+        background: rgba(255, 254, 250, 0.78);
+        color: var(--muted);
+        font: 700 12px/1 var(--mono);
+        padding: 8px 10px;
       }
-      .install-head {
-        padding: 12px 18px;
-        border-bottom: 1px solid var(--line);
+
+      .product-shot {
+        border: 1px solid var(--line-strong);
+        border-radius: 14px;
+        background: var(--paper);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+
+      .window-bar {
         display: flex;
         align-items: center;
         gap: 8px;
-        font-family: var(--mono);
-        font-size: 12px;
-        color: var(--ink-3);
+        height: 40px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--line);
       }
-      .install-head .d {
-        width: 11px; height: 11px; border-radius: 50%; background: var(--line-2);
-      }
-      .install pre {
-        padding: 22px 24px;
-        font-family: var(--mono);
-        font-size: 14px;
-        line-height: 1.9;
-        color: var(--ink-2);
-        overflow-x: auto;
-      }
-      .install .c { color: var(--ink-3); }
-      .install .cmd { color: var(--accent); }
 
-      /* ── 页脚 CTA ── */
-      .final {
-        text-align: center;
-        padding: 120px 0 80px;
+      .window-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--line-strong);
       }
-      .final h2 {
-        margin: 0 auto 22px;
-        font-style: italic;
+
+      .window-title {
+        margin-left: auto;
+        color: var(--soft);
+        font: 700 12px/1 var(--mono);
       }
-      .final h2 .accent {
-        font-style: normal;
-        background: linear-gradient(120deg, var(--accent), #60a5fa);
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
+
+      .product-shot img {
+        display: block;
+        width: 100%;
       }
-      footer {
-        border-top: 1px solid var(--line);
-        padding: 32px 0;
-        color: var(--ink-3);
-        font-size: 14px;
+
+      .product-shot .hero-app-shot {
+        width: 100%;
+        max-width: 100%;
+        height: 320px;
+        object-fit: cover;
+        object-position: 42% 46%;
+        transform: none;
       }
-      footer .wrap {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        flex-wrap: wrap;
+
+      section {
+        padding: 78px 0;
+      }
+
+      .section-head {
+        display: grid;
+        grid-template-columns: minmax(0, 0.88fr) minmax(240px, 0.42fr);
+        align-items: end;
+        gap: 32px;
+        margin-bottom: 28px;
+      }
+
+      h2 {
+        max-width: 760px;
+        margin-bottom: 0;
+        font-size: clamp(30px, 4vw, 46px);
+        line-height: 1.08;
+        letter-spacing: 0;
+      }
+
+      .section-note {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .feature {
+        min-height: 214px;
+        padding: 24px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(255, 254, 250, 0.78);
+      }
+
+      .feature-wide {
+        grid-column: span 2;
+        background: linear-gradient(145deg, var(--paper), var(--green-soft));
+      }
+
+      .feature-kicker {
+        display: block;
+        margin-bottom: 18px;
+        color: var(--soft);
+        font: 800 12px/1 var(--mono);
+      }
+
+      .feature h3 {
+        margin-bottom: 10px;
+        font-size: 21px;
+        line-height: 1.2;
+      }
+
+      .feature p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .gallery {
+        display: grid;
+        grid-template-columns: 1.12fr 0.88fr;
         gap: 16px;
       }
-      footer a { color: var(--ink-2); text-decoration: none; }
-      footer a:hover { color: var(--accent); }
 
-      /* ── 动画 ── */
-      @keyframes rise {
-        from { opacity: 0; transform: translateY(18px); }
-        to { opacity: 1; transform: translateY(0); }
+      .shot {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--paper);
+        overflow: hidden;
       }
-      @keyframes blink {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.25; }
+
+      .shot img {
+        display: block;
+        width: 100%;
       }
-      @media (prefers-reduced-motion: reduce) {
-        *, *::before, *::after {
-          animation: none !important;
-          transition: none !important;
+
+      .shot-caption {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 13px 16px;
+        border-top: 1px solid var(--line);
+        color: var(--soft);
+        font: 700 12px/1.3 var(--mono);
+      }
+
+      .shot-stack {
+        display: grid;
+        gap: 16px;
+      }
+
+      .download-panel {
+        display: grid;
+        grid-template-columns: 0.8fr 1.2fr;
+        gap: 18px;
+        align-items: stretch;
+      }
+
+      .download-copy,
+      .download-list,
+      .code-panel {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--paper);
+      }
+
+      .download-copy {
+        padding: 26px;
+        background: var(--ink);
+        color: #fff;
+      }
+
+      .download-copy h3 {
+        margin-bottom: 10px;
+        font-size: 28px;
+      }
+
+      .download-copy p {
+        margin-bottom: 22px;
+        color: rgba(255, 255, 255, 0.76);
+      }
+
+      .download-list {
+        display: grid;
+      }
+
+      .download-item {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 18px;
+        align-items: center;
+        padding: 18px 22px;
+        border-bottom: 1px solid var(--line);
+        color: var(--ink);
+        text-decoration: none;
+      }
+
+      .download-item:last-child {
+        border-bottom: 0;
+      }
+
+      .download-item:hover {
+        background: #f8faf6;
+      }
+
+      .file-name {
+        display: block;
+        font: 800 14px/1.35 var(--mono);
+        word-break: break-word;
+      }
+
+      .file-desc {
+        display: block;
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .arrow {
+        color: var(--blue);
+        font-weight: 900;
+      }
+
+      .workflow {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--line);
+        overflow: hidden;
+      }
+
+      .workflow-step {
+        min-height: 156px;
+        padding: 20px;
+        background: var(--paper);
+      }
+
+      .workflow-step span {
+        display: inline-block;
+        margin-bottom: 18px;
+        color: var(--green);
+        font: 900 13px/1 var(--mono);
+      }
+
+      .workflow-step h3 {
+        margin-bottom: 8px;
+        font-size: 19px;
+      }
+
+      .workflow-step p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 15px;
+      }
+
+      .tech-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .tech-grid div {
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(255, 254, 250, 0.82);
+        font: 800 13px/1.25 var(--mono);
+        color: var(--muted);
+      }
+
+      .code-panel {
+        overflow: hidden;
+      }
+
+      .code-head {
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+        color: var(--soft);
+        font: 800 12px/1 var(--mono);
+      }
+
+      pre {
+        margin: 0;
+        padding: 20px;
+        overflow: auto;
+        color: var(--muted);
+        font: 14px/1.8 var(--mono);
+      }
+
+      pre .cmd {
+        color: var(--blue);
+        font-weight: 800;
+      }
+
+      .final {
+        padding: 88px 0;
+        background: linear-gradient(180deg, transparent, rgba(230, 241, 233, 0.82));
+      }
+
+      .final-box {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 24px;
+        align-items: center;
+        padding: 28px;
+        border: 1px solid var(--line-strong);
+        border-radius: 14px;
+        background: var(--paper);
+        box-shadow: var(--shadow);
+      }
+
+      .final-box h2 {
+        margin-bottom: 8px;
+      }
+
+      .final-box p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      footer {
+        padding: 28px 0;
+        border-top: 1px solid var(--line);
+        color: var(--soft);
+        font-size: 14px;
+      }
+
+      .footer-inner {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+
+      footer a {
+        color: var(--muted);
+        text-decoration: none;
+      }
+
+      footer a:hover {
+        color: var(--blue);
+      }
+
+      @media (max-width: 920px) {
+        .hero-grid,
+        .section-head,
+        .download-panel,
+        .final-box {
+          grid-template-columns: 1fr;
+        }
+
+        .feature-grid,
+        .gallery,
+        .workflow,
+        .tech-grid {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .feature-wide {
+          grid-column: span 2;
+        }
+
+        .nav-links {
+          display: none;
         }
       }
 
-      /* ── 响应式 ── */
-      @media (max-width: 860px) {
-        .feat.big, .feat.med, .feat.sm { grid-column: span 12; }
-        .gallery { grid-template-columns: 1fr; }
-        .shot.tall { grid-row: auto; }
-        .keys { grid-template-columns: 1fr; }
-        .nav-links a:not(.nav-cta) { display: none; }
-        .hero { padding: 56px 0 40px; }
-        section { padding: 70px 0; }
-      }
       @media (max-width: 640px) {
-        .wrap { padding: 0 18px; }
-        .hero { padding: 36px 0 28px; }
-        section { padding: 52px 0; }
-        .cta-row { flex-direction: column; align-items: stretch; }
-        .cta-row .btn { width: 100%; justify-content: center; }
-        .final { padding: 72px 0 56px; }
-        footer .wrap { flex-direction: column; text-align: center; }
+        .wrap {
+          width: min(100% - 28px, 1120px);
+        }
+
+        .hero {
+          padding-top: 44px;
+        }
+
+        section {
+          padding: 58px 0;
+        }
+
+        .hero-actions,
+        .final-box .btn {
+          width: 100%;
+        }
+
+        .product-shot .hero-app-shot {
+          width: 100%;
+          height: 180px;
+          object-position: 38% 46%;
+          transform: none;
+        }
+
+        .btn {
+          width: 100%;
+        }
+
+        .feature-grid,
+        .gallery,
+        .workflow,
+        .tech-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .feature-wide {
+          grid-column: auto;
+        }
+
+        .download-item {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
-  <body>
-    <a class="skip-link" href="#features">跳到主要内容</a>
-    <div class="bg-fx"></div>
+  <body data-lang="zh">
+    <a class="skip-link zh" href="#main">跳到主要内容</a>
+    <a class="skip-link en" href="#main">Skip to content</a>
 
-    <nav id="nav" aria-label="主导航">
-      <div class="wrap">
-        <a class="brand" href="#top">
+    <nav class="site-nav" aria-label="Primary navigation">
+      <div class="wrap nav-inner">
+        <a class="brand" href="#top" aria-label="Prompt Pocket">
           <span class="brand-mark" aria-hidden="true"></span>
-          Prompt Pocket
+          <span>Prompt Pocket</span>
         </a>
-        <div class="nav-links">
-          <a href="#features">特性</a>
-          <a href="#gallery">截图</a>
-          <a href="#shortcuts">快捷键</a>
-          <a href="#install">安装</a>
-          <a class="nav-cta" href="https://github.com/techdou/prompt-pocket/releases/latest">下载</a>
+
+        <div class="nav-actions">
+          <div class="nav-links" aria-label="Section links">
+            <a href="#features"><span class="zh">功能</span><span class="en">Features</span></a>
+            <a href="#screens"><span class="zh">截图</span><span class="en">Screens</span></a>
+            <a href="#download"><span class="zh">下载</span><span class="en">Download</span></a>
+            <a href="#workflow"><span class="zh">流程</span><span class="en">Workflow</span></a>
+          </div>
+          <div class="lang-switch" aria-label="Language switch">
+            <button type="button" data-set-lang="zh" aria-label="切换到中文">中文</button>
+            <button type="button" data-set-lang="en" aria-label="Switch to English">EN</button>
+          </div>
+          <a class="btn btn-small btn-primary" href="https://github.com/techdou/prompt-pocket/releases/latest">
+            <span class="zh">下载</span><span class="en">Get it</span>
+          </a>
         </div>
       </div>
     </nav>
 
-    <!-- ───────────── HERO ───────────── -->
     <header class="hero" id="top">
-      <div class="wrap">
-        <div class="badge">
-          <span class="tag">Tauri + Rust</span>
-          Windows 安装包 · 手动同步 · 数据归你所有
-        </div>
-        <h1>把提示词<br />装进口袋，<span class="accent">秒唤即用。</span></h1>
-        <p class="lede">
-          按 <code>Ctrl+Alt+P</code> 从任意应用唤出，搜索 → 选中 →
-          <code>Enter</code> 复制；如果唤出前焦点就在输入框，会自动粘贴回去。一个 Markdown
-          文件即一条提示词，文件夹即分类，用你自己的坚果云手动同步到所有设备。
-        </p>
-        <div class="cta-row">
-          <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/latest">
-            下载 Prompt Pocket
-            <span class="kbd-hint">Windows</span>
-          </a>
-          <a class="btn btn-ghost" href="#install">查看安装方式</a>
+      <div class="wrap hero-grid">
+        <div>
+          <div class="eyebrow">
+            <span class="zh">本地优先的提示词口袋</span>
+            <span class="en">Local-first prompt pocket</span>
+          </div>
+          <h1>
+            <span class="zh">提示词口袋，<br /><strong>秒唤即用。</strong></span>
+            <span class="en">Keep prompts close.<br /><strong>Launch in a second.</strong></span>
+          </h1>
+          <p class="lead">
+            <span class="zh">
+              按 <strong>Ctrl+Alt+P</strong> 从任意应用唤出，搜索、选中、按 <strong>Enter</strong> 复制；如果原焦点在输入框，还会自动粘贴回去。
+            </span>
+            <span class="en">
+              Press <strong>Ctrl+Alt+P</strong> anywhere, search, select, and press <strong>Enter</strong> to copy. If the original focus was a text input, Prompt Pocket pastes it back automatically.
+            </span>
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/latest">
+              <span class="zh">查看可用下载</span>
+              <span class="en">View downloads</span>
+            </a>
+            <a class="btn" href="https://github.com/techdou/prompt-pocket">
+              <span class="zh">查看源码</span>
+              <span class="en">View source</span>
+            </a>
+          </div>
+          <ul class="meta-strip" aria-label="Highlights">
+            <li>Tauri v2</li>
+            <li>Rust</li>
+            <li>Svelte 5</li>
+            <li>Markdown</li>
+            <li>WebDAV</li>
+          </ul>
         </div>
 
-        <div class="stage" id="stage">
-          <div class="stage-bar">
-            <span class="stage-dot"></span>
-            <span class="stage-dot"></span>
-            <span class="stage-dot"></span>
-            <span class="stage-prompt">
-              <span class="pulse"></span>
-              试试按
-              <kbd id="hotkey">Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>P</kbd>
-            </span>
+        <figure class="product-shot">
+          <div class="window-bar" aria-hidden="true">
+            <span class="window-dot"></span>
+            <span class="window-dot"></span>
+            <span class="window-dot"></span>
+            <span class="window-title">Ctrl + Alt + P</span>
           </div>
           <img
-            id="hero-shot"
+            class="hero-app-shot"
             src="screenshots/list.png"
-            alt="Prompt Pocket 主界面：搜索栏、分类标签、提示词列表与编辑器"
+            alt="Prompt Pocket main interface with search, category tabs, prompt list, and editor"
             decoding="async"
             fetchpriority="high"
           />
-        </div>
+        </figure>
       </div>
     </header>
 
-    <!-- ───────────── FEATURES ───────────── -->
-    <section id="features">
-      <div class="wrap">
-        <div class="eyebrow">What's inside</div>
-        <h2>克制，但每一个像素都经过打磨。</h2>
-        <p class="section-lede">
-          一个专注的提示词口袋：只在需要时出现，复制完即消失，把常用 Prompt 变成肌肉记忆。
-        </p>
-
-        <div class="features">
-          <div class="feat big featured">
-            <div class="feat-num">01 / 唤出</div>
-            <span class="glyph">⚡</span>
-            <h3>全局<span class="hi">秒唤</span>，失焦即收</h3>
-            <p>
-              <code>Ctrl+Alt+P</code> 从任意应用唤出 spotlight 窗口，复制完自动隐藏，失焦也会收起。不占任务栏，像系统自带的搜索一样轻盈。
-            </p>
-          </div>
-
-          <div class="feat med">
-            <div class="feat-num">02 / 搜索</div>
-            <span class="glyph">🔍</span>
-            <h3>模糊搜索 · 键盘全程可达</h3>
-            <p>
-              标题 / 分类 / 正文实时检索，<code>Ctrl+F</code> 聚焦、<code>↑↓</code> 选择、<code>Enter</code> 复制或粘贴——从唤出到输入，一次都不必碰鼠标。
-            </p>
-          </div>
-
-          <div class="feat sm">
-            <div class="feat-num">03 / 渲染</div>
-            <span class="glyph">🎨</span>
-            <h3>富 Markdown 渲染</h3>
-            <p>
-              GFM 全语法离线可用，Mermaid 图表、KaTeX 公式、代码高亮按需从 CDN 加载，加载失败优雅降级。
-            </p>
-          </div>
-
-          <div class="feat sm">
-            <div class="feat-num">04 / 同步</div>
-            <span class="glyph">☁️</span>
-            <h3>坚果云 WebDAV 多端同步</h3>
-            <p>
-              内置设置界面，填账号 + 应用密码即可。上传和下载都由你手动触发，避免误覆盖。
-            </p>
-          </div>
-
-          <div class="feat sm">
-            <div class="feat-num">05 / 排序</div>
-            <span class="glyph">🔀</span>
-            <h3>双向拖拽排序</h3>
-            <p>
-              提示词与分类都支持原生拖拽重排，顺序持久化并随云同步。
-            </p>
-          </div>
-
-          <div class="feat big">
-            <div class="feat-num">06 / 轻量</div>
-            <span class="glyph">🪶</span>
-            <h3>轻量安装包，低占用常驻</h3>
-            <p>
-              Tauri v2 + Rust 后端，无 Electron。一条 Prompt 一个 <code>.md</code> 文件，文件夹即分类——没有数据库，没有云端账号，数据完全归你所有，用你自己的坚果云同步到所有设备。CPU 占用近乎为零，常驻后台负担很低。
-            </p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ───────────── GALLERY ───────────── -->
-    <section id="gallery">
-      <div class="wrap">
-        <div class="eyebrow">Screenshots</div>
-        <h2>看一眼真实的样子。</h2>
-        <p class="section-lede">
-          以下是 Prompt Pocket 的实机界面，所见即所得。
-        </p>
-
-        <div class="gallery">
-          <div class="shot tall">
-            <div class="shot-img"><img src="screenshots/editor-long.jpg" alt="长 prompt 编辑器：正文滚动，复制按钮固定底部" loading="lazy" /></div>
-            <div class="shot-cap"><span>editor / 长 prompt</span><span>03</span></div>
-          </div>
-          <div class="shot">
-            <div class="shot-img"><img src="screenshots/edit-form.jpg" alt="填空式编辑表单：标题、分类、复制模式、正文" loading="lazy" /></div>
-            <div class="shot-cap"><span>edit / 填空式表单</span><span>04</span></div>
-          </div>
-          <div class="shot">
-            <div class="shot-img"><img src="screenshots/settings.png" alt="坚果云同步设置面板" loading="lazy" /></div>
-            <div class="shot-cap"><span>settings / 坚果云</span><span>05</span></div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ───────────── SHORTCUTS ───────────── -->
-    <section id="shortcuts">
-      <div class="wrap">
-        <div class="eyebrow">Keyboard first</div>
-        <h2>键盘全程可达，鼠标几乎不用。</h2>
-        <p class="section-lede">
-          设计目标：从唤出到复制粘贴，一次都不必碰鼠标。
-        </p>
-        <div class="keys">
-          <div class="key-row"><span class="what">全局唤出 / 隐藏</span><kbd>Ctrl + Alt + P</kbd></div>
-          <div class="key-row"><span class="what">新建提示词</span><kbd>Ctrl + N</kbd></div>
-          <div class="key-row"><span class="what">聚焦搜索框</span><kbd>Ctrl + F</kbd></div>
-          <div class="key-row"><span class="what">上下选择</span><kbd>↑ / ↓</kbd></div>
-          <div class="key-row"><span class="what">复制选中并隐藏</span><kbd>Enter</kbd></div>
-          <div class="key-row"><span class="what">隐藏窗口</span><kbd>Esc</kbd></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ───────────── INSTALL ───────────── -->
-    <section id="install">
-      <div class="wrap">
-        <div class="eyebrow">Get it</div>
-        <h2>Windows 用户，下载即用。</h2>
-        <p class="section-lede">
-          提供 NSIS 与 MSI 两种安装包，双击安装，无需额外运行环境。
-        </p>
-        <div class="dl-row">
-          <a class="dl-card" href="https://github.com/techdou/prompt-pocket/releases/latest">
-            <span class="dl-ico">⬇</span>
-            <span class="dl-text">
-              <span class="dl-name">Windows 安装程序</span>
-              <span class="dl-sub">NSIS · .exe</span>
-            </span>
-          </a>
-          <a class="dl-card" href="https://github.com/techdou/prompt-pocket/releases/latest">
-            <span class="dl-ico">⬇</span>
-            <span class="dl-text">
-              <span class="dl-name">MSI 安装包</span>
-              <span class="dl-sub">.msi</span>
-            </span>
-          </a>
-        </div>
-        <p class="dl-note">
-          其他平台或想自行编译？看下面的源码步骤，或前往
-          <a href="https://github.com/techdou/prompt-pocket/releases">全部 Releases</a>。
-        </p>
-
-        <details class="src-build">
-          <summary>从源码构建（需 Node.js 18+ 与 Rust 1.77+）</summary>
-          <div class="install">
-            <div class="install-head">
-              <span class="d"></span><span class="d"></span><span class="d"></span>
-              <span style="margin-left:8px">bash — prompt-pocket</span>
+    <main id="main">
+      <section id="features">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">
+                <span class="zh">功能特性</span>
+                <span class="en">Features</span>
+              </div>
+              <h2>
+                <span class="zh">做少一点，但把核心流程做顺。</span>
+                <span class="en">Focused scope. Polished workflow.</span>
+              </h2>
             </div>
-            <pre><span class="c"># 克隆并安装依赖</span>
-<span class="cmd">git clone</span> https://github.com/techdou/prompt-pocket.git
+            <p class="section-note">
+              <span class="zh">Prompt Pocket 适合高频复用提示词的人：无需打开网页、无需登录云服务、无需把数据交给第三方。</span>
+              <span class="en">Prompt Pocket is built for people who reuse prompts often: no web dashboard, no cloud account, no third-party prompt storage.</span>
+            </p>
+          </div>
+
+          <div class="feature-grid">
+            <article class="feature feature-wide">
+              <span class="feature-kicker">01 / Hotkey</span>
+              <h3><span class="zh">全局秒唤，Enter 即用</span><span class="en">Global launch, Enter to use</span></h3>
+              <p>
+                <span class="zh">从任意应用唤出，复制完自动收起；如果从输入框唤出，就自动粘贴回原位置。</span>
+                <span class="en">Open from anywhere, copy, then hide. When launched from a text input, it pastes back automatically.</span>
+              </p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">02 / Local</span>
+              <h3><span class="zh">Markdown 本地存储</span><span class="en">Local Markdown storage</span></h3>
+              <p>
+                <span class="zh">一条提示词一个 `.md` 文件，文件夹就是分类，便于备份、迁移和搜索。</span>
+                <span class="en">One prompt per `.md` file. Folders are categories, so backup and migration stay simple.</span>
+              </p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">03 / Preview</span>
+              <h3><span class="zh">富 Markdown 预览</span><span class="en">Rich Markdown preview</span></h3>
+              <p>
+                <span class="zh">GFM 离线可用，Mermaid、KaTeX、highlight.js 按需加载并可降级。</span>
+                <span class="en">GFM works offline. Mermaid, KaTeX, and highlight.js load only when needed and degrade gracefully.</span>
+              </p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">04 / Order</span>
+              <h3><span class="zh">提示词与分类排序</span><span class="en">Prompt and category ordering</span></h3>
+              <p>
+                <span class="zh">拖拽提示词或分类标签，顺序写入本地 JSON，并可随 WebDAV 同步。</span>
+                <span class="en">Drag prompts or category tabs. Order is persisted locally and can sync through WebDAV.</span>
+              </p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">05 / Sync</span>
+              <h3><span class="zh">坚果云 WebDAV 手动同步</span><span class="en">Manual Jianguoyun WebDAV sync</span></h3>
+              <p>
+                <span class="zh">上传和下载由用户主动触发，减少自动同步误覆盖。</span>
+                <span class="en">Upload and download are explicit actions, reducing accidental overwrite from automatic sync.</span>
+              </p>
+            </article>
+            <article class="feature feature-wide">
+              <span class="feature-kicker">06 / Secure</span>
+              <h3><span class="zh">系统凭据库存密码</span><span class="en">Passwords in system credential store</span></h3>
+              <p>
+                <span class="zh">WebDAV 应用密码不写入明文 JSON；旧版本明文配置会在读取时迁移出去。</span>
+                <span class="en">WebDAV app passwords are not written to plaintext JSON. Legacy plaintext configs are migrated on read.</span>
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="screens">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">
+                <span class="zh">界面截图</span>
+                <span class="en">Screenshots</span>
+              </div>
+              <h2>
+                <span class="zh">真实桌面界面，不是概念图。</span>
+                <span class="en">Real desktop UI, not mockups.</span>
+              </h2>
+            </div>
+            <p class="section-note">
+              <span class="zh">列表、编辑器、设置页和拖拽手柄都来自当前应用截图。</span>
+              <span class="en">List, editor, settings, and drag handles are captured from the current app.</span>
+            </p>
+          </div>
+
+          <div class="gallery">
+            <figure class="shot">
+              <img src="screenshots/editor-long.jpg" alt="Long prompt editor with fixed copy action" loading="lazy" />
+              <figcaption class="shot-caption"><span>editor-long.jpg</span><span>Editor</span></figcaption>
+            </figure>
+            <div class="shot-stack">
+              <figure class="shot">
+                <img src="screenshots/settings.png" alt="Jianguoyun WebDAV settings panel" loading="lazy" />
+                <figcaption class="shot-caption"><span>settings.png</span><span>Sync</span></figcaption>
+              </figure>
+              <figure class="shot">
+                <img src="screenshots/drag-handle.png" alt="Prompt Pocket drag handle detail" loading="lazy" />
+                <figcaption class="shot-caption"><span>drag-handle.png</span><span>Sorting</span></figcaption>
+              </figure>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="download">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">
+                <span class="zh">下载安装</span>
+                <span class="en">Download</span>
+              </div>
+              <h2>
+                <span class="zh">按平台选择当前可用的 Release。</span>
+                <span class="en">Choose the available build for your platform.</span>
+              </h2>
+            </div>
+            <p class="section-note">
+              <span class="zh">最新版 v2.0.3 三平台 CI 全绿，安装包均由 GitHub Actions 构建。</span>
+              <span class="en">Latest v2.0.3 passes CI on all three platforms; installers are built by GitHub Actions.</span>
+            </p>
+          </div>
+
+          <div class="download-panel">
+            <aside class="download-copy">
+              <h3><span class="zh">下载状态</span><span class="en">Download status</span></h3>
+              <p>
+                <span class="zh">三平台用户均可从最新 Release 下载对应安装包。</span>
+                <span class="en">Users on all three platforms can download installers from the latest Release.</span>
+              </p>
+              <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/latest">
+                <span class="zh">打开最新版 Release</span>
+                <span class="en">Open latest Release</span>
+              </a>
+            </aside>
+            <div class="download-list" aria-label="Release assets">
+              <a class="download-item" href="https://github.com/techdou/prompt-pocket/releases/latest">
+                <span>
+                  <span class="file-name">Prompt.Pocket_2.0.3_aarch64.dmg</span>
+                  <span class="file-desc"><span class="zh">macOS Apple Silicon 磁盘映像</span><span class="en">macOS Apple Silicon disk image</span></span>
+                </span>
+                <span class="arrow">↗</span>
+              </a>
+              <a class="download-item" href="https://github.com/techdou/prompt-pocket/releases/latest">
+                <span>
+                  <span class="file-name">Prompt.Pocket_2.0.3_x64-setup.exe</span>
+                  <span class="file-desc"><span class="zh">Windows 普通安装器</span><span class="en">Windows setup installer</span></span>
+                </span>
+                <span class="arrow">↗</span>
+              </a>
+              <a class="download-item" href="https://github.com/techdou/prompt-pocket/releases/latest">
+                <span>
+                  <span class="file-name">Prompt.Pocket_2.0.3_x64_en-US.msi</span>
+                  <span class="file-desc"><span class="zh">Windows MSI 安装包</span><span class="en">Windows MSI package</span></span>
+                </span>
+                <span class="arrow">↗</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="workflow">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">
+                <span class="zh">使用流程</span>
+                <span class="en">Workflow</span>
+              </div>
+              <h2>
+                <span class="zh">一次快捷键，完成搜索和粘贴。</span>
+                <span class="en">One hotkey from search to paste.</span>
+              </h2>
+            </div>
+            <p class="section-note">
+              <span class="zh">这个流程面向重复使用场景，减少上下文切换。</span>
+              <span class="en">The flow is optimized for repeated use and low context switching.</span>
+            </p>
+          </div>
+
+          <div class="workflow">
+            <article class="workflow-step">
+              <span>01</span>
+              <h3><span class="zh">放好光标</span><span class="en">Place caret</span></h3>
+              <p><span class="zh">在目标应用输入框中放好光标。</span><span class="en">Put the caret in your target text input.</span></p>
+            </article>
+            <article class="workflow-step">
+              <span>02</span>
+              <h3><span class="zh">唤出窗口</span><span class="en">Open launcher</span></h3>
+              <p><span class="zh">按 `Ctrl+Alt+P` 唤出 Prompt Pocket。</span><span class="en">Press `Ctrl+Alt+P` to open Prompt Pocket.</span></p>
+            </article>
+            <article class="workflow-step">
+              <span>03</span>
+              <h3><span class="zh">搜索选择</span><span class="en">Search and select</span></h3>
+              <p><span class="zh">搜索提示词，或用方向键选择。</span><span class="en">Search for a prompt or select with arrow keys.</span></p>
+            </article>
+            <article class="workflow-step">
+              <span>04</span>
+              <h3><span class="zh">复制粘贴</span><span class="en">Copy or paste</span></h3>
+              <p><span class="zh">按 `Enter` 复制；从输入框唤出时自动粘贴。</span><span class="en">Press `Enter` to copy; auto-paste when launched from an input.</span></p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="build">
+        <div class="wrap">
+          <div class="section-head">
+            <div>
+              <div class="eyebrow">
+                <span class="zh">源码构建</span>
+                <span class="en">Build from source</span>
+              </div>
+              <h2>
+                <span class="zh">保持静态页面和应用源码都轻量。</span>
+                <span class="en">Static site and app source stay lightweight.</span>
+              </h2>
+            </div>
+            <p class="section-note">
+              <span class="zh">Pages 是纯静态 HTML；应用本体使用 Tauri v2、Rust、Svelte 和 Vite。</span>
+              <span class="en">Pages is a static HTML page. The app uses Tauri v2, Rust, Svelte, and Vite.</span>
+            </p>
+          </div>
+
+          <div class="code-panel">
+            <div class="code-head">bash</div>
+            <pre><span class="cmd">git clone</span> https://github.com/techdou/prompt-pocket.git
 <span class="cmd">cd</span> prompt-pocket
 <span class="cmd">npm install</span>
-
-<span class="c"># 开发模式（热重载）或打包发布</span>
 <span class="cmd">npm run</span> tauri:dev
-<span class="cmd">npm run</span> tauri:build   <span class="c"># 产物在 src-tauri/target/release/bundle/</span></pre>
+<span class="cmd">npm run</span> tauri:build</pre>
           </div>
-        </details>
-      </div>
-    </section>
 
-    <!-- ───────────── FINAL CTA ───────────── -->
-    <section class="final">
-      <div class="wrap">
-        <h2>别再翻聊天记录找<span class="accent">提示词</span>了。</h2>
-        <div class="cta-row" style="justify-content:center; margin-bottom:0;">
-          <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/latest">
-            下载 Prompt Pocket
-          </a>
-          <a class="btn btn-ghost" href="https://github.com/techdou/prompt-pocket">查看源码</a>
+          <div class="tech-grid" aria-label="Tech stack" style="margin-top: 16px">
+            <div>Tauri v2</div>
+            <div>Rust</div>
+            <div>Svelte 5</div>
+            <div>Vite</div>
+            <div>Markdown</div>
+            <div>WebDAV</div>
+            <div>keyring</div>
+            <div>GitHub Pages</div>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
+
+      <section class="final">
+        <div class="wrap">
+          <div class="final-box">
+            <div>
+              <h2>
+                <span class="zh">别再翻聊天记录找提示词了。</span>
+                <span class="en">Stop digging through chat history for prompts.</span>
+              </h2>
+              <p>
+                <span class="zh">把常用提示词变成一个本地、可同步、秒唤的桌面工具。</span>
+                <span class="en">Turn reusable prompts into a local, syncable, instant desktop tool.</span>
+              </p>
+            </div>
+            <a class="btn btn-primary" href="https://github.com/techdou/prompt-pocket/releases/latest">
+              <span class="zh">查看可用下载</span>
+              <span class="en">View downloads</span>
+            </a>
+          </div>
+        </div>
+      </section>
+    </main>
 
     <footer>
-      <div class="wrap">
+      <div class="wrap footer-inner">
         <span>Prompt Pocket · Apache License 2.0</span>
         <span>
-          <a href="https://github.com/techdou/prompt-pocket">GitHub</a> ·
-          <a href="https://github.com/techdou/prompt-pocket/releases">Releases</a> ·
+          <a href="https://github.com/techdou/prompt-pocket">GitHub</a>
+          ·
+          <a href="https://github.com/techdou/prompt-pocket/releases">Releases</a>
+          ·
           <a href="https://github.com/techdou/prompt-pocket/blob/main/README.md">README</a>
         </span>
       </div>
     </footer>
 
     <script>
-      // ── 导航滚动描边 ──
-      const nav = document.getElementById("nav");
-      window.addEventListener("scroll", () => {
-        nav.classList.toggle("scrolled", window.scrollY > 8);
-      }, { passive: true });
+      const i18nMeta = {
+        zh: {
+          htmlLang: "zh-CN",
+          title: "Prompt Pocket - 全局秒唤的提示词口袋",
+          description:
+            "轻量级提示词管理工具：全局快捷键秒唤，Enter 智能复制粘贴，Markdown 本地存储，坚果云 WebDAV 手动同步。",
+        },
+        en: {
+          htmlLang: "en",
+          title: "Prompt Pocket - Global prompt launcher",
+          description:
+            "A lightweight desktop prompt manager with global hotkey launch, smart copy and paste, local Markdown storage, and Jianguoyun WebDAV sync.",
+        },
+      };
 
-      // ── Hero 交互：按下 Ctrl+Alt+P 触发"唤出"动画 + 切图 ──
-      const heroShot = document.getElementById("hero-shot");
-      const hotkey = document.getElementById("hotkey");
-      const shots = [
-        "screenshots/list.png",
-        "screenshots/editor-long.jpg",
-        "screenshots/edit-form.jpg",
-      ];
-      let shotIdx = 0;
+      const body = document.body;
+      const description = document.querySelector('meta[name="description"]');
+      const ogTitle = document.querySelector('meta[property="og:title"]');
+      const ogDescription = document.querySelector('meta[property="og:description"]');
 
-      function triggerSummon() {
-        const stage = document.getElementById("stage");
-        stage.animate(
-          [
-            { transform: "scale(0.96) translateY(12px)", opacity: 0.4, filter: "blur(6px)" },
-            { transform: "scale(1) translateY(0)", opacity: 1, filter: "blur(0)" },
-          ],
-          { duration: 420, easing: "cubic-bezier(.2,.9,.25,1)" }
-        );
-        shotIdx = (shotIdx + 1) % shots.length;
-        heroShot.src = shots[shotIdx];
-        // 高亮提示
-        hotkey.animate(
-          [{ background: "var(--accent)", color: "#fff" }, { background: "transparent", color: "inherit" }],
-          { duration: 700 }
-        );
+      function readInitialLanguage() {
+        const queryLang = new URLSearchParams(window.location.search).get("lang");
+        if (queryLang === "zh" || queryLang === "en") return queryLang;
+        const savedLang = window.localStorage.getItem("prompt-pocket-lang");
+        if (savedLang === "zh" || savedLang === "en") return savedLang;
+        return navigator.language && navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
       }
 
-      // 监听真实快捷键（也接受 Shift 替代，方便无法同时按的访客体验动效）
-      window.addEventListener("keydown", (e) => {
-        if (e.ctrlKey && e.altKey && e.key.toLowerCase() === "p") {
-          e.preventDefault();
-          triggerSummon();
+      function setLanguage(lang, updateUrl = true) {
+        const next = lang === "en" ? "en" : "zh";
+        const meta = i18nMeta[next];
+        body.dataset.lang = next;
+        document.documentElement.lang = meta.htmlLang;
+        document.title = meta.title;
+        description?.setAttribute("content", meta.description);
+        ogTitle?.setAttribute("content", meta.title);
+        ogDescription?.setAttribute("content", meta.description);
+        window.localStorage.setItem("prompt-pocket-lang", next);
+
+        document.querySelectorAll("[data-set-lang]").forEach((button) => {
+          const selected = button.dataset.setLang === next;
+          button.setAttribute("aria-pressed", String(selected));
+        });
+
+        if (updateUrl) {
+          const url = new URL(window.location.href);
+          url.searchParams.set("lang", next);
+          window.history.replaceState({}, "", url);
         }
+      }
+
+      document.querySelectorAll("[data-set-lang]").forEach((button) => {
+        button.addEventListener("click", () => setLanguage(button.dataset.setLang));
       });
 
-      // 点击 hotkey 提示也能触发（移动端友好）
-      document.querySelector(".stage-prompt")?.addEventListener("click", triggerSummon);
-
-      // ── 滚动渐显 ──
-      const io = new IntersectionObserver(
-        (entries) => {
-          entries.forEach((en) => {
-            if (en.isIntersecting) {
-              en.target.style.opacity = 1;
-              en.target.style.transform = "translateY(0)";
-              io.unobserve(en.target);
-            }
-          });
-        },
-        { threshold: 0.12 }
-      );
-      document.querySelectorAll(".feat, .shot, .install").forEach((el) => {
-        el.style.opacity = 0;
-        el.style.transform = "translateY(24px)";
-        el.style.transition = "opacity .6s ease, transform .6s ease";
-        io.observe(el);
-      });
+      setLanguage(readInitialLanguage(), false);
     </script>
   </body>
 </html>
