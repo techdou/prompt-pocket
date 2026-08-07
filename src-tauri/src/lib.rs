@@ -82,9 +82,13 @@ impl AppState {
     }
 
     fn set_cloud_config(&self, cfg: CloudConfig) -> Result<(), String> {
-        persist_cloud_config(&self.config_file, &cfg, &SystemCloudSecretStore)?;
+        let warning = persist_cloud_config(&self.config_file, &cfg, &SystemCloudSecretStore)?;
         {
             *self.cloud.lock().map_err(|e| e.to_string())? = cfg.clone();
+        }
+        // 降级（密码未持久化）时让前端能通过 sync_status 看到提示
+        if let Some(w) = warning {
+            *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(w);
         }
         Ok(())
     }
@@ -109,19 +113,52 @@ impl AppState {
     }
 }
 
+/// syncing 标志的 RAII 守卫：创建时在单次加锁内完成 check-and-set（消除 TOCTOU），
+/// Drop 时自动复位——即使同步过程 panic，也不会永久卡在"同步中"需要重启。
+struct SyncGuard<'a> {
+    flag: &'a std::sync::Mutex<bool>,
+}
+
+impl<'a> SyncGuard<'a> {
+    fn acquire(flag: &'a std::sync::Mutex<bool>) -> Result<Self, String> {
+        let mut guard = flag.lock().map_err(|e| e.to_string())?;
+        if *guard {
+            return Err("正在同步中，请稍候".to_string());
+        }
+        *guard = true;
+        drop(guard);
+        Ok(Self { flag })
+    }
+}
+
+impl Drop for SyncGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.flag.lock() {
+            *guard = false;
+        }
+    }
+}
+
 /// 本地缓存目录：%APPDATA%/com.promptpocket.app/PromptPocket/
 fn resolve_local_dir(app: &tauri::AppHandle) -> PathBuf {
     let dir = app
         .path()
         .app_config_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+        .unwrap_or_else(|e| {
+            // 极端环境（无家目录）下落回 CWD：记录到 stderr 而非完全静默
+            eprintln!("[init] 无法解析系统配置目录，数据将写入当前目录: {e}");
+            PathBuf::from(".")
+        });
     dir.join("PromptPocket")
 }
 
 fn resolve_config_file(app: &tauri::AppHandle) -> PathBuf {
     app.path()
         .app_config_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
+        .unwrap_or_else(|e| {
+            eprintln!("[init] 无法解析系统配置目录，配置将写入当前目录: {e}");
+            PathBuf::from(".")
+        })
         .join("config.json")
 }
 
@@ -175,16 +212,26 @@ fn write_persisted_config(config_file: &Path, cfg: &PersistedConfig) -> Result<(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(config_file, json).map_err(|e| e.to_string())
+    store::write_atomic(config_file, json.as_bytes()).map_err(|e| e.to_string())
 }
 
+/// 持久化云配置。返回 Ok(Some(警告)) 表示降级成功（密码未持久化）。
 fn persist_cloud_config(
     config_file: &Path,
     cfg: &CloudConfig,
     secret_store: &impl CloudSecretStore,
-) -> Result<(), String> {
-    secret_store.write_password(&cfg.username, &cfg.password)?;
-    write_persisted_config(config_file, &persisted_from_cloud_config(cfg))
+) -> Result<Option<String>, String> {
+    // keyring 不可用（如 Linux 无 secret-service）时降级而非整体失败：
+    // 非密字段照常持久化，密码仅留内存（本次会话可用，重启需重填）
+    let warning = match secret_store.write_password(&cfg.username, &cfg.password) {
+        Ok(()) => None,
+        Err(e) => {
+            eprintln!("[cloud] 系统凭据库不可用，密码仅本次会话保留: {e}");
+            Some("系统凭据库不可用：密码仅本次会话保留，重启后需重新填写".to_string())
+        }
+    };
+    write_persisted_config(config_file, &persisted_from_cloud_config(cfg))?;
+    Ok(warning)
 }
 
 fn load_cloud_config_with_store(
@@ -273,7 +320,7 @@ fn scan_prompts(state: tauri::State<'_, AppState>) -> Result<ScanResult, String>
 
 #[tauri::command]
 fn read_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<PromptContent, String> {
-    let abs = resolve_abs(&state.local_dir, &path);
+    let abs = resolve_abs(&state.local_dir, &path)?;
     read_prompt_disk(&abs).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             "FILE_NOT_FOUND".to_string()
@@ -283,15 +330,24 @@ fn read_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<Prompt
     })
 }
 
+/// 同步进行中拒绝本地写操作：下载覆盖与本地保存互写同一文件会互相吞掉（后写赢、无提示）
+fn ensure_not_syncing(state: &AppState) -> Result<(), String> {
+    if *state.syncing.lock().map_err(|e| e.to_string())? {
+        return Err("正在同步中，请稍候再编辑".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn save_prompt(
     path: String,
     req: SaveRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
-    let abs = resolve_abs(&state.local_dir, &path);
+    ensure_not_syncing(&state)?;
+    let abs = resolve_abs(&state.local_dir, &path)?;
     // save_prompt 现在返回新路径（可能因标题重命名而变化）
-    let new_abs = save_prompt_disk(&abs, &req).map_err(|e| {
+    let new_abs = save_prompt_disk(&state.local_dir, &abs, &req).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             "FILE_NOT_FOUND".to_string()
         } else {
@@ -315,7 +371,8 @@ fn rename_prompt(
     new_category: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
-    let old_abs = resolve_abs(&state.local_dir, &path);
+    ensure_not_syncing(&state)?;
+    let old_abs = resolve_abs(&state.local_dir, &path)?;
     let new_abs = rename_prompt_disk(&state.local_dir, &old_abs, &new_title, &new_category)
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -368,8 +425,9 @@ fn create_prompt(
 
 #[tauri::command]
 fn delete_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs = resolve_abs(&state.local_dir, &path);
-    delete_prompt_disk(&abs).map_err(|e| e.to_string())?;
+    ensure_not_syncing(&state)?;
+    let abs = resolve_abs(&state.local_dir, &path)?;
+    delete_prompt_disk(&state.local_dir, &abs).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -380,6 +438,7 @@ fn reorder(
     paths: Vec<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    ensure_not_syncing(&state)?;
     reorder_category_disk(&state.local_dir, &category, &paths).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -657,7 +716,7 @@ fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn reveal_in_finder(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs = resolve_abs(&state.local_dir, &path);
+    let abs = resolve_abs(&state.local_dir, &path)?;
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
@@ -742,7 +801,7 @@ fn save_cloud_config(
     Ok(())
 }
 
-/// 上传到坚果云：本地所有文件推送到云端（只增不删）
+/// 上传到坚果云：本地所有文件推送到云端 + 删除传播（tombstone）
 #[tauri::command]
 async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<AppState>();
@@ -750,17 +809,9 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     if !cfg.is_configured() {
         return Err("未配置坚果云同步".to_string());
     }
-    // P0-3 并发保护：若已在同步中，拒绝重复触发
-    {
-        let syncing = state.syncing.lock().map_err(|e| e.to_string())?;
-        if *syncing {
-            return Err("正在同步中，请稍候".to_string());
-        }
-    }
-    *state.syncing.lock().map_err(|e| e.to_string())? = true;
+    // 并发保护：单次加锁内 check-and-set；guard drop 自动复位（panic 也不卡死）
+    let _guard = SyncGuard::acquire(&state.syncing)?;
     let result = push_all_to_remote(&cfg, &state.local_dir).await;
-    // 无论成功失败都释放 syncing（用 map_err 防 poison，不 unwrap）
-    *state.syncing.lock().map_err(|e| e.to_string())? = false;
     match result {
         Ok(report) => {
             let mut msg = format!("上传完成：共 {} 个文件", report.uploaded);
@@ -782,7 +833,7 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
-/// 下载到本地：从坚果云拉取并覆盖本地（清理本地多余文件）
+/// 下载到本地：从坚果云拉取并覆盖本地（覆盖前备份 .trash，tombstone 防复活）
 #[tauri::command]
 async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<AppState>();
@@ -790,16 +841,9 @@ async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     if !cfg.is_configured() {
         return Err("未配置坚果云同步".to_string());
     }
-    // P0-3 并发保护
-    {
-        let syncing = state.syncing.lock().map_err(|e| e.to_string())?;
-        if *syncing {
-            return Err("正在同步中，请稍候".to_string());
-        }
-    }
-    *state.syncing.lock().map_err(|e| e.to_string())? = true;
+    // 并发保护：单次加锁内 check-and-set；guard drop 自动复位
+    let _guard = SyncGuard::acquire(&state.syncing)?;
     let result = sync::pull_from_remote(&cfg, &state.local_dir).await;
-    *state.syncing.lock().map_err(|e| e.to_string())? = false;
     match result {
         Ok(report) => {
             let mut msg = format!(
@@ -879,19 +923,45 @@ fn is_allowed_external_url(url: &str) -> bool {
 // 辅助
 // ────────────────────────────────────────────────────────────
 
-fn resolve_abs(root: &std::path::Path, rel: &str) -> PathBuf {
+/// 把 root.join(rel) 解析为绝对路径，并校验不逃逸 root。
+/// 两条防线：
+/// 1. 路径已存在 → canonicalize（解析符号链接/`..`）后校验前缀
+/// 2. 路径不存在（新建文件场景）→ 手工展开 `.`/`..`（不依赖文件系统）后校验前缀
+/// 任何逃逸都返回 Err——旧版校验失败会回退到未校验的路径，等于没有防护：
+/// `read_prompt("../../../etc/passwd")` 可读 root 外文件，delete 可删任意文件。
+fn resolve_abs(root: &std::path::Path, rel: &str) -> Result<PathBuf, String> {
     let joined = root.join(rel);
-    match std::fs::canonicalize(&joined) {
-        Ok(canon) => {
-            let stripped = strip_unc_prefix(&canon);
-            if stripped.starts_with(root) {
-                stripped
-            } else {
-                joined
-            }
-        }
-        Err(_) => joined,
+    let normalized = match std::fs::canonicalize(&joined) {
+        Ok(canon) => strip_unc_prefix(&canon),
+        Err(_) => normalize_lexical(&joined),
+    };
+    // root 也规范化到同一形式，两边才能比前缀
+    let root_norm = match std::fs::canonicalize(root) {
+        Ok(canon) => strip_unc_prefix(&canon),
+        Err(_) => normalize_lexical(root),
+    };
+    if normalized.starts_with(&root_norm) {
+        Ok(normalized)
+    } else {
+        Err("路径越界：拒绝访问数据目录之外的文件".to_string())
     }
+}
+
+/// 不依赖文件系统的手工路径规范化：展开 `.` 和 `..`。
+/// `..` 弹出到根组件后自然停止（不会 panic），越界结果交给调用方的前缀校验拒绝。
+fn normalize_lexical(p: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(windows)]
@@ -930,7 +1000,8 @@ fn seed_sample_prompts(dir: &std::path::Path) -> Result<(), String> {
     for (cat, name, content) in samples {
         let sub = dir.join(cat);
         std::fs::create_dir_all(&sub).map_err(|e| format!("创建示例分类失败: {e}"))?;
-        std::fs::write(sub.join(name), content).map_err(|e| format!("写入示例文件失败: {e}"))?;
+        store::write_atomic(&sub.join(name), content.as_bytes())
+            .map_err(|e| format!("写入示例文件失败: {e}"))?;
     }
     Ok(())
 }
@@ -1231,6 +1302,99 @@ mod tests {
                 .insert(username.to_string(), password.to_string());
             Ok(())
         }
+    }
+
+    #[test]
+    fn resolve_abs_allows_normal_relative_path() {
+        let root = std::env::temp_dir().join("pp_test_resolve_root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("写作")).unwrap();
+
+        let ok = resolve_abs(&root, "写作/a.md").unwrap();
+        assert!(ok.starts_with(&root), "正常相对路径应解析到 root 内");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn resolve_abs_rejects_parent_traversal_existing() {
+        // 路径存在时走 canonicalize 分支
+        let base = std::env::temp_dir().join("pp_test_resolve_escape");
+        let root = base.join("root");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&root).unwrap();
+        // root 外放一个真实文件
+        std::fs::write(base.join("secret.md"), "secret").unwrap();
+
+        let result = resolve_abs(&root, "../secret.md");
+        assert!(result.is_err(), "存在文件的 .. 逃逸必须被拒绝");
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn resolve_abs_rejects_parent_traversal_nonexistent() {
+        // 路径不存在时走手工规范化分支（新建文件场景）
+        let root = std::env::temp_dir().join("pp_test_resolve_escape2");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let result = resolve_abs(&root, "../../evil/new.md");
+        assert!(result.is_err(), "不存在路径的 .. 逃逸也必须被拒绝");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_abs_rejects_absolute_path_injection() {
+        // join 传入绝对路径会整体替换 root——必须拒绝
+        let root = std::env::temp_dir().join("pp_test_resolve_abs_inj");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let result = resolve_abs(&root, "C:\\Windows\\Temp\\evil.md");
+        assert!(result.is_err(), "绝对路径注入必须被拒绝");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn keyring_failure_degrades_to_memory_only() {
+        // keyring 不可用时配置保存不整体失败：非密字段落盘 + 返回警告
+        struct FailingSecretStore;
+        impl CloudSecretStore for FailingSecretStore {
+            fn read_password(&self, _username: &str) -> Result<Option<String>, String> {
+                Err("凭据库不可用".to_string())
+            }
+            fn write_password(&self, _username: &str, _password: &str) -> Result<(), String> {
+                Err("凭据库不可用".to_string())
+            }
+        }
+
+        let dir = std::env::temp_dir().join("pp_test_keyring_degrade");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.json");
+
+        let warning = persist_cloud_config(
+            &config_file,
+            &CloudConfig {
+                username: "user@example.com".into(),
+                password: "secret".into(),
+                remote_root: "PromptPocket".into(),
+                enabled: true,
+            },
+            &FailingSecretStore,
+        )
+        .unwrap();
+
+        assert!(warning.is_some(), "keyring 失败应返回降级警告");
+        let json = std::fs::read_to_string(&config_file).unwrap();
+        assert!(json.contains("user@example.com"), "非密字段应照常持久化");
+        assert!(!json.contains("secret"), "密码不应落入 JSON");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

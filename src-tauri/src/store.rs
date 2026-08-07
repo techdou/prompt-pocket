@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -152,6 +153,90 @@ fn parse_yaml_frontmatter(fm_raw: &str) -> PromptMeta {
             }
         }
     }
+}
+
+/// ────────────────────────────────────────────────
+/// 原子写入：先写同目录 .tmp，再 rename 覆盖目标。
+/// rename 在同文件系统内是原子的——崩溃/断电最多留下 .tmp 残片，
+/// 目标文件要么完整旧内容、要么完整新内容，不会出现半截文件。
+/// ────────────────────────────────────────────────
+pub fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, content)?;
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// .trash 目录名：本地删除/被覆盖文件的备份位置（不进列表、不同步）
+pub const TRASH_DIR: &str = ".trash";
+
+/// 把文件移入 .trash/（rename 失败降级为删除，返回是否有备份留存）
+pub fn move_to_trash(root: &Path, abs: &Path) -> io::Result<()> {
+    let trash_dir = root.join(TRASH_DIR);
+    fs::create_dir_all(&trash_dir)?;
+    let backup_name = format!(
+        "{}_{}.md",
+        abs.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled"),
+        now_compact()
+    );
+    let backup_path = trash_dir.join(backup_name);
+    if fs::rename(abs, &backup_path).is_err() {
+        fs::remove_file(abs)?;
+    }
+    Ok(())
+}
+
+/// ────────────────────────────────────────────────
+/// Tombstone：记录"本地主动删除"的文件，供同步层做删除传播。
+/// .sync_deleted.json: { 相对路径(unix): { size, deletedAt } }
+/// - push：对清单里的路径发远程 DELETE（本地删除传播到云端）
+/// - pull：远程文件命中且 size 相同 → 跳过（防复活）；size 不同 → 远程有新版本，下载
+/// ────────────────────────────────────────────────
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub size: u64,
+    #[serde(rename = "deletedAt")]
+    pub deleted_at: String,
+}
+
+pub const TOMBSTONE_FILE: &str = ".sync_deleted.json";
+
+pub fn load_tombstones(root: &Path) -> HashMap<String, Tombstone> {
+    fs::read_to_string(root.join(TOMBSTONE_FILE))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_tombstones(root: &Path, map: &HashMap<String, Tombstone>) -> io::Result<()> {
+    let json = serde_json::to_string_pretty(map).map_err(io::Error::other)?;
+    write_atomic(&root.join(TOMBSTONE_FILE), json.as_bytes())
+}
+
+/// 记录一条删除（文件已不存在时 size 记 0）。失败不阻断主流程（调用方 let _）。
+pub fn record_tombstone(root: &Path, rel_unix: &str) -> io::Result<()> {
+    let size = fs::metadata(root.join(rel_unix)).map(|m| m.len()).unwrap_or(0);
+    let mut map = load_tombstones(root);
+    map.insert(
+        rel_unix.to_string(),
+        Tombstone {
+            size,
+            deleted_at: now_iso(),
+        },
+    );
+    save_tombstones(root, &map)
+}
+
+/// 清除一条 tombstone（文件被重建/下载回来时调用）
+pub fn remove_tombstone(root: &Path, rel_unix: &str) -> io::Result<()> {
+    let mut map = load_tombstones(root);
+    if map.remove(rel_unix).is_some() {
+        save_tombstones(root, &map)?;
+    }
+    Ok(())
 }
 
 /// 把结构化元数据序列化成规范的 frontmatter 文本块（不含外层 ---）
@@ -309,7 +394,7 @@ pub fn reorder_category(root: &Path, category: &str, ordered_paths: &[String]) -
         .unwrap_or_default();
     map.insert(category.to_string(), ordered_paths.to_vec());
     let json = serde_json::to_string_pretty(&map).map_err(io::Error::other)?;
-    fs::write(&path, json)
+    write_atomic(&path, json.as_bytes())
 }
 
 /// 读取分类自定义顺序（.category-order.json）。失败或不存在返回空 Vec。
@@ -324,7 +409,7 @@ pub fn load_category_order(root: &Path) -> Vec<String> {
 pub fn save_category_order(root: &Path, names: &[String]) -> io::Result<()> {
     let path = root.join(CATEGORY_ORDER_FILE);
     let json = serde_json::to_string_pretty(names).map_err(io::Error::other)?;
-    fs::write(&path, json)
+    write_atomic(&path, json.as_bytes())
 }
 
 /// 重命名分类时同步更新 .category-order.json：旧名替换为新名。
@@ -397,9 +482,11 @@ pub fn read_prompt(abs: &Path) -> io::Result<PromptContent> {
 /// ────────────────────────────────────────────────
 /// 保存：接收结构化字段，用 serde_yaml 规范序列化 frontmatter
 /// 若标题与当前文件名不一致，自动重命名文件（让文件名反映标题，便于同步比对）
-/// 返回（新路径, 新 Prompt）—— 路径可能因重命名而变化
+/// 返回新路径 —— 路径可能因重命名而变化
+/// 关键修复（数据安全）：先原子写新文件成功，再删旧文件——
+/// 旧版"先删后写"在写盘失败（磁盘满/占用）时会让提示词整篇丢失。
 /// ────────────────────────────────────────────────
-pub fn save_prompt(abs: &Path, req: &SaveRequest) -> io::Result<PathBuf> {
+pub fn save_prompt(root: &Path, abs: &Path, req: &SaveRequest) -> io::Result<PathBuf> {
     // 读取旧文件以保留 created 时间戳
     let old_created = fs::read_to_string(abs)
         .ok()
@@ -423,11 +510,20 @@ pub fn save_prompt(abs: &Path, req: &SaveRequest) -> io::Result<PathBuf> {
     if let Some(parent) = final_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    // 若路径变了，删除旧文件
+    // 先写新文件（原子）。写失败时旧文件还在，用户内容不丢
+    write_atomic(&final_path, content.as_bytes())?;
+
+    // 路径变了（重命名）：写成功后才删旧文件 + 记 tombstone（删除传播给同步层）
     if final_path != abs && abs.exists() {
+        if let Ok(rel) = abs.strip_prefix(root) {
+            let _ = record_tombstone(root, &path_to_unix(rel));
+        }
         let _ = fs::remove_file(abs);
     }
-    fs::write(&final_path, content)?;
+    // 重建/覆盖了该路径：清除可能存在的 tombstone
+    if let Ok(rel) = final_path.strip_prefix(root) {
+        let _ = remove_tombstone(root, &path_to_unix(rel));
+    }
     Ok(final_path)
 }
 
@@ -499,7 +595,11 @@ pub fn create_prompt(root: &Path, category: &str, title: &str) -> io::Result<Pat
     };
     let fm = serialize_frontmatter(&meta);
     let content = format!("---\n{}\n---\n\n\n", fm);
-    fs::write(&path, content)?;
+    write_atomic(&path, content.as_bytes())?;
+    // 同名文件曾被删除又重建：清除 tombstone，避免同步层误删云端新文件
+    if let Ok(rel) = path.strip_prefix(root) {
+        let _ = remove_tombstone(root, &path_to_unix(rel));
+    }
     Ok(path)
 }
 
@@ -541,11 +641,18 @@ pub fn rename_prompt(
     let fm = serialize_frontmatter(&meta);
     let content = format!("---\n{}\n---\n\n{}\n", fm, body);
 
-    fs::write(&new_abs, &content)?;
+    write_atomic(&new_abs, &content.as_bytes())?;
 
-    // 如果路径变了，删除旧文件
+    // 路径变了：写成功后才删旧文件 + 记 tombstone（让同步层把云端旧路径也删掉）
     if new_abs != old_abs {
+        if let Ok(rel) = old_abs.strip_prefix(root) {
+            let _ = record_tombstone(root, &path_to_unix(rel));
+        }
         let _ = fs::remove_file(old_abs);
+    }
+    // 新路径曾被删除过：清除 tombstone
+    if let Ok(rel) = new_abs.strip_prefix(root) {
+        let _ = remove_tombstone(root, &path_to_unix(rel));
     }
 
     Ok(new_abs)
@@ -563,7 +670,9 @@ pub fn create_category(root: &Path, name: &str) -> io::Result<PathBuf> {
 }
 
 /// 重命名分类（优化3）：重命名文件夹，内部所有 .md 文件随之移动
-/// 返回受影响的 .md 文件新路径列表
+/// 合并分支（目标目录已存在）：同名文件不覆盖，改名为 {stem}-{n}.md 保留两份——
+/// 旧版直接 remove_file 覆盖，rename 一旦失败目标文件就先丢了。
+/// 移动成功的旧路径记 tombstone，让同步层把云端旧路径删掉。
 pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Result<()> {
     let safe_old = sanitize_filename::sanitize(old_name);
     let safe_new = sanitize_filename::sanitize(new_name);
@@ -580,29 +689,84 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
         ));
     }
 
-    // 目标已存在：合并（移动所有文件过去），否则重命名
+    // 移动前先收集旧目录里的 .md 相对路径（用于 tombstone）
+    let old_mds: Vec<String> = WalkDir::new(&old_dir)
+        .min_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().is_file()
+                && e.path().extension().and_then(|x| x.to_str()) == Some("md")
+        })
+        .filter_map(|e| {
+            e.path()
+                .strip_prefix(root)
+                .ok()
+                .map(|p| path_to_unix(p))
+        })
+        .collect();
+
+    // 目标已存在：合并（移动所有文件过去），否则整体重命名
+    let mut new_rels: Vec<String> = Vec::new();
     if new_dir.exists() {
         for entry in fs::read_dir(&old_dir)? {
             let entry = entry?;
             let from = entry.path();
-            let to = new_dir.join(entry.file_name());
+            let mut to = new_dir.join(entry.file_name());
             if from != to {
-                // 若目标已存在同名文件，覆盖
-                let _ = fs::remove_file(&to);
+                // 同名不覆盖：找带序号的空位
+                let file_name = entry.file_name();
+                let stem = Path::new(&file_name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("untitled")
+                    .to_string();
+                let ext = Path::new(&file_name)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("md")
+                    .to_string();
+                let mut n = 1;
+                while to.exists() {
+                    to = new_dir.join(format!("{stem}-{n}.{ext}"));
+                    n += 1;
+                }
                 fs::rename(&from, &to)?;
+                if let Ok(rel) = to.strip_prefix(root) {
+                    new_rels.push(path_to_unix(rel));
+                }
             }
         }
-        fs::remove_dir(&old_dir)?;
+        // 空目录删除失败不阻断（可能有残留隐藏文件）
+        let _ = fs::remove_dir(&old_dir);
     } else {
         fs::rename(&old_dir, &new_dir)?;
+        // 整体重命名：新路径 = 旧路径换目录前缀
+        for rel in &old_mds {
+            new_rels.push(rel.replacen(&format!("{safe_old}/"), &format!("{safe_new}/"), 1));
+        }
     }
+
+    // 旧路径全部记 tombstone（删除传播）；新路径清除 tombstone（防来回重命名后误删云端）
+    for rel in &old_mds {
+        let _ = record_tombstone(root, rel);
+    }
+    for rel in &new_rels {
+        let _ = remove_tombstone(root, rel);
+    }
+
     // 同步更新 .category-order.json 里的旧名为新名（若存在）
     let _ = rename_category_in_order(root, old_name, new_name);
     Ok(())
 }
 
-pub fn delete_prompt(abs: &Path) -> io::Result<()> {
-    fs::remove_file(abs)
+/// 删除 prompt：移入 .trash/（可恢复），并记 tombstone 让同步层传播删除。
+/// 旧版直接物理删除，用户无法找回。
+pub fn delete_prompt(root: &Path, abs: &Path) -> io::Result<()> {
+    if let Ok(rel) = abs.strip_prefix(root) {
+        let _ = record_tombstone(root, &path_to_unix(rel));
+    }
+    move_to_trash(root, abs)
 }
 
 /// 把路径分隔符统一为正斜杠（用于前端跨平台一致 id）
@@ -680,7 +844,7 @@ mod tests {
             copy_mode: "markdown".into(),
             body: "这是正文内容\n\n## 第二段\n\n- 列表项1\n- 列表项2".into(),
         };
-        let new_abs = save_prompt(&abs, &req).unwrap();
+        let new_abs = save_prompt(&dir, &abs, &req).unwrap();
 
         // 读回，验证 body 完整（用返回的新路径，可能因标题重命名）
         let content = read_prompt(&new_abs).unwrap();
@@ -713,7 +877,7 @@ mod tests {
                 copy_mode: "markdown".into(),
                 body: body.clone(),
             };
-            cur_abs = save_prompt(&cur_abs, &req).unwrap();
+            cur_abs = save_prompt(&dir, &cur_abs, &req).unwrap();
 
             let content = read_prompt(&cur_abs).unwrap();
             assert_eq!(content.meta.title, format!("标题{}", i));
@@ -861,7 +1025,7 @@ mod tests {
             copy_mode: "markdown".into(),
             body: "正文内容".into(),
         };
-        let new_abs = save_prompt(&abs, &req).unwrap();
+        let new_abs = save_prompt(&dir, &abs, &req).unwrap();
         let new_name = new_abs.file_name().unwrap().to_string_lossy().to_string();
 
         assert_eq!(new_name, "我的代码审查清单.md", "保存后文件名应为标题");
@@ -1040,6 +1204,122 @@ mod tests {
         let res = scan_prompts(&dir).unwrap();
         let names: Vec<_> = res.categories.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta"], "损坏文件应被忽略，回退字母序");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 原子写：目标文件内容完整，且不残留 .tmp 文件
+    #[test]
+    fn write_atomic_leaves_no_tmp_and_full_content() {
+        let dir = std::env::temp_dir().join("pp_test_atomic");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let target = dir.join("a.md");
+        write_atomic(&target, b"full content").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "full content");
+        assert!(!dir.join("a.tmp").exists(), ".tmp 残片不应存在");
+
+        // 覆盖写也完整
+        write_atomic(&target, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 数据安全：save_prompt 重命名后旧文件删除、新文件完整（先写后删顺序的回归验证）
+    #[test]
+    fn save_rename_keeps_new_file_complete() {
+        let dir = std::env::temp_dir().join("pp_test_save_rename");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let abs = create_prompt(&dir, "写作", "初始").unwrap();
+        let req = SaveRequest {
+            title: "重命名后的标题".into(),
+            copy_mode: "markdown".into(),
+            body: "重要内容不能丢".into(),
+        };
+        let new_abs = save_prompt(&dir, &abs, &req).unwrap();
+
+        assert!(new_abs.exists(), "新文件必须存在");
+        assert!(!abs.exists(), "旧文件应被删除");
+        let content = read_prompt(&new_abs).unwrap();
+        assert_eq!(content.body, "重要内容不能丢");
+        // 旧路径应记入 tombstone（删除传播）
+        let tombstones = load_tombstones(&dir);
+        let old_rel = path_to_unix(abs.strip_prefix(&dir).unwrap());
+        assert!(tombstones.contains_key(&old_rel), "旧路径应有 tombstone");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// delete_prompt：文件进 .trash 可恢复 + tombstone 记录
+    #[test]
+    fn delete_prompt_moves_to_trash_and_records_tombstone() {
+        let dir = std::env::temp_dir().join("pp_test_delete_trash");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let abs = create_prompt(&dir, "写作", "要删除的").unwrap();
+        let rel = path_to_unix(abs.strip_prefix(&dir).unwrap());
+        delete_prompt(&dir, &abs).unwrap();
+
+        assert!(!abs.exists(), "原位置文件应消失");
+        let trash = dir.join(TRASH_DIR);
+        assert!(trash.exists(), ".trash 目录应存在");
+        let count = std::fs::read_dir(&trash).unwrap().count();
+        assert_eq!(count, 1, ".trash 里应有 1 个备份");
+        assert!(load_tombstones(&dir).contains_key(&rel), "应有 tombstone");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// rename_category 合并分支：同名文件不覆盖，改名保留两份
+    #[test]
+    fn rename_category_merge_does_not_overwrite() {
+        let dir = std::env::temp_dir().join("pp_test_rename_merge");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 两个分类下各放一个同名文件，内容不同
+        std::fs::create_dir_all(dir.join("旧分类")).unwrap();
+        std::fs::create_dir_all(dir.join("新分类")).unwrap();
+        std::fs::write(dir.join("旧分类").join("同名.md"), "---\ntitle: 旧版本\n---\n\n旧内容").unwrap();
+        std::fs::write(dir.join("新分类").join("同名.md"), "---\ntitle: 新版本\n---\n\n新内容").unwrap();
+
+        rename_category(&dir, "旧分类", "新分类").unwrap();
+
+        // 两个文件都在：原名 + 带序号名
+        let new_dir = dir.join("新分类");
+        assert!(new_dir.join("同名.md").exists(), "目标原文件应保留");
+        let renamed_exists = std::fs::read_dir(&new_dir)
+            .unwrap()
+            .any(|e| e.unwrap().file_name().to_string_lossy().starts_with("同名-"));
+        assert!(renamed_exists, "移入的同名文件应改名为带序号形式");
+
+        // 内容都完好（没有互相覆盖）
+        let kept = std::fs::read_to_string(new_dir.join("同名.md")).unwrap();
+        assert!(kept.contains("新内容"), "目标文件内容不应被覆盖");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// tombstone 读写 round-trip + remove
+    #[test]
+    fn tombstone_roundtrip() {
+        let dir = std::env::temp_dir().join("pp_test_tombstone");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("a.md"), "内容").unwrap();
+        record_tombstone(&dir, "a.md").unwrap();
+        let map = load_tombstones(&dir);
+        assert!(map.contains_key("a.md"));
+        assert_eq!(map["a.md"].size, 6); // "内容" = 6 字节 UTF-8
+
+        remove_tombstone(&dir, "a.md").unwrap();
+        assert!(load_tombstones(&dir).is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
