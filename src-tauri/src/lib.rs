@@ -931,18 +931,22 @@ fn is_allowed_external_url(url: &str) -> bool {
 /// 1. 路径已存在 → canonicalize（解析符号链接/`..`）后校验前缀
 /// 2. 路径不存在（新建文件场景）→ 手工展开 `.`/`..`（不依赖文件系统）后校验前缀
 ///
+/// 注意顺序：root 先规范化到 canonical 形式，再 join rel。
+/// 若反过来（先 join 再分别规范化），当 rel 目标不存在而 root 存在时，
+/// 两边会拿到不同形式（macOS /var vs /private/var、Windows 短文件名），
+/// 前缀校验会误判合法路径为越界——CI 上实测踩过。
+///
 /// 任何逃逸都返回 Err——旧版校验失败会回退到未校验的路径，等于没有防护：
 /// `read_prompt("../../../etc/passwd")` 可读 root 外文件，delete 可删任意文件。
 fn resolve_abs(root: &std::path::Path, rel: &str) -> Result<PathBuf, String> {
-    let joined = root.join(rel);
-    let normalized = match std::fs::canonicalize(&joined) {
-        Ok(canon) => strip_unc_prefix(&canon),
-        Err(_) => normalize_lexical(&joined),
-    };
-    // root 也规范化到同一形式，两边才能比前缀
     let root_norm = match std::fs::canonicalize(root) {
         Ok(canon) => strip_unc_prefix(&canon),
         Err(_) => normalize_lexical(root),
+    };
+    let joined = root_norm.join(rel);
+    let normalized = match std::fs::canonicalize(&joined) {
+        Ok(canon) => strip_unc_prefix(&canon),
+        Err(_) => normalize_lexical(&joined),
     };
     if normalized.starts_with(&root_norm) {
         Ok(normalized)
@@ -1315,7 +1319,11 @@ mod tests {
         std::fs::create_dir_all(root.join("写作")).unwrap();
 
         let ok = resolve_abs(&root, "写作/a.md").unwrap();
-        assert!(ok.starts_with(&root), "正常相对路径应解析到 root 内");
+        // 返回值是 canonical 形式：macOS 上 temp_dir 是 /var（/private/var 的符号链接），
+        // 不能直接和原始 root 比前缀，要和 canonical 后的 root 比
+        let root_canon = strip_unc_prefix(&std::fs::canonicalize(&root).unwrap());
+        assert!(ok.starts_with(&root_canon), "正常相对路径应解析到 root 内");
+        assert!(ok.ends_with(Path::new("写作").join("a.md")));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
