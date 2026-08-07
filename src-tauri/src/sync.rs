@@ -1,13 +1,18 @@
 // 坚果云 WebDAV 同步模块
 //
-// 架构：本地缓存 + 后台同步。
+// 架构：本地缓存 + 手动双向同步（用户显式点上传/下载）。
 // - 所有 UI 读写仍走本地缓存（store.rs），保证瞬间响应
 // - 本模块负责本地缓存 ↔ 坚果云的双向同步
 //
-// 同步策略（规避坚果云每30分钟600次的速率限制）：
-// - 启动时：PROPFIND 远程目录树 → 拉取变更/新增 → 删除远程已删的本地文件
-// - 保存/新建/删除后：异步推送单个文件（PUT/DELETE）
-// - 重命名/移动：远程 MOVE
+// 同步语义（2026-08 对账后）：
+// - 上传（push）：本地为准。上传变更文件 + 删除传播
+//   （.sync_deleted.json 里的 tombstone 逐条发远程 DELETE）
+// - 下载（pull）：远程为准，但尊重本地删除。
+//   tombstone 命中且远程大小未变 → 跳过（防"删了又复活"）；
+//   远程大小变了 → 视为远程新版本，下载。覆盖本地文件前先备份到 .trash/
+// - 排序文件（.order.json / .category-order.json）双向都同步
+//
+// 速率限制：坚果云约 600 次/30 分钟，本工具规模（几十个文件）够用。
 
 use reqwest_dav::types::list_cmd::ListEntity;
 use reqwest_dav::{Auth, Client, ClientBuilder, Depth, Error as DavError};
@@ -62,15 +67,17 @@ pub async fn test_connection(cfg: &CloudConfig) -> Result<(), String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
     let root = sanitize_remote_path(&cfg.remote_root);
     client
-        .list(&format!("/{root}/"), Depth::Number(0))
+        .list(&format!("/{}/", encode_segments(&root)), Depth::Number(0))
         .await
         .map_err(|e| format!("连接失败，请检查账号/应用密码/路径: {e}"))?;
     Ok(())
 }
 
 /// 全量拉取：把远程的文件同步到本地缓存
-/// 策略：远程为准。远程有的下载，远程没有的本地 .md 备份到 .trash 后删除。
-/// 关键修复：排除 .trash 目录，避免无限循环；只处理真实 prompt 文件。
+/// 策略：远程为准，但尊重本地删除（tombstone）。
+/// - 远程有、本地无 → 下载；但 tombstone 命中且远程大小未变 → 跳过（防复活）
+/// - 本地有、大小不同 → 下载覆盖，覆盖前把本地旧文件备份到 .trash/
+/// - 远程没有、本地有 → 备份到 .trash 后删除（clean_local_extra）
 pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
     let root = sanitize_remote_path(&cfg.remote_root);
@@ -83,6 +90,9 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
     let mut skipped = 0u32;
     let mut errors: Vec<String> = Vec::new();
 
+    // 本地删除记录：命中且远程大小未变的不下载（防复活）
+    let mut tombstones = crate::store::load_tombstones(local_dir);
+
     // 关键修复：坚果云 WebDAV 不支持 Depth::Infinity（静默降级为只返回一层），
     // 必须用 Depth::Number(1) 逐层递归遍历（与 Obsidian Remotely Save / rclone 同策略）。
     // walk_remote 返回 (文件列表, 错误列表)，文件已是去 .trash、解码后的相对路径。
@@ -92,13 +102,33 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
         remote_files.insert(file.rel.clone());
 
         let local_path = local_dir.join(&file.rel);
-        // 内容校对：用文件大小 + 存在性判断是否需要下载
-        let need_download = match std::fs::metadata(&local_path) {
-            Ok(meta) => meta.len() as i64 != file.content_length,
-            Err(_) => true, // 本地不存在
+        let local_size = std::fs::metadata(&local_path).ok().map(|m| m.len() as i64);
+
+        // tombstone 判定：本地曾主动删除该文件
+        if let Some(tomb) = tombstones.get(&file.rel) {
+            if tomb.size as i64 == file.content_length {
+                // 远程还是删除时的那个版本 → 不复活，跳过
+                skipped += 1;
+                continue;
+            }
+            // 远程内容变了（其它设备推了新版本）→ 视为新内容，下载并清除 tombstone
+            let _ = crate::store::remove_tombstone(local_dir, &file.rel);
+            tombstones.remove(&file.rel);
+        }
+
+        // 内容校对：大小不同或本地不存在才下载。
+        // 注意：同字节数但内容不同（改一字删一字）无法检出，属已知取舍——
+        // 完整解决需要远程 ETag/mtime 指纹，坚果云对两者的支持都不稳定。
+        let need_download = match local_size {
+            Some(size) => size != file.content_length,
+            None => true, // 本地不存在
         };
 
         if need_download {
+            // 覆盖前先备份本地旧文件（本地可能有未上传的修改）
+            if local_path.exists() {
+                let _ = crate::store::move_to_trash(local_dir, &local_path);
+            }
             if let Err(e) = download_file(&client, &root, &file.rel, &local_path).await {
                 errors.push(format!("{}: {e}", file.rel));
                 continue;
@@ -125,6 +155,7 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
         skipped,
         deleted,
         uploaded: 0,
+        deleted_remote: 0,
         errors,
     })
 }
@@ -135,6 +166,8 @@ pub struct SyncReport {
     pub skipped: u32,
     pub deleted: u32,
     pub uploaded: u32,
+    /// push 时传播到云端的删除数（tombstone → 远程 DELETE）
+    pub deleted_remote: u32,
     pub errors: Vec<String>,
 }
 
@@ -164,11 +197,11 @@ async fn walk_remote(client: &Client, root: &str, errors: &mut Vec<String>) -> V
     queue.push_back(String::new());
 
     while let Some(rel_dir) = queue.pop_front() {
-        // 该层的请求路径：根用 "/{root}/"，子目录用 "/{root}/{rel_dir}/"
+        // 该层的请求路径：根用 "/{root}/"，子目录用 "/{root}/{rel_dir}/"（逐段 URL 编码）
         let req_path = if rel_dir.is_empty() {
-            format!("/{root}/")
+            format!("/{}/", encode_segments(&root))
         } else {
-            format!("/{root}/{rel_dir}/")
+            format!("/{}/{}/", encode_segments(&root), encode_segments(&rel_dir))
         };
 
         let entities = match client.list(&req_path, Depth::Number(1)).await {
@@ -221,19 +254,26 @@ async fn walk_remote(client: &Client, root: &str, errors: &mut Vec<String>) -> V
     files
 }
 
-/// 判断相对路径是否落在 .trash 或任意隐藏目录下（不参与同步）
-/// 例：".trash/x.md" / "a/.trash/b.md" / ".hidden/y.md" 均返回 true
+/// 判断相对路径是否落在 .trash 或任意隐藏目录下（不参与同步）。
+/// 例外放行：排序文件 .order.json / .category-order.json 要双向同步——
+/// 旧版把 `.` 开头全部过滤，导致排序文件上传后任何设备都拉不回来。
 fn is_trash_or_hidden_rel(rel: &str) -> bool {
+    // 根目录下的排序白名单文件：放行
+    if rel == crate::store::ORDER_FILE || rel == crate::store::CATEGORY_ORDER_FILE {
+        return false;
+    }
     rel.split('/')
         .any(|seg| seg == ".trash" || seg.starts_with('.'))
 }
 
-/// 全量上传：把本地所有文件推送到远程（只增不删，不删除云端多余文件）
+/// 全量上传：本地为准——上传变更文件 + 删除传播。
+/// 1. 上传：本地 .md / .order.json / .category-order.json 与上次哈希比对，变了才 PUT
+/// 2. 删除传播：.sync_deleted.json 里的 tombstone 逐条发远程 DELETE，
+///    成功（或云端本就 404）后从清单移除
 /// 内容校对（杜绝无限制重复上传）：
 ///   上传前算本地内容哈希(FNV-1a)，与 .sync_meta.json 里记录的「上次上传哈希」比对：
 ///   - 哈希相同 → 内容未变 → 跳过
 ///   - 哈希不同 或 无记录 → 上传，上传成功后更新记录
-///     这完全不依赖服务端 ETag 算法，100% 由客户端掌控，准确可靠。
 pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
     let root = sanitize_remote_path(&cfg.remote_root);
@@ -246,16 +286,19 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
 
     let mut uploaded = 0u32;
     let mut skipped = 0u32;
+    let mut deleted_remote = 0u32;
     let mut errors: Vec<String> = Vec::new();
 
-    // 遍历本地所有 .md 文件 + .order.json
+    // 遍历本地所有 .md 文件 + 两个排序文件
     for entry in walkdir::WalkDir::new(local_dir)
         .min_depth(1)
         .into_iter()
         .filter_entry(|e| {
-            // 排除 .trash / .sync_meta.json 自身
+            // 排除 .trash / 同步元数据自身（tombstone 清单是本地状态，不上传）
             let name = e.file_name().to_string_lossy();
-            name != ".trash" && name != ".sync_meta.json"
+            name != crate::store::TRASH_DIR
+                && name != ".sync_meta.json"
+                && name != crate::store::TOMBSTONE_FILE
         })
         .filter_map(|e| e.ok())
     {
@@ -270,7 +313,7 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
             .unwrap_or_default();
 
         let is_md = ext == Some("md");
-        let is_order = name == ".order.json";
+        let is_order = name == crate::store::ORDER_FILE || name == crate::store::CATEGORY_ORDER_FILE;
         if !is_md && !is_order {
             continue;
         }
@@ -305,7 +348,7 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
         }
 
         match client
-            .put(&format!("/{root}/{rel_unix}"), local_content)
+            .put(&remote_url(&root, &rel_unix), local_content)
             .await
         {
             Ok(()) => {
@@ -317,12 +360,39 @@ pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<S
         }
     }
 
+    // 删除传播：tombstone 清单逐条发远程 DELETE
+    let mut tombstones = crate::store::load_tombstones(local_dir);
+    if !tombstones.is_empty() {
+        let rels: Vec<String> = tombstones.keys().cloned().collect();
+        for rel in rels {
+            match client.delete(&remote_url(&root, &rel)).await {
+                Ok(()) => {
+                    deleted_remote += 1;
+                    tombstones.remove(&rel);
+                    sync_meta.remove(&rel);
+                }
+                Err(e) => {
+                    // 云端本就没有该文件（从未上传/已被其它设备删）→ 目的已达，清除记录
+                    if e.to_string().contains("404") || e.to_string().contains("Not Found") {
+                        tombstones.remove(&rel);
+                        sync_meta.remove(&rel);
+                    } else {
+                        // 网络/权限错误：保留 tombstone，下次 push 重试
+                        errors.push(format!("{rel}（删除传播）: {e}"));
+                    }
+                }
+            }
+        }
+        let _ = crate::store::save_tombstones(local_dir, &tombstones);
+    }
+
     // 持久化更新后的记录
     save_sync_meta(local_dir, &sync_meta);
 
     Ok(SyncReport {
         uploaded,
         skipped,
+        deleted_remote,
         errors,
         ..Default::default()
     })
@@ -337,11 +407,11 @@ fn load_sync_meta(local_dir: &Path) -> std::collections::HashMap<String, u64> {
         .unwrap_or_default()
 }
 
-/// 写入 .sync_meta.json
+/// 写入 .sync_meta.json（原子写，防同步中断留下半截 JSON）
 fn save_sync_meta(local_dir: &Path, meta: &std::collections::HashMap<String, u64>) {
     let path = local_dir.join(".sync_meta.json");
     if let Ok(json) = serde_json::to_string_pretty(meta) {
-        let _ = std::fs::write(path, json);
+        let _ = crate::store::write_atomic(&path, json.as_bytes());
     }
 }
 
@@ -362,6 +432,35 @@ fn fnv1a_hash(data: &[u8]) -> u64 {
 /// 规范化远程路径：去首尾斜杠
 fn sanitize_remote_path(s: &str) -> String {
     s.trim_matches('/').to_string()
+}
+
+/// percent-encode 单段路径：保留 RFC 3986 unreserved（A-Za-z0-9 - _ . ~），
+/// 其余逐字节转 %XX。与 urlencoding_decode 对称。
+/// 标题里的空格、#、?、% 等字符不编码会在 URL 里产生歧义（# 被当 fragment 截断）。
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// 对多段路径逐段编码（保留 / 分隔符）
+fn encode_segments(path: &str) -> String {
+    path.split('/')
+        .map(urlencoding_encode)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// 拼接远程文件 URL：root 和 rel 都逐段编码
+fn remote_url(root: &str, rel: &str) -> String {
+    format!("/{}/{}", encode_segments(root), encode_segments(rel))
 }
 
 /// 紧凑时间戳，用于备份文件名（如 20260628T153000）
@@ -440,14 +539,14 @@ async fn download_file(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let resp = client
-        .get(&format!("/{root}/{rel}"))
+        .get(&remote_url(root, rel))
         .await
         .map_err(|e| format!("GET 失败: {e}"))?;
     let bytes = resp
         .bytes()
         .await
         .map_err(|e| format!("读取响应失败: {e}"))?;
-    std::fs::write(local_path, &bytes).map_err(|e| e.to_string())?;
+    crate::store::write_atomic(local_path, &bytes).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -525,12 +624,13 @@ async fn ensure_remote_dirs(client: &Client, root: &str, rel_unix: &str) -> Resu
         if part.is_empty() {
             continue;
         }
+        // 逐级 mkcol（忽略"已存在"错误）；目录名逐段 URL 编码
         acc = if acc.is_empty() {
             part.to_string()
         } else {
             format!("{acc}/{part}")
         };
-        let _ = client.mkcol(&format!("/{root}/{acc}")).await;
+        let _ = client.mkcol(&remote_url(&root, &acc)).await;
     }
     Ok(())
 }
@@ -659,11 +759,45 @@ mod tests {
         assert!(is_trash_or_hidden_rel("a/.hidden/b.md"));
         // 根目录下的隐藏文件
         assert!(is_trash_or_hidden_rel(".sync_meta.json"));
+        assert!(is_trash_or_hidden_rel(".sync_deleted.json"));
 
         // 应保留（false）：正常分类路径
         assert!(!is_trash_or_hidden_rel("写作/a.md"));
         assert!(!is_trash_or_hidden_rel("编程/子目录/b.md"));
         assert!(!is_trash_or_hidden_rel("root.md"));
         assert!(!is_trash_or_hidden_rel("web服务/html-read.md"));
+
+        // 排序白名单：要双向同步，不能当隐藏文件过滤掉
+        assert!(!is_trash_or_hidden_rel(".order.json"));
+        assert!(!is_trash_or_hidden_rel(".category-order.json"));
+    }
+
+    /// URL 编码：特殊字符转义 + 与 decode 对称 round-trip
+    #[test]
+    fn urlencoding_encode_decode_roundtrip() {
+        // 特殊字符必须编码
+        assert_eq!(urlencoding_encode("a b#c?d%e"), "a%20b%23c%3Fd%25e");
+        // unreserved 不编码
+        assert_eq!(urlencoding_encode("a-b_c.d~e"), "a-b_c.d~e");
+        // 中文按 UTF-8 字节编码
+        assert_eq!(urlencoding_encode("写"), "%E5%86%99");
+
+        // 对称性：encode 后 decode 必须还原
+        let cases = ["写作/a b.md", "编程/#1 清单.md", "100%.md", "web服务/html-read.md"];
+        for c in cases {
+            let encoded = urlencoding_encode(c);
+            let decoded = urlencoding_decode(&encoded).unwrap();
+            assert_eq!(decoded, c, "round-trip 失败: {c}");
+        }
+    }
+
+    /// remote_url：root 和 rel 都编码，保留路径分隔
+    #[test]
+    fn remote_url_encodes_all_segments() {
+        assert_eq!(remote_url("PromptPocket", "写作/a.md"), "/PromptPocket/%E5%86%99%E4%BD%9C/a.md");
+        assert_eq!(
+            remote_url("My Root", "笔记/#1.md"),
+            "/My%20Root/%E7%AC%94%E8%AE%B0/%231.md"
+        );
     }
 }

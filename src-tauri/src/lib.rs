@@ -815,6 +815,9 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     match result {
         Ok(report) => {
             let mut msg = format!("上传完成：共 {} 个文件", report.uploaded);
+            if report.deleted_remote > 0 {
+                msg.push_str(&format!("，云端删除 {}", report.deleted_remote));
+            }
             if !report.errors.is_empty() {
                 msg.push_str(&format!("，{} 个失败", report.errors.len()));
                 *state.last_error.lock().map_err(|e| e.to_string())? =
