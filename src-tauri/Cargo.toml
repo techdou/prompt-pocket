@@ -27,8 +27,6 @@ serde_yaml = "0.9"
 walkdir = "2"
 # 文件名非法字符清理
 sanitize-filename = "0.5"
-# 系统默认数据目录
-dirs = "5"
 # 坚果云 WebDAV 同步
 reqwest_dav = "0.2"
 reqwest = "0.12"

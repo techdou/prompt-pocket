@@ -74,10 +74,14 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # 静态检查质量门：svelte-check + tsc，0 错误才放行后续步骤
+      - name: Type check (svelte-check + tsc)
+        run: npm run check
+
       # 前端单测：Node 内置测试运行器跑 src/lib/*.test.mjs
       # （i18n / markdown / reorder / api 四个套件，作者在 Mac 上用同命令跑过）
       - name: Run frontend tests (node:test)
-        run: node --experimental-strip-types --test src/lib/*.test.mjs
+        run: npm test
 
       # Rust 单元测试：store.rs / sync.rs / lib.rs
       # 三平台真实验证"代码层面跨平台适配"是否成立

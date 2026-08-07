@@ -199,9 +199,9 @@ async fn walk_remote(client: &Client, root: &str, errors: &mut Vec<String>) -> V
     while let Some(rel_dir) = queue.pop_front() {
         // 该层的请求路径：根用 "/{root}/"，子目录用 "/{root}/{rel_dir}/"（逐段 URL 编码）
         let req_path = if rel_dir.is_empty() {
-            format!("/{}/", encode_segments(&root))
+            format!("/{}/", encode_segments(root))
         } else {
-            format!("/{}/{}/", encode_segments(&root), encode_segments(&rel_dir))
+            format!("/{}/{}/", encode_segments(root), encode_segments(&rel_dir))
         };
 
         let entities = match client.list(&req_path, Depth::Number(1)).await {
@@ -270,6 +270,7 @@ fn is_trash_or_hidden_rel(rel: &str) -> bool {
 /// 1. 上传：本地 .md / .order.json / .category-order.json 与上次哈希比对，变了才 PUT
 /// 2. 删除传播：.sync_deleted.json 里的 tombstone 逐条发远程 DELETE，
 ///    成功（或云端本就 404）后从清单移除
+///
 /// 内容校对（杜绝无限制重复上传）：
 ///   上传前算本地内容哈希(FNV-1a)，与 .sync_meta.json 里记录的「上次上传哈希」比对：
 ///   - 哈希相同 → 内容未变 → 跳过
@@ -630,7 +631,7 @@ async fn ensure_remote_dirs(client: &Client, root: &str, rel_unix: &str) -> Resu
         } else {
             format!("{acc}/{part}")
         };
-        let _ = client.mkcol(&remote_url(&root, &acc)).await;
+        let _ = client.mkcol(&remote_url(root, &acc)).await;
     }
     Ok(())
 }

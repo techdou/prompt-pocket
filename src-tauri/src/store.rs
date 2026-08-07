@@ -197,6 +197,7 @@ pub fn move_to_trash(root: &Path, abs: &Path) -> io::Result<()> {
 /// .sync_deleted.json: { 相对路径(unix): { size, deletedAt } }
 /// - push：对清单里的路径发远程 DELETE（本地删除传播到云端）
 /// - pull：远程文件命中且 size 相同 → 跳过（防复活）；size 不同 → 远程有新版本，下载
+///
 /// ────────────────────────────────────────────────
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tombstone {
@@ -661,7 +662,7 @@ pub fn rename_prompt(
     let fm = serialize_frontmatter(&meta);
     let content = format!("---\n{}\n---\n\n{}\n", fm, body);
 
-    write_atomic(&new_abs, &content.as_bytes())?;
+    write_atomic(&new_abs, content.as_bytes())?;
 
     // 路径变了：写成功后才删旧文件 + 记 tombstone（让同步层把云端旧路径也删掉）
     if new_abs != old_abs {
@@ -722,7 +723,7 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
             e.path()
                 .strip_prefix(root)
                 .ok()
-                .map(|p| path_to_unix(p))
+                .map(path_to_unix)
         })
         .collect();
 

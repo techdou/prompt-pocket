@@ -153,7 +153,7 @@ updated: 2026-06-27T00:00:00Z
 
 前置依赖：
 
-- Node.js 18+
+- Node.js 22+（前端单测依赖 `--experimental-strip-types`）
 - Rust 1.77+
 - Tauri v2 平台工具链：<https://v2.tauri.app/start/prerequisites/>
 
@@ -166,7 +166,8 @@ npm run tauri:build
 ### 验证
 
 ```bash
-node --experimental-strip-types --test src/lib/*.test.mjs
+npm run check
+npm test
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
@@ -324,7 +325,7 @@ Sync rules:
 
 Prerequisites:
 
-- Node.js 18+
+- Node.js 22+ (frontend unit tests rely on `--experimental-strip-types`)
 - Rust 1.77+
 - Tauri v2 platform prerequisites: <https://v2.tauri.app/start/prerequisites/>
 
@@ -337,7 +338,8 @@ npm run tauri:build
 ### Verification
 
 ```bash
-node --experimental-strip-types --test src/lib/*.test.mjs
+npm run check
+npm test
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

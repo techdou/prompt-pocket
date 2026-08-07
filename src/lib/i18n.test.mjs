@@ -65,4 +65,18 @@ describe("i18n language helpers", () => {
       'Delete "Example"? The file will be moved to the .trash backup folder.',
     );
   });
+
+  it("falls back to the raw key when the key is missing in both languages", () => {
+    // 不存在的 key：两种语言表都查不到 → 原样返回 key 本身，不抛错、不返回 undefined
+    assert.equal(translate("zh", "app.__missing__"), "app.__missing__");
+    assert.equal(translate("en", "app.__missing__"), "app.__missing__");
+  });
+
+  it("keeps unmatched placeholders as-is when values are missing", () => {
+    // 插值缺参：{title} 没有对应值 → 占位符原样保留，方便排查文案漏配
+    assert.equal(
+      translate("en", "app.deleteConfirm"),
+      'Delete "{title}"? The file will be moved to the .trash backup folder.',
+    );
+  });
 });

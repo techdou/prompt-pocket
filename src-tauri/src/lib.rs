@@ -930,6 +930,7 @@ fn is_allowed_external_url(url: &str) -> bool {
 /// 两条防线：
 /// 1. 路径已存在 → canonicalize（解析符号链接/`..`）后校验前缀
 /// 2. 路径不存在（新建文件场景）→ 手工展开 `.`/`..`（不依赖文件系统）后校验前缀
+///
 /// 任何逃逸都返回 Err——旧版校验失败会回退到未校验的路径，等于没有防护：
 /// `read_prompt("../../../etc/passwd")` 可读 root 外文件，delete 可删任意文件。
 fn resolve_abs(root: &std::path::Path, rel: &str) -> Result<PathBuf, String> {
