@@ -43,7 +43,7 @@ Prompt Pocket 是一个轻量级桌面提示词管理工具。它用 `Ctrl+Alt+P
 | 全局秒唤 | `Ctrl+Alt+P` 从任意应用唤出或隐藏 |
 | 智能复制 / 粘贴 | `Enter` 写入剪贴板；唤出前焦点在输入框时自动粘贴 |
 | Markdown 存储 | 一条提示词一个 `.md` 文件，文件夹就是分类 |
-| 富 Markdown 预览 | 支持 GFM 表格、任务列表、代码块；Mermaid、KaTeX、highlight.js 按需加载 |
+| 富 Markdown 预览 | 支持 GFM 表格、任务列表、代码块；Mermaid、KaTeX、highlight.js 本地内置按需加载 |
 | 提示词排序 | 在单个分类里拖动列表项手柄，顺序写入 `.order.json` |
 | 分类排序 | 横向拖动分类标签手柄，顺序写入 `.category-order.json` |
 | 手动 WebDAV 同步 | 通过坚果云上传 / 下载，避免自动同步误覆盖 |
@@ -136,9 +136,9 @@ updated: 2026-06-27T00:00:00Z
 ### Markdown 预览
 
 - 离线内置 GitHub Flavored Markdown（GFM），包括表格、引用、删除线、任务列表、代码块。
-- 联网增强按需加载 Mermaid、KaTeX、highlight.js。
-- raw HTML 一律转义显示，危险链接会替换为 `#`。
-- CDN 加载失败时降级显示源码，不影响核心阅读和复制。
+- Mermaid、KaTeX、highlight.js 全部本地内置、按需加载，无网络也可用，无 CDN 依赖。
+- raw HTML 一律转义显示，危险协议的链接/图片会被拦截。
+- 渲染失败时降级显示源码，不影响核心阅读和复制。
 
 ### 坚果云同步
 
@@ -150,9 +150,9 @@ updated: 2026-06-27T00:00:00Z
 
 同步规则：
 
-- 上传：把本地提示词推送到云端，不删除云端已有文件。
-- 下载：以云端为准拉取到本地，并清理云端已删除的本地文件。
-- `.trash`、隐藏目录和 `.sync_meta.json` 会被过滤。
+- 上传：以本地为准推送变更；本地删除过的文件会同步删除云端对应文件（删除传播）。
+- 下载：以云端为准拉取到本地；本地已删除的文件不会被云端"复活"，覆盖本地前旧文件自动备份到 `.trash/`。
+- `.trash`、隐藏文件和 `.sync_meta.json` 会被过滤；`.order.json` / `.category-order.json` 会随同步传输。
 - 应用密码保存到系统凭据库；旧版本明文 JSON 中的密码会在读取时迁移出去。
 
 ### 开发
@@ -221,7 +221,7 @@ python -m http.server 8010
 | Global launcher | Open or hide Prompt Pocket from anywhere with `Ctrl+Alt+P` |
 | Smart copy / paste | Press `Enter` to copy; automatically paste back when launched from a text input |
 | Markdown storage | One prompt per `.md` file; folders are categories |
-| Rich Markdown preview | GFM tables, task lists, code blocks; Mermaid, KaTeX, and highlight.js load on demand |
+| Rich Markdown preview | GFM tables, task lists, code blocks; Mermaid, KaTeX, and highlight.js bundled locally, lazy-loaded |
 | Prompt ordering | Drag prompt handles within one category; order is saved to `.order.json` |
 | Category ordering | Drag category tabs horizontally; order is saved to `.category-order.json` |
 | Manual WebDAV sync | Upload / download through Jianguoyun WebDAV to avoid accidental overwrite |
@@ -314,9 +314,9 @@ Rewrite the following text to be concise and professional:
 ### Markdown Preview
 
 - GitHub Flavored Markdown works offline, including tables, quotes, strikethrough, task lists, and code blocks.
-- Mermaid, KaTeX, and highlight.js are loaded from CDN only when needed.
-- Raw HTML is escaped, and unsafe links are replaced with `#`.
-- If CDN loading fails, content falls back to readable source text.
+- Mermaid, KaTeX, and highlight.js are bundled locally and lazy-loaded — fully offline, no CDN dependency.
+- Raw HTML is escaped, and links/images with unsafe protocols are blocked.
+- Rendering failures fall back to readable source text.
 
 ### Jianguoyun Sync
 
@@ -328,9 +328,9 @@ Rewrite the following text to be concise and professional:
 
 Sync rules:
 
-- Upload pushes local prompts to remote and does not delete existing remote files.
-- Download treats remote as the source of truth and cleans local files deleted remotely.
-- `.trash`, hidden directories, and `.sync_meta.json` are ignored.
+- Upload treats local as the source of truth; files deleted locally are also deleted remotely (deletion propagation).
+- Download treats remote as the source of truth; locally deleted files are not resurrected, and any local file about to be overwritten is backed up to `.trash/` first.
+- `.trash`, hidden files, and `.sync_meta.json` are ignored; `.order.json` / `.category-order.json` travel with sync.
 - App passwords are stored in the system credential store. Legacy plaintext JSON passwords are migrated on read.
 
 ### Development

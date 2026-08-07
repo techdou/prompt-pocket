@@ -1,17 +1,35 @@
+# ── 依赖与构建产物 ──
 node_modules/
 dist/
-.DS_Store
 *.log
+.DS_Store
 
 # Tauri / Rust
 src-tauri/target/
 src-tauri/gen/
 release-assets/
 
-# 编辑器
+# ── 私密信息与密钥（绝不入库）──
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+secrets.*
+
+# ── 开发工具配置目录（不上传）──
 .vscode/
 .idea/
+.vs/
 *.iml
+.zcode/
+.codex-run/
+.omx/
+.claude/
+.agents/
 
-# 本地数据（开发时若放仓库内）
+# ── 内部文档（开发状态/审查记录不纳入版本控制）──
+REVIEW-*.md
+
+# ── 本地数据（开发时若放仓库内）──
 PromptPocket-Data/
