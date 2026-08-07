@@ -6,6 +6,7 @@
   } from "./reorder";
   import type { CategoryCount } from "./types";
   import { createTranslator, type Translator } from "./i18n";
+  import { autofocus } from "./actions";
 
   const fallbackT = createTranslator("zh");
 
@@ -17,6 +18,8 @@
     onrename,
     oncontextmenu,
     onreorder,
+    ondragstart,
+    ondragend,
     t = fallbackT,
   }: {
     categories: CategoryCount[];
@@ -27,6 +30,9 @@
     oncontextmenu: (name: string, x: number, y: number) => void;
     /** 拖拽结束回调：把 fromIndex 的分类移到 toIndex 前 */
     onreorder: (fromIndex: number, toIndex: number) => void;
+    /** 拖拽手势开始/结束（父组件借此挂起 refresh，防手势被重绘打断） */
+    ondragstart?: () => void;
+    ondragend?: () => void;
     t?: Translator;
   } = $props();
 
@@ -70,6 +76,7 @@
     dragFromIndex = index;
     isDragging = true;
     updateDropTarget(e.clientX, e.clientY);
+    ondragstart?.();
 
     window.addEventListener("pointermove", onWindowPointerMove, { passive: false });
     window.addEventListener("pointerup", onWindowPointerUp, { passive: false });
@@ -146,12 +153,14 @@
     window.removeEventListener("pointermove", onWindowPointerMove);
     window.removeEventListener("pointerup", onWindowPointerUp);
     window.removeEventListener("pointercancel", onWindowPointerCancel);
+    const wasDragging = isDragging;
     activePointerId = -1;
     isDragging = false;
     dragFromIndex = -1;
     dropToIndex = -1;
     dropLineIndex = -1;
     dropLineBefore = true;
+    if (wasDragging) ondragend?.();
   }
 
   function onTabClick(e: MouseEvent, name: string) {
@@ -227,6 +236,7 @@
       <input
         type="text"
         bind:value={newName}
+        use:autofocus
         placeholder={t("category.namePlaceholder")}
         onkeydown={(e) => {
           if (e.key === "Enter") submitCreate();

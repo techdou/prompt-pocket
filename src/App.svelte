@@ -27,6 +27,7 @@
   import Editor from "./lib/Editor.svelte";
   import Settings from "./lib/Settings.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
+  import { autofocus } from "./lib/actions";
   import {
     canReorderPromptList,
     getReorderCategory,
@@ -34,6 +35,7 @@
     moveCategoryOrder,
     movePathOrder,
   } from "./lib/reorder";
+  import type { ReorderDisabledReason } from "./lib/reorder";
   import {
     createTranslator,
     getStoredLanguage,
@@ -170,17 +172,20 @@
     changeLanguage(nextLanguage(language));
   }
 
-  function translateReorderDisabledReason(reason: string, lang: Language): string {
+  // reason code → i18n key 的直接映射（reorder.ts 不再返回中文文案）
+  function translateReorderDisabledReason(
+    reason: ReorderDisabledReason,
+    lang: Language,
+  ): string {
+    if (!reason) return "";
     const translateFor = createTranslator(lang);
     switch (reason) {
-      case "至少需要 2 条提示词才能排序":
+      case "needTwo":
         return translateFor("reorder.needTwoPrompts");
-      case "切到单个分类后可拖拽排序":
+      case "singleCategory":
         return translateFor("reorder.singleCategory");
-      case "搜索结果不支持拖拽排序":
+      case "searchDisabled":
         return translateFor("reorder.searchDisabled");
-      default:
-        return reason;
     }
   }
 
@@ -218,9 +223,26 @@
   // 用该标志让写盘期间的 refresh 延迟到写盘完成后，避免竞态。
   let reorderInFlight = false;
   let pendingRefresh = false;
+  // 拖拽手势期间（pointerdown 到 pointerup）同样挂起 refresh：
+  // 手势中途列表被重绘会打断落点计算，手势结束后统一补刷。
+  let dragGestureActive = false;
+
+  function onDragGestureStart() {
+    dragGestureActive = true;
+  }
+
+  function onDragGestureEnd() {
+    dragGestureActive = false;
+    // 手势期间攒下的补刷：写盘不在飞时才自己刷（在飞则由 doReorder 的 finally 刷）
+    if (pendingRefresh && !reorderInFlight) {
+      pendingRefresh = false;
+      void refresh().catch((e) => showError(String(e)));
+    }
+  }
+
   async function guardedRefresh() {
-    if (reorderInFlight) {
-      // 重排写盘中：标记需要补刷，等 doReorder 完成后自己刷
+    if (reorderInFlight || dragGestureActive) {
+      // 重排写盘/拖拽手势中：标记需要补刷，等结束后自己刷
       pendingRefresh = true;
       return;
     }
@@ -230,12 +252,16 @@
   // 监听后端 sync-finished 事件，自动刷新
   let unlisten: (() => void) | null = null;
   $effect(() => {
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      listen("sync-finished", () => {
-        void guardedRefresh();
-        void getSyncStatus().then((s) => (syncStatus = s));
-      }).then((fn) => (unlisten = fn));
-    });
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => {
+        listen("sync-finished", () => {
+          void guardedRefresh().catch((e) => showError(String(e)));
+          void getSyncStatus()
+            .then((s) => (syncStatus = s))
+            .catch(() => {});
+        }).then((fn) => (unlisten = fn));
+      })
+      .catch(() => {});
     return () => unlisten?.();
   });
 
@@ -298,7 +324,7 @@
       }
     }
     // 刷新分类计数
-    void refresh();
+    void refresh().catch((e) => showError(String(e)));
   }
 
   async function doCopy(mode: "markdown" | "plain") {
@@ -431,6 +457,8 @@
   // 这里基于 visiblePrompts 重排得到新顺序，更新该分类各 prompt 的 order 字段，
   // 然后对整个 allPrompts 稳定重排（保持全局 category 字母序，避免「全部」视图闪错序）。
   async function doReorder(from: number, to: number) {
+    // 并发防护：上一次写盘未完成时忽略二次拖拽提交，防止交错写 order 文件
+    if (reorderInFlight) return;
     if (query.trim()) return;
     const categoryName = getReorderCategory(selectedCategory, visiblePrompts);
     if (!categoryName) return;
@@ -474,6 +502,7 @@
   // 分类拖拽重排：from/to 都是 categories 数组索引（不含"全部"）。
   // 乐观更新本地顺序 → 写盘 .category-order.json。失败回滚靠 refresh 重读后端。
   async function doReorderCategory(from: number, to: number) {
+    if (reorderInFlight) return; // 同 doReorder：写盘期间忽略二次提交
     const next = moveCategoryOrder(categories, from, to);
     if (!next) return;
 
@@ -770,6 +799,8 @@
         onrename={onRenameCategory}
         oncontextmenu={onCatContextMenu}
         onreorder={doReorderCategory}
+        ondragstart={onDragGestureStart}
+        ondragend={onDragGestureEnd}
         {t}
       />
     </nav>
@@ -790,6 +821,8 @@
         }}
         oncontextmenu={openContextMenu}
         onreorder={doReorder}
+        ondragstart={onDragGestureStart}
+        ondragend={onDragGestureEnd}
         {t}
       />
 
@@ -871,7 +904,7 @@
           <h3>{t("app.renameMoveTitle")}</h3>
           <div class="dialog-row">
             <label for="rn-title">{t("app.titleLabel")}</label>
-            <input id="rn-title" type="text" bind:value={renameDialog.title} />
+            <input id="rn-title" type="text" bind:value={renameDialog.title} use:autofocus />
           </div>
           <div class="dialog-row">
             <label for="rn-cat">{t("app.categoryLabel")}</label>
@@ -945,6 +978,7 @@
               id="cat-rn"
               type="text"
               bind:value={catRenameDialog.newName}
+              use:autofocus
               onkeydown={(e) => e.key === "Enter" && submitCatRename()}
             />
           </div>

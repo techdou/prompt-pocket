@@ -14,17 +14,25 @@ export function getReorderCategory(
     : null;
 }
 
+// 禁用原因用 code 而非文案，调用方（App.svelte）按 code 映射 i18n key。
+// 旧版直接返回中文文案再当中间格式翻译，语言切换时会漏译。
+export type ReorderDisabledReason =
+  | "searchDisabled"
+  | "needTwo"
+  | "singleCategory"
+  | null;
+
 export function getReorderDisabledReason(
   query: string,
   selectedCategory: string,
   prompts: Pick<Prompt, "category">[],
-): string {
-  if (query.trim()) return "搜索结果不支持拖拽排序";
-  if (prompts.length < 2) return "至少需要 2 条提示词才能排序";
+): ReorderDisabledReason {
+  if (query.trim()) return "searchDisabled";
+  if (prompts.length < 2) return "needTwo";
   if (getReorderCategory(selectedCategory, prompts) === null) {
-    return "切到单个分类后可拖拽排序";
+    return "singleCategory";
   }
-  return "";
+  return null;
 }
 
 export function canReorderPromptList(
@@ -44,18 +52,9 @@ export function movePathOrder(
   from: number,
   to: number,
 ): string[] | null {
-  if (from < 0 || from >= prompts.length || to < 0 || to > prompts.length) {
-    return null;
-  }
-  if (to === from || to === from + 1) {
-    return null;
-  }
-
-  const next = [...prompts];
-  const [moved] = next.splice(from, 1);
-  const insertAt = to > from ? to - 1 : to;
-  next.splice(insertAt, 0, moved);
-  return next.map((prompt) => prompt.path);
+  // 移动逻辑与 moveCategoryOrder 完全一致，委托去重（旧版两份实现已漂移过一次）
+  const next = moveCategoryOrder(prompts, from, to);
+  return next ? next.map((prompt) => prompt.path) : null;
 }
 
 export function moveCategoryOrder<T>(items: T[], from: number, to: number): T[] | null {

@@ -13,6 +13,8 @@
     oncontextmenu,
     onreorder,
     onmounted,
+    ondragstart,
+    ondragend,
     draggable = true,
     disabledReason = "",
     t = fallbackT,
@@ -26,6 +28,9 @@
     onreorder: (fromIndex: number, toIndex: number) => void;
     /** 挂载后回传滚动函数给父组件（键盘导航定位用） */
     onmounted?: (scrollToIndex: (i: number) => void) => void;
+    /** 拖拽手势开始/结束（父组件借此挂起 refresh，防列表被重绘打断手势） */
+    ondragstart?: () => void;
+    ondragend?: () => void;
     draggable?: boolean;
     disabledReason?: string;
     t?: Translator;
@@ -62,6 +67,7 @@
     dragFromIndex = index;
     isDragging = true;
     updateDropTarget(e.clientX, e.clientY);
+    ondragstart?.();
 
     window.addEventListener("pointermove", onWindowPointerMove, { passive: false });
     window.addEventListener("pointerup", onWindowPointerUp, { passive: false });
@@ -141,12 +147,14 @@
     window.removeEventListener("pointerup", onWindowPointerUp);
     window.removeEventListener("pointercancel", onWindowPointerCancel);
 
+    const wasDragging = isDragging;
     activePointerId = -1;
     isDragging = false;
     dragFromIndex = -1;
     dropToIndex = -1;
     dropLineIndex = -1;
     dropLineBefore = true;
+    if (wasDragging) ondragend?.();
   }
 
   function onNativeDragStart(e: DragEvent) {

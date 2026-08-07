@@ -71,6 +71,12 @@ Prompt Pocket 是一个轻量级桌面提示词管理工具。它用 `Ctrl+Alt+P
 
 如果唤出前焦点在输入框，Prompt Pocket 会写入剪贴板并自动粘贴回原输入框；否则只写入剪贴板，不模拟粘贴。
 
+### 平台说明
+
+- **macOS**：自动粘贴依赖辅助功能权限。首次唤出粘贴时系统会弹授权框；若拒绝过，到「系统设置 → 隐私与安全性 → 辅助功能」里勾选 Prompt Pocket 后重启应用。
+- **Linux / Wayland**：Wayland 会话下模拟键盘粘贴（enigo）受协议限制可能无效，此时只会写入剪贴板，请手动 `Ctrl+V`；X11 会话不受影响。
+- **快捷键冲突**：`Ctrl+Alt+P` 若被其它软件占用，全局唤出会失效，请先在占用方里改键（当前版本快捷键为固定值）。
+
 ### 快捷键
 
 | 操作 | 快捷键 |
@@ -242,6 +248,12 @@ The first launch shows the main window. Later launches stay in the background an
 4. Press `Enter`.
 
 If Prompt Pocket was opened from a text input, it copies the prompt and pastes it back automatically. Otherwise it only writes to the clipboard.
+
+### Platform Notes
+
+- **macOS**: auto-paste requires Accessibility permission. macOS prompts on first use; if you denied it, enable Prompt Pocket under System Settings → Privacy & Security → Accessibility, then restart the app.
+- **Linux / Wayland**: simulated paste (enigo) may not work under Wayland due to protocol restrictions — the prompt is still copied to the clipboard, so paste manually with `Ctrl+V`. X11 sessions are unaffected.
+- **Hotkey conflicts**: if another app owns `Ctrl+Alt+P`, the global hotkey will not register. Change the shortcut in the conflicting app first (the hotkey is fixed in this version).
 
 ### Keyboard Shortcuts
 

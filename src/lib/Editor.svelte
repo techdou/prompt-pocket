@@ -5,6 +5,7 @@
   import { renderRich } from "./renderers";
   import { openUrl } from "./api";
   import { createTranslator, type Translator } from "./i18n";
+  import { autofocus } from "./actions";
 
   const fallbackT = createTranslator("zh");
 
@@ -184,6 +185,7 @@
               class="form-input"
               type="text"
               bind:value={newCategoryName}
+              use:autofocus
               placeholder={t("editor.newCategoryName")}
               onkeydown={(e) => e.key === "Enter" && addCategory()}
             />
