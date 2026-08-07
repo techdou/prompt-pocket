@@ -1,4 +1,5 @@
-// CDN 富内容编排器：并行调用 mermaid/katex/highlight，各库独立 try/catch 互不影响。
+// 富内容编排器：并行调用 mermaid/katex/highlight，各库独立 try/catch 互不影响。
+// 三个库全部本地打包（npm 依赖，Vite 按需分包），无 CDN/供应链风险，离线可用。
 
 import { renderMermaid } from "./mermaid";
 import { renderKatex } from "./katex";
@@ -16,5 +17,3 @@ export async function renderRich(root: HTMLElement): Promise<void> {
     renderCode(root),
   ]);
 }
-
-export { RemoteLoadError } from "./loadRemote";

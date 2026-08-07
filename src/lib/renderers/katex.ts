@@ -1,11 +1,9 @@
-// KaTeX 公式渲染：CDN 按需加载 UMD bundle + CSS。
+// KaTeX 公式渲染：本地打包（npm katex），动态 import 按需加载。
+// CSS 静态打进 bundle（katex 字体也随包分发，离线可用）。
 // 占位元素由 markdown.ts 的 katexPlaceholder() 产出，此模块扫描并替换。
 // 失败保留占位的 <code> 原文，不抛错。
 
-import { loadCss, loadScript } from "./loadRemote";
-
-const KATEX_JS = "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js";
-const KATEX_CSS = "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css";
+import "katex/dist/katex.min.css";
 
 interface KatexApi {
   renderToString: (
@@ -20,11 +18,13 @@ interface KatexApi {
 
 let katexPromise: Promise<KatexApi> | null = null;
 
-/** 加载 katex（幂等，并行触发 JS + CSS） */
+/** 加载 katex（幂等） */
 function ensureKatex(): Promise<KatexApi> {
   if (katexPromise) return katexPromise;
-  loadCss(KATEX_CSS); // 不 await，CSS 慢一点也不阻塞 JS 渲染
-  katexPromise = loadScript<KatexApi>(KATEX_JS, "katex", "katex");
+  katexPromise = (async () => {
+    const mod = await import("katex");
+    return (mod.default ?? mod) as unknown as KatexApi;
+  })();
   katexPromise.catch(() => {
     katexPromise = null; // 失败清空，允许重试
   });

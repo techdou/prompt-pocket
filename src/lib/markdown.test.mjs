@@ -103,6 +103,21 @@ describe("renderMarkdown - XSS 防护", () => {
     assert.ok(!includes(html, "javascript:"));
   });
 
+  it("javascript: 协议图片 src 被清空", () => {
+    const html = renderMarkdown("![x](javascript:alert(1))");
+    assert.ok(!includes(html, "javascript:"));
+  });
+
+  it("data:text/html 协议图片 src 被清空", () => {
+    const html = renderMarkdown("![x](data:text/html;base64,PHNjcmlwdD4=)");
+    assert.ok(!includes(html, "data:text/html"));
+  });
+
+  it("data:image/* 内嵌图片保留", () => {
+    const html = renderMarkdown("![x](data:image/png;base64,iVBORw0KGgo=)");
+    assert.ok(includes(html, "data:image/png;base64,"));
+  });
+
   it("正常 https 链接保留", () => {
     const html = renderMarkdown("[官网](https://example.com)");
     assert.ok(includes(html, 'href="https://example.com"'));

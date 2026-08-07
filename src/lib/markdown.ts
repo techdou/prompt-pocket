@@ -1,6 +1,6 @@
 // 富 Markdown 渲染核心：marked 打包，离线可用 GFM 全语法。
 // XSS 防护不依赖 DOMPurify——raw HTML 块一律转义显示，危险协议链接替换为 #。
-// mermaid / 代码高亮走 DOM 阶段 CDN 加载（见 ./renderers）。
+// mermaid / 代码高亮 / KaTeX 走 DOM 阶段本地打包增强（见 ./renderers）。
 
 import { Marked } from "marked";
 import { markedHighlight } from "marked-highlight";
@@ -12,12 +12,14 @@ const escAttr = (s: string): string => escHtml(s).replace(/"/g, "&quot;");
 
 // 链接协议白名单：仅放行 http(s)/mailto/ftp/相对路径/锚点
 const SAFE_HREF = /^(https?:|mailto:|ftp:|\/|#|\.\/|\.\.\/)/i;
+// 图片额外放行 data:image/*（贴图常用 base64 内嵌）；data:text/html 等仍拦截
+const SAFE_IMG = /^(https?:|ftp:|\/|#|\.\/|\.\.\/|data:image\/)/i;
 
 const marked = new Marked();
 
 // ── KaTeX tokenizer（手写，不依赖 katex 包本体）──
 // 规则取自 marked-katex-extension：$...$ 行内、$$...$$/$...$ 块级。
-// renderer 只产出占位标记，真正的渲染交给 DOM 阶段 CDN 加载的 katex（见 renderers/katex.ts）。
+// renderer 只产出占位标记，真正的渲染交给 DOM 阶段本地打包的 katex（见 renderers/katex.ts）。
 const inlineKatexRule =
   /^(\${1,2})(?!\$)((?:\\.|[^\\\n])*?(?:\\.|[^\\\n$]))\1(?=[\s?!.,:？！。，：]|$)/;
 const blockKatexRule = /^(\${1,2})\n((?:\\[^]|[^\\])+?)\n\1(?:\n|$)/;
@@ -29,15 +31,14 @@ function katexPlaceholder(tex: string, displayMode: boolean): string {
   return `<code class="katex-placeholder katex-${mode}" data-tex="${escAttr(tex)}" data-display="${displayMode}">${escHtml(tex)}</code>`;
 }
 
-// marked-highlight：代码高亮 hook。mermaid 语言原样返回，留给 DOM 阶段处理。
-// 其余语言目前不在解析阶段着色（highlight.js 走 CDN，DOM 阶段统一处理），
-// 这里只负责给 code 元素打上 language-xxx class，方便后续 highlightElement() 定位。
+// marked-highlight：只借它的 langPrefix 给 code 元素打 class，不在解析阶段着色。
+// highlight 回调返回原文（=== token.text 时 marked-highlight 视为"无高亮"跳过转义标记），
+// mermaid 由下方自定义 renderer 接管，highlight.js 留给 DOM 阶段本地处理。
 marked.use(
   markedHighlight({
     langPrefix: "hljs language-",
-    highlight(code, lang) {
-      if ((lang || "").trim() === "mermaid") return code;
-      return false; // 不在解析阶段着色
+    highlight(code, _lang) {
+      return code;
     },
   }),
 );
@@ -60,6 +61,10 @@ marked.use({
     // 危险协议（javascript:/data:text-html 等）链接 → href 替换为 #
     if (token.type === "link" && token.href && !SAFE_HREF.test(token.href)) {
       token.href = "#";
+    }
+    // 图片同源防护：javascript:/data:text-html 等协议的 src 清空
+    if (token.type === "image" && token.href && !SAFE_IMG.test(token.href)) {
+      token.href = "";
     }
   },
   gfm: true,
@@ -88,7 +93,7 @@ marked.use({
         return undefined;
       },
       renderer(token) {
-        const t = token as { text: string; displayMode: boolean };
+        const t = token as unknown as { text: string; displayMode: boolean };
         return katexPlaceholder(t.text, t.displayMode);
       },
     },
@@ -108,7 +113,7 @@ marked.use({
         return undefined;
       },
       renderer(token) {
-        const t = token as { text: string; displayMode: boolean };
+        const t = token as unknown as { text: string; displayMode: boolean };
         return katexPlaceholder(t.text, t.displayMode) + "\n";
       },
     },
