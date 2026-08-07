@@ -179,7 +179,14 @@
     class="backdrop"
     transition:fade={{ duration: 120 }}
     onclick={onBackdrop}
-    onkeydown={(e) => e.key === "Escape" && close()}
+    onkeydown={(e) => {
+      if (e.key === "Escape") {
+        // 阻止冒泡到 <svelte:window>：关弹窗不应连带隐藏整个窗口
+        e.stopPropagation();
+        e.preventDefault();
+        close();
+      }
+    }}
     role="presentation"
   >
     <div class="modal" transition:scale={{ duration: 150, start: 0.96 }}>

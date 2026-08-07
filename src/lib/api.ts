@@ -80,13 +80,12 @@ export async function readPrompt(path: string): Promise<PromptContent> {
 }
 
 export async function savePrompt(path: string, req: SaveRequest): Promise<Prompt> {
+  // 后端 serde rename_all="camelCase"：copy_mode 以 copyMode 传，category 原样
+  const { copy_mode, ...rest } = req;
   return normalizePrompt(
     await invoke<BackendPrompt>("save_prompt", {
       path,
-      req: {
-        ...req,
-        copyMode: normalizeCopyMode(req.copy_mode),
-      },
+      req: { ...rest, copyMode: normalizeCopyMode(copy_mode) },
     }),
   );
 }

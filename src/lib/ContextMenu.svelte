@@ -34,6 +34,20 @@
 
   let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name)]);
 
+  // 视口边界翻转：菜单挂载后测量，越出窗口右/下缘则向左/上收回
+  let menuEl: HTMLDivElement | null = $state(null);
+  let posX = $state(0);
+  let posY = $state(0);
+
+  $effect(() => {
+    if (!open || !menuEl) return;
+    // showMoveMenu 展开会改变高度，纳入依赖重测
+    void showMoveMenu;
+    const rect = menuEl.getBoundingClientRect();
+    posX = Math.max(4, Math.min(x, window.innerWidth - rect.width - 8));
+    posY = Math.max(4, Math.min(y, window.innerHeight - rect.height - 8));
+  });
+
   function categoryLabel(name: string): string {
     return name === "未分类" ? t("common.uncategorized") : name;
   }
@@ -55,7 +69,13 @@
 </script>
 
 <svelte:window
-  onkeydown={(e) => e.key === "Escape" && close()}
+  onkeydown={(e) => {
+    if (e.key === "Escape" && open) {
+      // preventDefault：App 的 window handler 看到 defaultPrevented 就不再穿透隐藏窗口
+      e.preventDefault();
+      close();
+    }
+  }}
 />
 
 {#if open && prompt}
@@ -71,8 +91,9 @@
     transition:fly={{ duration: 80 }}
   ></div>
   <div
+    bind:this={menuEl}
     class="menu"
-    style="left: {x}px; top: {y}px;"
+    style="left: {posX || x}px; top: {posY || y}px;"
     transition:fly={{ y: -4, duration: 100 }}
   >
     <button class="item" onclick={() => handle(onrename)}>
@@ -155,12 +176,6 @@
     text-align: center;
     opacity: 0.8;
   }
-  .arrow {
-    margin-left: auto;
-    color: var(--muted);
-    font-size: 11px;
-  }
-
   .arrow {
     margin-left: auto;
     color: var(--muted);

@@ -79,6 +79,11 @@
   function onWindowPointerMove(e: PointerEvent) {
     if (e.pointerId !== activePointerId || dragFromIndex < 0) return;
     e.preventDefault();
+    // 主键已松开但 pointerup 丢了（指针拖出窗口）：放弃本次拖拽，防状态卡死
+    if ((e.buttons & 1) === 0) {
+      finishPointerDrag(false);
+      return;
+    }
     updateDropTarget(e.clientX, e.clientY);
   }
 
@@ -226,6 +231,9 @@
         onkeydown={(e) => {
           if (e.key === "Enter") submitCreate();
           if (e.key === "Escape") {
+            // 阻止冒泡：取消输入不应连带隐藏整个窗口
+            e.stopPropagation();
+            e.preventDefault();
             creating = false;
             newName = "";
           }

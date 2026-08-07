@@ -89,6 +89,9 @@ pub struct SaveRequest {
     #[serde(default = "default_copy_mode")]
     pub copy_mode: String,
     pub body: String,
+    /// 目标分类（可选）：与当前目录不同则保存时移动文件
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 /// ────────────────────────────────────────────────
@@ -504,8 +507,22 @@ pub fn save_prompt(root: &Path, abs: &Path, req: &SaveRequest) -> io::Result<Pat
     let fm = serialize_frontmatter(&meta);
     let content = format!("---\n{}\n---\n\n{}\n", fm, req.body);
 
+    // 目标目录：category 指定且有效 → 该分类目录（保存时可改分类）；
+    // 未指定 → 留在当前目录
+    let target_dir = match &req.category {
+        Some(cat) => {
+            let safe_cat = sanitize_filename::sanitize(cat);
+            if safe_cat.is_empty() || safe_cat == "未分类" {
+                root.to_path_buf()
+            } else {
+                root.join(&safe_cat)
+            }
+        }
+        None => abs.parent().unwrap_or(root).to_path_buf(),
+    };
+
     // 自动重命名：若标题有意义的部分与文件名不同，则重命名
-    let final_path = maybe_rename_to_title(abs, &req.title);
+    let final_path = maybe_rename_to_title(abs, &req.title, &target_dir);
 
     if let Some(parent) = final_path.parent() {
         fs::create_dir_all(parent)?;
@@ -528,15 +545,19 @@ pub fn save_prompt(root: &Path, abs: &Path, req: &SaveRequest) -> io::Result<Pat
 }
 
 /// 若标题与当前文件名差异较大，重命名文件为「标题.md」
+/// target_dir 是保存的目标目录（通常等于原目录；指定了新分类时为该分类目录）。
 /// 规则：标题 sanitize 后若与当前文件 stem 不同且非空，则重命名（避免重名追加序号）
-fn maybe_rename_to_title(abs: &Path, title: &str) -> PathBuf {
+fn maybe_rename_to_title(abs: &Path, title: &str, target_dir: &Path) -> PathBuf {
     let safe_title = sanitize_filename::sanitize(title);
-    if safe_title.is_empty() {
-        return abs.to_path_buf();
-    }
     let current_stem = abs.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    // 标题与当前文件名一致，无需重命名
-    if safe_title == current_stem {
+    let same_dir = abs.parent().map(|p| p == target_dir).unwrap_or(false);
+
+    if safe_title.is_empty() {
+        // 标题空：保持原文件名，仅可能换目录
+        return target_dir.join(abs.file_name().unwrap_or_default());
+    }
+    // 同目录且标题与文件名一致，无需重命名
+    if same_dir && safe_title == current_stem {
         return abs.to_path_buf();
     }
     // 时间戳命名的（14 位纯数字，如 20260628T153000）一定重命名为标题
@@ -548,15 +569,14 @@ fn maybe_rename_to_title(abs: &Path, title: &str) -> PathBuf {
         .all(|c| c.is_ascii_digit() || c == 'T')
         && current_stem.len() >= 13;
 
-    let parent = abs.parent().unwrap_or(Path::new("."));
     let mut new_name = format!("{}.md", safe_title);
     let mut n = 1;
     // 重名则追加序号（但保留标题可读性）
-    while parent.join(&new_name).exists() && parent.join(&new_name) != abs {
+    while target_dir.join(&new_name).exists() && target_dir.join(&new_name) != abs {
         new_name = format!("{}-{}.md", safe_title, n);
         n += 1;
     }
-    let candidate = parent.join(&new_name);
+    let candidate = target_dir.join(&new_name);
     if candidate != abs || is_timestamp {
         candidate
     } else {
@@ -843,6 +863,7 @@ mod tests {
             title: "改过的标题".into(),
             copy_mode: "markdown".into(),
             body: "这是正文内容\n\n## 第二段\n\n- 列表项1\n- 列表项2".into(),
+            category: None,
         };
         let new_abs = save_prompt(&dir, &abs, &req).unwrap();
 
@@ -876,6 +897,7 @@ mod tests {
                 title: format!("标题{}", i),
                 copy_mode: "markdown".into(),
                 body: body.clone(),
+                category: None,
             };
             cur_abs = save_prompt(&dir, &cur_abs, &req).unwrap();
 
@@ -1024,6 +1046,7 @@ mod tests {
             title: "我的代码审查清单".into(),
             copy_mode: "markdown".into(),
             body: "正文内容".into(),
+            category: None,
         };
         let new_abs = save_prompt(&dir, &abs, &req).unwrap();
         let new_name = new_abs.file_name().unwrap().to_string_lossy().to_string();
@@ -1239,6 +1262,7 @@ mod tests {
             title: "重命名后的标题".into(),
             copy_mode: "markdown".into(),
             body: "重要内容不能丢".into(),
+            category: None,
         };
         let new_abs = save_prompt(&dir, &abs, &req).unwrap();
 
@@ -1320,6 +1344,52 @@ mod tests {
 
         remove_tombstone(&dir, "a.md").unwrap();
         assert!(load_tombstones(&dir).is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 保存时改分类：文件移动到新分类目录，内容完整
+    #[test]
+    fn save_with_category_moves_file() {
+        let dir = std::env::temp_dir().join("pp_test_save_move_cat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let abs = create_prompt(&dir, "旧分类", "移动的提示词").unwrap();
+        let req = SaveRequest {
+            title: "移动的提示词".into(),
+            copy_mode: "markdown".into(),
+            body: "正文".into(),
+            category: Some("新分类".into()),
+        };
+        let new_abs = save_prompt(&dir, &abs, &req).unwrap();
+
+        assert!(new_abs.to_string_lossy().contains("新分类"), "应移到新分类目录");
+        assert!(new_abs.exists());
+        assert!(!abs.exists(), "旧位置文件应删除");
+        let content = read_prompt(&new_abs).unwrap();
+        assert_eq!(content.body, "正文");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 不传 category（None）：行为与旧版一致，不动目录
+    #[test]
+    fn save_without_category_stays_in_place() {
+        let dir = std::env::temp_dir().join("pp_test_save_stay");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let abs = create_prompt(&dir, "原分类", "留下的").unwrap();
+        let req = SaveRequest {
+            title: "留下的".into(),
+            copy_mode: "markdown".into(),
+            body: "正文".into(),
+            category: None,
+        };
+        let new_abs = save_prompt(&dir, &abs, &req).unwrap();
+
+        assert!(new_abs.to_string_lossy().contains("原分类"), "不应移动目录");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

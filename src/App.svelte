@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { ask } from "@tauri-apps/plugin-dialog";
   import type { CategoryCount, Prompt, PromptMeta, SyncStatus } from "./lib/types";
   import {
     copyOrPaste,
@@ -56,6 +57,32 @@
   let editingCategory = $state("");
   let editingCopyMode = $state<"markdown" | "plain">("markdown");
 
+  // 加载/保存成功时的内容快照：脏检查基准（编辑字段偏离快照 = 有未保存修改）
+  let loadedSnapshot = $state<{
+    body: string;
+    title: string;
+    category: string;
+    copyMode: "markdown" | "plain";
+  } | null>(null);
+
+  let isDirty = $derived(
+    editorMode === "edit" &&
+      loadedSnapshot !== null &&
+      (editingBody !== loadedSnapshot.body ||
+        editingTitle !== loadedSnapshot.title ||
+        editingCategory !== loadedSnapshot.category ||
+        editingCopyMode !== loadedSnapshot.copyMode),
+  );
+
+  /** 有未保存修改时弹确认；返回 true 表示可以继续（不脏或用户确认丢弃） */
+  async function confirmDiscardIfDirty(): Promise<boolean> {
+    if (!isDirty) return true;
+    return ask(t("app.discardChanges"), {
+      title: t("app.unsavedTitle"),
+      kind: "warning",
+    });
+  }
+
   let loading = $state(true);
   let error = $state<string | null>(null);
   let language = $state<Language>("zh");
@@ -105,7 +132,11 @@
     translateReorderDisabledReason(reorderDisabledReason, language),
   );
 
-  let selectedIndex = $state(0);
+  let selectedIndex = $derived(
+    selectedPath
+      ? visiblePrompts.findIndex((p) => p.path === selectedPath)
+      : -1,
+  );
   // PromptList 上报的滚动函数（键盘导航用）
   let scrollToIndexFn: ((i: number) => void) | null = null;
 
@@ -157,6 +188,18 @@
     const res = await scanPrompts();
     allPrompts = res.prompts;
     categories = res.categories;
+    reconcileSelection();
+  }
+
+  // 刷新后的选中调和：selectedPath 还在全局列表 → 保持；
+  // 不在了（外部删除/同步清理）→ 选可见列表里同位置的相邻项。
+  // 这是 selectedPath 唯一真相原则的关键：任何重排都不能劫持选中。
+  function reconcileSelection() {
+    if (!selectedPath) return;
+    if (allPrompts.some((p) => p.path === selectedPath)) return;
+    const idx = selectedIndex >= 0 ? selectedIndex : 0;
+    const next = visiblePrompts[Math.min(idx, visiblePrompts.length - 1)];
+    selectedPath = next?.path ?? null;
   }
 
   // 设置界面切换数据目录后：更新配置、重置选中、重新扫描
@@ -198,6 +241,7 @@
 
   // 选中变化时加载内容
   let lastLoadedPath: string | null = null;
+  let loadToken = 0;
   $effect(() => {
     if (selectedPath && selectedPath !== lastLoadedPath) {
       lastLoadedPath = selectedPath;
@@ -206,12 +250,22 @@
   });
 
   async function loadPromptContent(path: string) {
+    // 竞态防护：快速连续切换时，旧响应不得覆盖新选中项的内容
+    const token = ++loadToken;
     try {
       const { meta, body } = await readPrompt(path);
+      if (token !== loadToken || path !== selectedPath) return;
       applyMetaToEditFields(meta);
       editingBody = body;
+      loadedSnapshot = {
+        body,
+        title: meta.title,
+        category: selectedPrompt?.category ?? "未分类",
+        copyMode: meta.copy_mode === "plain" ? "plain" : "markdown",
+      };
       editorMode = "view";
     } catch (e) {
+      if (token !== loadToken) return;
       const msg = String(e);
       if (msg.includes("FILE_NOT_FOUND")) {
         // 问题1：文件被外部删除 → 从列表移除，不报错卡死
@@ -267,11 +321,20 @@
         title: editingTitle.trim() || t("app.untitled"),
         copy_mode: editingCopyMode,
         body: editingBody,
+        category: editingCategory,
       });
-      // 保存可能因标题变化而重命名了文件，用新路径更新选中
+      // 保存可能因标题/分类变化而移动了文件，用新路径更新选中
       selectedPath = saved.path;
       lastLoadedPath = saved.path; // 避免立即重载覆盖编辑内容
-      await refresh();
+      // 快照同步到已保存状态（保存后不再是脏的）
+      loadedSnapshot = {
+        body: editingBody,
+        title: editingTitle,
+        category: saved.category,
+        copyMode: editingCopyMode,
+      };
+      editingCategory = saved.category;
+      await refresh(); // reconcile 保住 selectedPath，不被重排劫持
       editorMode = "view";
     } catch (e) {
       const msg = String(e);
@@ -298,6 +361,8 @@
       editingCategory = cat;
       editingCopyMode = "markdown";
       editingBody = "";
+      // 新建即快照基准：用户开始输入才变脏
+      loadedSnapshot = { body: "", title: "", category: cat, copyMode: "markdown" };
       editorMode = "edit";
     } catch (e) {
       showError(String(e));
@@ -306,14 +371,29 @@
 
   async function doDelete() {
     if (!selectedPrompt) return;
-    if (!confirm(t("app.deleteConfirm", { title: selectedPrompt.title }))) return;
+    const ok = await ask(t("app.deleteConfirm", { title: selectedPrompt.title }), {
+      title: t("editor.delete"),
+      kind: "warning",
+    });
+    if (!ok) return;
     try {
       await deletePrompt(selectedPrompt.path);
       selectedPath = null;
       lastLoadedPath = null;
+      loadedSnapshot = null;
       await refresh();
     } catch (e) {
       showError(String(e));
+    }
+  }
+
+  // 取消编辑：丢弃修改，从磁盘重载当前选中项
+  function cancelEdit() {
+    if (selectedPath) {
+      lastLoadedPath = null;
+      void loadPromptContent(selectedPath);
+    } else {
+      editorMode = "view";
     }
   }
 
@@ -414,19 +494,25 @@
     }
   }
 
-  function onCtxDelete() {
+  async function onCtxDelete() {
     if (!contextMenu.prompt) return;
     const p = contextMenu.prompt;
-    if (!confirm(t("app.deleteConfirm", { title: p.title }))) return;
-    deletePrompt(p.path)
-      .then(() => {
-        if (selectedPath === p.path) {
-          selectedPath = null;
-          lastLoadedPath = null;
-        }
-        return refresh();
-      })
-      .catch((e) => showError(String(e)));
+    const ok = await ask(t("app.deleteConfirm", { title: p.title }), {
+      title: t("editor.delete"),
+      kind: "warning",
+    });
+    if (!ok) return;
+    try {
+      await deletePrompt(p.path);
+      if (selectedPath === p.path) {
+        selectedPath = null;
+        lastLoadedPath = null;
+        loadedSnapshot = null;
+      }
+      await refresh();
+    } catch (e) {
+      showError(String(e));
+    }
   }
 
   // 重命名对话框提交
@@ -484,33 +570,45 @@
     }
   }
 
-  // 键盘导航
-  $effect(() => {
-    if (visiblePrompts.length === 0) {
-      if (selectedIndex !== 0) selectedIndex = 0;
-      return;
-    }
-    if (selectedIndex >= visiblePrompts.length) {
-      selectedIndex = visiblePrompts.length - 1;
-    }
-    const cur = visiblePrompts[selectedIndex];
-    if (cur && cur.path !== selectedPath) {
-      selectedPath = cur.path;
-    }
-  });
+  // 键盘导航：↑↓ 直接驱动 selectedPath（事件驱动，不做响应式反写——
+  // 旧版用 effect 持续把 selectedIndex 反写进 selectedPath，
+  // 保存重排/新建/同步刷新都会劫持选中并覆盖正在编辑的内容）
+  async function navigateSelection(delta: number) {
+    if (visiblePrompts.length === 0) return;
+    if (!(await confirmDiscardIfDirty())) return;
+    const cur = selectedIndex >= 0 ? selectedIndex : delta > 0 ? -1 : 0;
+    const next = Math.min(Math.max(cur + delta, 0), visiblePrompts.length - 1);
+    if (next === selectedIndex) return;
+    selectedPath = visiblePrompts[next].path;
+    scrollIntoView();
+  }
 
   function handleKeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented) return;
     if (e.key === "Escape") {
       if (contextMenu.open) {
         contextMenu.open = false;
+        return;
+      }
+      if (catContextMenu.open) {
+        catContextMenu.open = false;
         return;
       }
       if (renameDialog.open) {
         renameDialog.open = false;
         return;
       }
+      if (catRenameDialog.open) {
+        catRenameDialog.open = false;
+        return;
+      }
       if (settingsOpen) {
         settingsOpen = false;
+        return;
+      }
+      // 编辑态 Esc：先退出编辑（回到 view 并重载磁盘内容），而不是直接隐藏窗口
+      if (editorMode === "edit") {
+        cancelEdit();
         return;
       }
       e.preventDefault();
@@ -539,23 +637,22 @@
 
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      selectedIndex = Math.min(selectedIndex + 1, visiblePrompts.length - 1);
-      scrollIntoView();
+      void navigateSelection(1);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      selectedIndex = Math.max(selectedIndex - 1, 0);
-      scrollIntoView();
+      void navigateSelection(-1);
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (visiblePrompts[selectedIndex]) {
-        void doCopy(visiblePrompts[selectedIndex].meta.copy_mode as "markdown" | "plain");
+      const cur = selectedIndex >= 0 ? visiblePrompts[selectedIndex] : undefined;
+      if (cur) {
+        void doCopy(cur.meta.copy_mode as "markdown" | "plain");
       }
     }
   }
 
   function scrollIntoView() {
     queueMicrotask(() => {
-      scrollToIndexFn?.(selectedIndex);
+      if (selectedIndex >= 0) scrollToIndexFn?.(selectedIndex);
     });
   }
 
@@ -685,9 +782,11 @@
         draggable={canReorderPrompts}
         disabledReason={reorderDisabledLabel}
         onmounted={(fn) => (scrollToIndexFn = fn)}
-        onselect={(path) => {
+        onselect={async (path) => {
+          if (path === selectedPath) return;
+          // 编辑中有未保存修改：确认后再切换（防静默丢失）
+          if (!(await confirmDiscardIfDirty())) return;
           selectedPath = path;
-          selectedIndex = visiblePrompts.findIndex((p) => p.path === path);
         }}
         oncontextmenu={openContextMenu}
         onreorder={doReorder}
@@ -705,12 +804,7 @@
         {t}
         oncopy={(m) => doCopy(m)}
         onsave={doSave}
-        oncancel={() => {
-          if (selectedPath) {
-            lastLoadedPath = null;
-            void loadPromptContent(selectedPath);
-          }
-        }}
+        oncancel={cancelEdit}
         onedit={() => {
           // 进入编辑前，把当前 prompt 的分类同步到编辑字段
           if (selectedPrompt) editingCategory = selectedPrompt.category;
@@ -763,7 +857,14 @@
         onclick={(e) => {
           if (e.target === e.currentTarget) renameDialog.open = false;
         }}
-        onkeydown={(e) => e.key === "Escape" && (renameDialog.open = false)}
+        onkeydown={(e) => {
+          if (e.key === "Escape") {
+            // 阻止冒泡到 <svelte:window>：否则关弹窗的同时会把整个窗口也隐藏
+            e.stopPropagation();
+            e.preventDefault();
+            renameDialog.open = false;
+          }
+        }}
         role="presentation"
       >
         <div class="dialog" transition:fly={{ y: -10, duration: 120 }}>
@@ -827,7 +928,13 @@
         onclick={(e) => {
           if (e.target === e.currentTarget) catRenameDialog.open = false;
         }}
-        onkeydown={(e) => e.key === "Escape" && (catRenameDialog.open = false)}
+        onkeydown={(e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            e.preventDefault();
+            catRenameDialog.open = false;
+          }
+        }}
         role="presentation"
       >
         <div class="dialog" transition:fly={{ y: -10, duration: 120 }}>

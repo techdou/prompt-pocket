@@ -67,20 +67,26 @@
   // preview 容器引用，供 renderRich 扫描 DOM
   let previewEl: HTMLDivElement | undefined = $state();
 
-  // 链接点击拦截：<a> 走 openUrl 在系统浏览器打开，而非 webview 内导航
+  // 链接点击拦截：只有 http(s) 链接交给系统浏览器打开（openUrl 有协议白名单），
+  // 锚点/相对路径在"外部浏览器打开"语境下无意义，直接放行 webview 默认行为
   function onPreviewClick(e: MouseEvent) {
     const target = e.target as HTMLElement;
     const anchor = target.closest("a");
     if (!anchor) return;
     const href = anchor.getAttribute("href");
     if (!href || href === "#") return;
+    if (!/^https?:/i.test(href)) return;
     e.preventDefault();
     void openUrl(href);
   }
 
-  // body 变化 → marked 同步渲染（秒出 GFM）→ tick 后异步 CDN 增强（mermaid/katex/高亮）
+  // body 变化 → marked 同步渲染（秒出 GFM）→ tick 后异步增强（mermaid/katex/高亮）。
+  // 关键：effect 必须读取 body 把它纳入依赖——否则 view 模式直接切换 prompt 时
+  // （previewEl/mode 都不变），新内容的 mermaid/KaTeX/高亮不会渲染。
   $effect(() => {
+    const currentBody = body;
     if (!previewEl || mode !== "view") return;
+    void currentBody;
     void tick().then(() => renderRich(previewEl!));
   });
 </script>

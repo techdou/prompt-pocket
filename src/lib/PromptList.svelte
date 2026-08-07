@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import type { Prompt } from "./types";
   import { createTranslator, type Translator } from "./i18n";
 
@@ -11,6 +12,7 @@
     onselect,
     oncontextmenu,
     onreorder,
+    onmounted,
     draggable = true,
     disabledReason = "",
     t = fallbackT,
@@ -22,10 +24,19 @@
     oncontextmenu: (prompt: Prompt, x: number, y: number) => void;
     /** 拖拽结束回调：把 fromIndex 处的项移动到 toIndex 之前 */
     onreorder: (fromIndex: number, toIndex: number) => void;
+    /** 挂载后回传滚动函数给父组件（键盘导航定位用） */
+    onmounted?: (scrollToIndex: (i: number) => void) => void;
     draggable?: boolean;
     disabledReason?: string;
     t?: Translator;
   } = $props();
+
+  // 列表项元素引用：键盘导航时 scrollIntoView 定位
+  let itemEls: (HTMLLIElement | undefined)[] = $state([]);
+
+  onMount(() => {
+    onmounted?.((i) => itemEls[i]?.scrollIntoView({ block: "nearest" }));
+  });
 
   function categoryLabel(name: string): string {
     return name === "未分类" ? t("common.uncategorized") : name;
@@ -60,6 +71,11 @@
   function onWindowPointerMove(e: PointerEvent) {
     if (e.pointerId !== activePointerId || dragFromIndex < 0) return;
     e.preventDefault();
+    // 主键已松开但 pointerup 丢了（指针拖出窗口）：放弃本次拖拽，防状态卡死
+    if ((e.buttons & 1) === 0) {
+      finishPointerDrag(false);
+      return;
+    }
     updateDropTarget(e.clientX, e.clientY);
   }
 
@@ -159,6 +175,7 @@
 >
   {#each prompts as p, i (p.path)}
     <li
+      bind:this={itemEls[i]}
       data-idx={i}
       role="option"
       tabindex="-1"

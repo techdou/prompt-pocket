@@ -70,4 +70,6 @@ export interface SaveRequest {
   title: string;
   copy_mode: CopyMode;
   body: string;
+  /** 目标分类：与当前目录不同则保存时移动文件（serde camelCase → category） */
+  category?: string;
 }
