@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # 质量门：tag 推送不触发 ci.yml，发布前在本 job 里把测试跑一遍，
       # 防止未过 CI 的提交被直接打包发给用户。
