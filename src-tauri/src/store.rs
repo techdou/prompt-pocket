@@ -471,8 +471,37 @@ fn migrate_prompt_order_on_category_rename(root: &Path, old_name: &str, new_name
     }
 }
 
+/// 列表扫描读取的文件头部窗口（frontmatter 元数据都在这个范围内）
+const HEAD_WINDOW: usize = 16 * 1024;
+
+/// 读取文件头部至多 max 字节，按 UTF-8 边界截断（尾部不完整的多字节序列丢弃）
+fn read_head(path: &Path, max: usize) -> io::Result<String> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let mut bytes: Vec<u8> = Vec::with_capacity(4096);
+    let mut buf = [0u8; 4096];
+    while bytes.len() < max {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    bytes.truncate(max);
+    match String::from_utf8(bytes) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let valid = e.utf8_error().valid_up_to();
+            Ok(String::from_utf8_lossy(&e.as_bytes()[..valid]).into_owned())
+        }
+    }
+}
+
 fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
-    let content = fs::read_to_string(abs).ok()?;
+    // 只读文件头部：title/updated 位于 frontmatter 前几十字节，列表扫描不必
+    // 全文读取。frontmatter 超过头部窗口（极罕见）时解析退化为默认 meta，
+    // title 由文件名兜底（保存时文件名本就跟随标题）
+    let content = read_head(abs, HEAD_WINDOW).ok()?;
     let (mut meta, _body) = parse_markdown(&content);
 
     let rel = abs.strip_prefix(root).ok()?;
@@ -487,9 +516,11 @@ fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
         meta.title = file_stem.clone();
     }
 
-    let category = rel
-        .parent()
-        .and_then(|p| p.to_str())
+    // 分类取路径首段（与 order 查找的口径一致）：嵌套目录 a/b/c.md 归入一级
+    // 分类 a。取 parent 会让 "a/b" 成为独立分类、且与 order 的首段查找错位
+    let category = rel_str
+        .split('/')
+        .next()
         .filter(|s| !s.is_empty())
         .unwrap_or("未分类")
         .to_string();
@@ -1538,6 +1569,55 @@ mod tests {
         assert_eq!(cat.len(), 2);
         assert_eq!(cat[0], "乙", "重命名分类后自定义顺序应保留");
         assert_eq!(cat[1], "甲");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 嵌套目录的文件归入一级分类（与 order 查找口径一致），
+    /// 不再出现 "a/b" 独立分类 + "a" 空分类的割裂
+    #[test]
+    fn nested_dir_prompts_belong_to_top_category() {
+        let dir = std::env::temp_dir().join("pp_test_nested_cat");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        std::fs::write(
+            dir.join("a/b/deep.md"),
+            "---\ntitle: 深层\n---\n\n正文",
+        )
+        .unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+        assert!(
+            res.prompts.iter().all(|p| p.category == "a"),
+            "嵌套文件应归入一级分类 a，实际: {:?}",
+            res.prompts.iter().map(|p| &p.category).collect::<Vec<_>>()
+        );
+        assert!(
+            !res.categories.iter().any(|c| c.name == "a/b"),
+            "不应出现 'a/b' 分类"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// read_head：头部窗口内的完整 frontmatter 正常解析；
+    /// UTF-8 截断不产生替换字符（多字节序列在边界被丢弃而非替换）
+    #[test]
+    fn read_head_truncates_at_utf8_boundary() {
+        let dir = std::env::temp_dir().join("pp_test_read_head");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 窗口内：正常解析
+        std::fs::write(dir.join("a.md"), "---\ntitle: 标题\n---\n\n正文").unwrap();
+        let head = read_head(&dir.join("a.md"), HEAD_WINDOW).unwrap();
+        assert!(head.contains("title: 标题"));
+
+        // 构造多字节字符横跨截断边界：前缀 + "写"（3 字节）截 1 字节
+        let content = "x".repeat(8) + "写";
+        std::fs::write(dir.join("b.md"), &content).unwrap();
+        let truncated = read_head(&dir.join("b.md"), 9).unwrap();
+        assert_eq!(truncated, "x".repeat(8), "不完整多字节序列应被丢弃");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -240,8 +240,10 @@ async fn walk_remote(client: &Client, root: &str, errors: &mut Vec<String>) -> V
                     let Some(rel) = extract_rel_path(&folder.href, root) else {
                         continue;
                     };
+                    // folder href 可能带尾斜杠，剥掉防止拼出 "//" 双斜杠请求路径
+                    let rel = rel.trim_end_matches('/').to_string();
                     // 跳过根自身（depth=1 会把被列目录自身作为 Folder 返回一次）
-                    if rel == rel_dir || rel.is_empty() {
+                    if rel.is_empty() || rel == rel_dir {
                         continue;
                     }
                     // 过滤 .trash / 隐藏目录，不递归进去
