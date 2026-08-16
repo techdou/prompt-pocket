@@ -48,8 +48,10 @@ jobs:
         uses: actions/checkout@v4
 
       # 质量门：tag 推送不触发 ci.yml，发布前在本 job 里把测试跑一遍，
-      # 防止未过 CI 的提交被直接打包发给用户
+      # 防止未过 CI 的提交被直接打包发给用户。
+      # shell: bash——矩阵含 Windows（默认 pwsh 解析不了 [[ =~ ]] 语法）
       - name: Validate tag name
+        shell: bash
         run: |
           TAG="${{ inputs.tagName || github.ref_name }}"
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -63,8 +65,6 @@ jobs:
           node-version: 22
           cache: npm
 
-      # 质量门（前端）：tag 推送不触发 ci.yml，发布前把测试跑一遍，
-      # 防止未过 CI 的提交被直接打包发给用户
       - name: Frontend quality gate (check + test)
         run: |
           npm ci
@@ -85,14 +85,7 @@ jobs:
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libsecret-1-dev \
             patchelf
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -111,9 +104,6 @@ jobs:
         run: |
           cargo test --verbose
           cargo clippy --all-targets -- -D warnings
-
-      - name: Install npm dependencies
-        run: npm ci
 
       # tauri-action：build + 自动创建/上传 GitHub Release
       # tagName 用 git 推上来的 tag 本身（v2.0.3），releaseName/releaseBody 自定义。

@@ -156,8 +156,9 @@ struct SyncGuard<'a> {
 impl<'a> SyncGuard<'a> {
     fn acquire(gate: &'a std::sync::Mutex<IoGate>) -> Result<Self, String> {
         // 等待在飞的本地写完成（写命令持锁写盘，这里阻塞到它释放），
-        // 然后在同一临界区内置位 syncing——之后进来的写命令都会被拒绝
-        let mut guard = gate.lock().map_err(|e| e.to_string())?;
+        // 然后在同一临界区内置位 syncing——之后进来的写命令都会被拒绝。
+        // 毒锁恢复（into_inner）：写命令 panic 中断同步不应让后续同步永久失灵
+        let mut guard = gate.lock().unwrap_or_else(|e| e.into_inner());
         if guard.syncing {
             return Err("正在同步中，请稍候".to_string());
         }
@@ -169,9 +170,8 @@ impl<'a> SyncGuard<'a> {
 
 impl Drop for SyncGuard<'_> {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.gate.lock() {
-            guard.syncing = false;
-        }
+        let mut guard = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        guard.syncing = false;
     }
 }
 

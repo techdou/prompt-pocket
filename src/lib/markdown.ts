@@ -149,7 +149,9 @@ export function markdownToPlain(src: string): string {
   out = out.replace(/~~([^~]+)~~/g, "$1");
   out = out.replace(/`([^`]+)`/g, "$1");
   out = out.replace(/\*([^*]+)\*/g, "$1");
-  out = out.replace(/(?<!\w)_([^_]+)_(?!\w)/g, "$1");
+  // 斜体 _x_：无 lookbehind 写法（lookbehind 是 ES2018，老 WKWebView/WebKitGTK
+  // 不支持，静态 import 下模块解析即 SyntaxError 会让整个应用白屏）
+  out = out.replace(/(^|[^\w])_([^_]+)_(?!\w)/gm, "$1$2");
   // 行首标记：标题 #、引用 >、任务列表 [ ]/[x]、无序 -/*/+、有序 1.
   out = out.replace(
     /^(\s*)(#{1,6}\s+|>\s?|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+\.\s+)/gm,

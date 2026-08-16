@@ -276,8 +276,12 @@
     };
   });
 
-  // 选中变化时加载内容
+  // 选中变化时加载内容。
+  // lastLoadedPath 只做"防重复发起"；loadedPath 才表示"内容已就绪"——
+  // 两者必须分开：effect 在发起时就置 lastLoadedPath（同步），
+  // 若 doCopy 用它判断会把"加载在飞"误判成"已加载"，复制到上一条内容
   let lastLoadedPath: string | null = null;
+  let loadedPath: string | null = null;
   let loadToken = 0;
   $effect(() => {
     if (selectedPath && selectedPath !== lastLoadedPath) {
@@ -294,6 +298,7 @@
       if (token !== loadToken || path !== selectedPath) return;
       applyMetaToEditFields(meta);
       editingBody = body;
+      loadedPath = path;
       loadedSnapshot = {
         body,
         title: meta.title,
@@ -331,9 +336,11 @@
       if (next) {
         selectedPath = next.path;
         lastLoadedPath = null; // 强制重新加载
+        loadedPath = null;
       } else {
         selectedPath = null;
         lastLoadedPath = null;
+        loadedPath = null;
       }
     }
     // 刷新分类计数（走 guarded 版本：拖拽手势/写盘中挂起，结束后补刷）
@@ -344,9 +351,10 @@
     if (!selectedPrompt) return;
     try {
       // 内容加载是异步的：快速 ↓↓ 切换后按 Enter，editingBody 可能还是上一条的。
-      // 选中与已加载内容不一致时按路径直接读盘，保证复制内容与选中项一致
+      // 用"已就绪"标记判断（loadedPath 只在加载成功时置位），未就绪则按路径
+      // 直接读盘，保证复制内容与选中项一致
       let body = editingBody;
-      if (lastLoadedPath !== selectedPrompt.path) {
+      if (loadedPath !== selectedPrompt.path) {
         const content = await readPrompt(selectedPrompt.path);
         body = content.body;
       }
@@ -374,6 +382,7 @@
       // 保存可能因标题/分类变化而移动了文件，用新路径更新选中
       selectedPath = saved.path;
       lastLoadedPath = saved.path; // 避免立即重载覆盖编辑内容
+      loadedPath = saved.path; // 保存的内容已就绪，doCopy 无需重读
       // 快照同步到已保存状态（保存后不再是脏的）
       loadedSnapshot = {
         body: editingBody,
@@ -405,6 +414,7 @@
       await guardedRefresh();
       selectedPath = p.path;
       lastLoadedPath = p.path;
+      loadedPath = p.path; // 新建内容（空）已就绪
       query = "";
       // 进入编辑，标题留空引导用户输入
       editingTitle = "";
@@ -430,8 +440,9 @@
       await deletePrompt(selectedPrompt.path);
       selectedPath = null;
       lastLoadedPath = null;
+      loadedPath = null;
       loadedSnapshot = null;
-      await refresh();
+      await guardedRefresh();
     } catch (e) {
       showError(String(e));
     }
@@ -441,6 +452,7 @@
   function cancelEdit() {
     if (selectedPath) {
       lastLoadedPath = null;
+      loadedPath = null;
       void loadPromptContent(selectedPath);
     } else {
       editorMode = "view";
@@ -465,14 +477,14 @@
   async function onCtxMove(category: string) {
     if (!contextMenu.prompt) return;
     const target = contextMenu.prompt;
-    // 移动正在编辑且有未保存修改的项会触发重载，先确认
-    if (target.path === selectedPath && !(await confirmDiscardIfDirty())) return;
     try {
       const moved = await renamePrompt(target.path, target.title, category);
-      // 移动的就是当前选中项：跟随新路径，保住已加载内容不被相邻项覆盖
+      // 移动的就是当前选中项：跟随新路径并保留编辑内容（不重载），
+      // 因此无需脏确认——未保存修改原样留在编辑器里
       if (target.path === selectedPath) {
         selectedPath = moved.path;
         lastLoadedPath = moved.path;
+        loadedPath = moved.path;
         editingCategory = moved.category;
         if (loadedSnapshot) {
           loadedSnapshot = { ...loadedSnapshot, category: moved.category };
@@ -508,7 +520,9 @@
       )
       .sort((a, b) => {
         // 码点序与后端 scan_prompts 的 String::cmp 对齐（localeCompare 是本地化
-        // 拼音序，中文结果与码点序完全不同，会导致"全部"视图乐观排序跳变）
+        // 拼音序，中文结果与码点序完全不同，会导致"全部"视图乐观排序跳变）。
+        // 已知取舍：emoji 等非 BMP 字符按 UTF-16 码元比较与 Rust 码点序仍可能
+        // 相反，极端场景（分类名含 emoji）接受一次刷新跳变
         const c = a.category < b.category ? -1 : a.category > b.category ? 1 : 0;
         if (c !== 0) return c;
         const oa = a.order ?? Number.MAX_SAFE_INTEGER;
@@ -574,6 +588,7 @@
       if (selectedPath === p.path) {
         selectedPath = null;
         lastLoadedPath = null;
+        loadedPath = null;
         loadedSnapshot = null;
       }
       await guardedRefresh();
@@ -597,6 +612,7 @@
       await guardedRefresh();
       selectedPath = newPrompt.path;
       lastLoadedPath = null;
+      loadedPath = null;
       renameDialog.open = false;
     } catch (e) {
       showError(String(e));

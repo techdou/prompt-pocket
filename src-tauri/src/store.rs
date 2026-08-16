@@ -516,14 +516,13 @@ fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
         meta.title = file_stem.clone();
     }
 
-    // 分类取路径首段（与 order 查找的口径一致）：嵌套目录 a/b/c.md 归入一级
-    // 分类 a。取 parent 会让 "a/b" 成为独立分类、且与 order 的首段查找错位
-    let category = rel_str
-        .split('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("未分类")
-        .to_string();
+    // 分类取路径首段（与 scan_prompts 里 order 查找的口径一致）：
+    // 嵌套目录 a/b/c.md 归入一级分类 a；根目录文件（无 /）归"未分类"。
+    // 注意不能用 split('/').next() 兜底——无斜杠时它返回整个文件名而非空
+    let category = match rel_str.find('/') {
+        Some(idx) => rel_str[..idx].to_string(),
+        None => "未分类".to_string(),
+    };
 
     let id = rel_str.trim_end_matches(".md").to_string();
 
@@ -1574,7 +1573,8 @@ mod tests {
     }
 
     /// 嵌套目录的文件归入一级分类（与 order 查找口径一致），
-    /// 不再出现 "a/b" 独立分类 + "a" 空分类的割裂
+    /// 不再出现 "a/b" 独立分类 + "a" 空分类的割裂；
+    /// 根目录文件归"未分类"，不能把文件名当分类（那会让每个根文件各开一个 tab）
     #[test]
     fn nested_dir_prompts_belong_to_top_category() {
         let dir = std::env::temp_dir().join("pp_test_nested_cat");
@@ -1585,16 +1585,21 @@ mod tests {
             "---\ntitle: 深层\n---\n\n正文",
         )
         .unwrap();
+        std::fs::write(dir.join("根文件.md"), "---\ntitle: 根\n---\n\n正文").unwrap();
 
         let res = scan_prompts(&dir).unwrap();
         assert!(
-            res.prompts.iter().all(|p| p.category == "a"),
-            "嵌套文件应归入一级分类 a，实际: {:?}",
+            res.prompts.iter().all(|p| p.category == "a" || p.category == "未分类"),
+            "嵌套文件应归一级分类 a、根文件归未分类，实际: {:?}",
             res.prompts.iter().map(|p| &p.category).collect::<Vec<_>>()
         );
         assert!(
             !res.categories.iter().any(|c| c.name == "a/b"),
             "不应出现 'a/b' 分类"
+        );
+        assert!(
+            !res.categories.iter().any(|c| c.name == "根文件.md"),
+            "文件名不能成为分类"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
