@@ -45,8 +45,12 @@
     t?: Translator;
   } = $props();
 
-  // 分类下拉里加一个"未分类"选项（根目录）
-  let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name)]);
+  // 分类下拉里加一个"未分类"选项（根目录）；后端在有根目录 .md 时也会返回
+  // "未分类"分类，去重避免下拉出现两项
+  let categoryOptions = $derived([
+    "未分类",
+    ...categories.map((c) => c.name).filter((n) => n !== "未分类"),
+  ]);
 
   function categoryLabel(name: string): string {
     return name === "未分类" ? t("common.uncategorized") : name;
@@ -68,17 +72,23 @@
   // preview 容器引用，供 renderRich 扫描 DOM
   let previewEl: HTMLDivElement | undefined = $state();
 
-  // 链接点击拦截：只有 http(s) 链接交给系统浏览器打开（openUrl 有协议白名单），
-  // 锚点/相对路径在"外部浏览器打开"语境下无意义，直接放行 webview 默认行为
+  // 链接点击拦截：只有 http(s) 交给系统浏览器（openUrl 有协议白名单）。
+  // 其余链接（相对路径、协议相对 //、mailto 等）一律吞掉——放行 webview 默认
+  // 行为会让页面导航离开应用，整个 UI 白屏只能重启
   function onPreviewClick(e: MouseEvent) {
     const target = e.target as HTMLElement;
     const anchor = target.closest("a");
     if (!anchor) return;
     const href = anchor.getAttribute("href");
     if (!href || href === "#") return;
-    if (!/^https?:/i.test(href)) return;
     e.preventDefault();
-    void openUrl(href);
+    if (/^https?:/i.test(href)) {
+      void openUrl(href);
+    }
+    // 锚点走页内滚动（默认行为已阻止，手动滚到目标）
+    if (href.startsWith("#")) {
+      document.getElementById(href.slice(1))?.scrollIntoView();
+    }
   }
 
   // body 变化 → marked 同步渲染（秒出 GFM）→ tick 后异步增强（mermaid/katex/高亮）。
@@ -88,7 +98,11 @@
     const currentBody = body;
     if (!previewEl || mode !== "view") return;
     void currentBody;
-    void tick().then(() => renderRich(previewEl!));
+    // tick 回调执行时可能已切到编辑模式（previewEl 变 undefined），判空防止
+    // renderRich(undefined) 抛 TypeError
+    void tick().then(() => {
+      if (previewEl && mode === "view") renderRich(previewEl);
+    });
   });
 </script>
 

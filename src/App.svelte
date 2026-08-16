@@ -22,6 +22,7 @@
     scanPrompts,
   } from "./lib/api";
   import { filterPrompts } from "./lib/search";
+  import { markdownToPlain } from "./lib/markdown";
   import CategoryTabs from "./lib/CategoryTabs.svelte";
   import PromptList from "./lib/PromptList.svelte";
   import Editor from "./lib/Editor.svelte";
@@ -210,7 +211,7 @@
   // 设置界面切换数据目录后：更新配置、重置选中、重新扫描
   // 同步完成后：重新加载列表 + 刷新同步状态
   async function onSynced() {
-    await refresh();
+    await guardedRefresh();
     try {
       syncStatus = await getSyncStatus();
     } catch {
@@ -250,19 +251,29 @@
   }
 
   // 监听后端 sync-finished 事件，自动刷新
-  let unlisten: (() => void) | null = null;
   $effect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
     import("@tauri-apps/api/event")
       .then(({ listen }) => {
+        // cleanup 已跑（dev HMR 卸载）：不再注册
+        if (disposed) return;
         listen("sync-finished", () => {
           void guardedRefresh().catch((e) => showError(String(e)));
           void getSyncStatus()
             .then((s) => (syncStatus = s))
             .catch(() => {});
-        }).then((fn) => (unlisten = fn));
+        }).then((fn) => {
+          // 注册完成时组件已卸载：立即反注册，防止监听器泄漏
+          if (disposed) fn();
+          else unlisten = fn;
+        });
       })
       .catch(() => {});
-    return () => unlisten?.();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   });
 
   // 选中变化时加载内容
@@ -291,13 +302,15 @@
       };
       editorMode = "view";
     } catch (e) {
-      if (token !== loadToken) return;
+      // 与 try 分支同样的双保险：失败响应到达时选中可能已切换/新建，
+      // 响应只对"发起加载那一刻仍是当前选中"的路径生效
+      if (token !== loadToken || path !== selectedPath) return;
       const msg = String(e);
       if (msg.includes("FILE_NOT_FOUND")) {
         // 问题1：文件被外部删除 → 从列表移除，不报错卡死
         removePromptFromList(path);
       } else {
-        error = msg;
+        showError(msg);
       }
     }
   }
@@ -323,8 +336,8 @@
         lastLoadedPath = null;
       }
     }
-    // 刷新分类计数
-    void refresh().catch((e) => showError(String(e)));
+    // 刷新分类计数（走 guarded 版本：拖拽手势/写盘中挂起，结束后补刷）
+    void guardedRefresh().catch((e) => showError(String(e)));
   }
 
   async function doCopy(mode: "markdown" | "plain") {
@@ -337,6 +350,8 @@
         const content = await readPrompt(selectedPrompt.path);
         body = content.body;
       }
+      // plain 模式：剥掉 Markdown 标记再复制，粘贴到纯文本输入框可读
+      if (mode === "plain") body = markdownToPlain(body);
       // copyOrPaste 内部：写剪贴板 → 隐藏窗口 → 按快捷键来源决定是否注入 Ctrl+V
       await copyOrPaste(body, mode);
       copiedFlash = true;
@@ -367,14 +382,14 @@
         copyMode: editingCopyMode,
       };
       editingCategory = saved.category;
-      await refresh(); // reconcile 保住 selectedPath，不被重排劫持
+      await guardedRefresh(); // reconcile 保住 selectedPath，不被重排劫持
       editorMode = "view";
     } catch (e) {
       const msg = String(e);
       if (msg.includes("FILE_NOT_FOUND")) {
         removePromptFromList(selectedPrompt.path);
       } else {
-        error = msg;
+        showError(msg);
       }
     }
   }
@@ -387,7 +402,7 @@
       // 新建用占位标题（文件名是时间戳），进入编辑后用户填写真实标题
       // 保存时若标题变化会自动重命名文件
       const p = await createPrompt(cat, "");
-      await refresh();
+      await guardedRefresh();
       selectedPath = p.path;
       lastLoadedPath = p.path;
       query = "";
@@ -463,7 +478,7 @@
           loadedSnapshot = { ...loadedSnapshot, category: moved.category };
         }
       }
-      await refresh();
+      await guardedRefresh();
     } catch (e) {
       showError(String(e));
     }
@@ -492,12 +507,18 @@
           : p,
       )
       .sort((a, b) => {
-        const c = a.category.localeCompare(b.category);
+        // 码点序与后端 scan_prompts 的 String::cmp 对齐（localeCompare 是本地化
+        // 拼音序，中文结果与码点序完全不同，会导致"全部"视图乐观排序跳变）
+        const c = a.category < b.category ? -1 : a.category > b.category ? 1 : 0;
         if (c !== 0) return c;
         const oa = a.order ?? Number.MAX_SAFE_INTEGER;
         const ob = b.order ?? Number.MAX_SAFE_INTEGER;
         if (oa !== ob) return oa - ob;
-        return b.meta.updated.localeCompare(a.meta.updated);
+        return b.meta.updated < a.meta.updated
+          ? -1
+          : b.meta.updated > a.meta.updated
+            ? 1
+            : 0;
       });
 
     reorderInFlight = true;
@@ -555,7 +576,7 @@
         lastLoadedPath = null;
         loadedSnapshot = null;
       }
-      await refresh();
+      await guardedRefresh();
     } catch (e) {
       showError(String(e));
     }
@@ -573,7 +594,7 @@
         renameDialog.title.trim() || t("app.untitled"),
         renameDialog.category,
       );
-      await refresh();
+      await guardedRefresh();
       selectedPath = newPrompt.path;
       lastLoadedPath = null;
       renameDialog.open = false;
@@ -586,7 +607,7 @@
   async function onCreateCategory(name: string) {
     try {
       await createCategory(name);
-      await refresh();
+      await guardedRefresh();
     } catch (e) {
       showError(String(e));
     }
@@ -613,7 +634,7 @@
       if (selectedCategory === catRenameDialog.oldName) {
         selectedCategory = newName;
       }
-      await refresh();
+      await guardedRefresh();
       catRenameDialog.open = false;
     } catch (e) {
       showError(String(e));
@@ -636,6 +657,10 @@
   function handleKeydown(e: KeyboardEvent) {
     if (e.defaultPrevented) return;
     if (e.key === "Escape") {
+      // 拖拽手势中 Esc：先结束手势（复位标志 + 补刷挂起的刷新）。
+      // 否则窗口隐藏后 pointerup 丢失，dragGestureActive 滞留 true，
+      // 后续 refresh 全部被挂起直到下次鼠标事件才自愈
+      if (dragGestureActive) onDragGestureEnd();
       if (contextMenu.open) {
         contextMenu.open = false;
         return;

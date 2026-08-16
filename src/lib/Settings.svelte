@@ -113,6 +113,11 @@
       message = { type: "err", text: t("settings.fillPassword") };
       return;
     }
+    // __KEEP__ 是"保留旧密码"的占位符：真实密码恰好等于它会被静默忽略，拒绝之
+    if (editingPassword && pwd === "__KEEP__") {
+      message = { type: "err", text: t("settings.passwordKeepReserved") };
+      return;
+    }
     saving = true;
     message = null;
     try {
@@ -339,7 +344,7 @@
         <button class="ghost" onclick={doTest} disabled={testing || saving || transferring !== null}>
           {testing ? t("settings.testing") : t("settings.testConnection")}
         </button>
-        <button class="primary" onclick={doSave} disabled={saving || testing}>
+        <button class="primary" onclick={doSave} disabled={saving || testing || transferring !== null}>
           {saving ? t("settings.saving") : t("settings.saveConfig")}
         </button>
       </footer>

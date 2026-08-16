@@ -97,6 +97,7 @@ const zh = {
   "settings.testOk": "✓ 连接成功！账号和应用密码有效",
   "settings.connectionFailed": "连接失败：{error}",
   "settings.fillUsername": "请填写坚果云账号",
+  "settings.passwordKeepReserved": "该密码值是系统保留占位符，请换一个密码",
   "settings.fillPassword": "请填写应用密码",
   "settings.configSaved": "✓ 配置已保存",
 
@@ -198,6 +199,7 @@ const en: Record<keyof typeof zh, string> = {
   "settings.connectionFailed": "Connection failed: {error}",
   "settings.fillUsername": "Enter your Nutstore account",
   "settings.fillPassword": "Enter the app password",
+  "settings.passwordKeepReserved": "This password value is reserved by the system, please choose another one",
   "settings.configSaved": "✓ Settings saved",
 
   "reorder.needTwoPrompts": "At least 2 prompts are needed to reorder",

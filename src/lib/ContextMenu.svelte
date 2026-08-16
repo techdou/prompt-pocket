@@ -32,7 +32,16 @@
   // 移动分类子菜单
   let showMoveMenu = $state(false);
 
-  let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name)]);
+  // open 被外部置 false（如 App 的 Esc 链直接关闭）时复位子菜单状态，
+  // 避免下次打开时移动子菜单直接展开
+  $effect(() => {
+    if (!open) showMoveMenu = false;
+  });
+
+  let categoryOptions = $derived([
+    "未分类",
+    ...categories.map((c) => c.name).filter((n) => n !== "未分类"),
+  ]);
 
   // 视口边界翻转：菜单挂载后测量，越出窗口右/下缘则向左/上收回
   let menuEl: HTMLDivElement | null = $state(null);

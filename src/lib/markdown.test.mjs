@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { renderMarkdown } from "./markdown.ts";
+import { renderMarkdown, markdownToPlain } from "./markdown.ts";
 
 /** 提取 marked 输出里是否有指定标签/属性，简化断言 */
 const includes = (html, needle) => html.includes(needle);
@@ -121,5 +121,47 @@ describe("renderMarkdown - XSS 防护", () => {
   it("正常 https 链接保留", () => {
     const html = renderMarkdown("[官网](https://example.com)");
     assert.ok(includes(html, 'href="https://example.com"'));
+  });
+});
+
+describe("markdownToPlain - plain 复制模式", () => {
+  it("去掉常见行内标记", () => {
+    const plain = markdownToPlain("**加粗** *斜体* ~~删除~~ `代码` __粗__");
+    assert.equal(plain, "加粗 斜体 删除 代码 粗");
+  });
+
+  it("链接保留文字去掉 URL，图片保留 alt", () => {
+    const plain = markdownToPlain("见 [文档](https://a.b) 和 ![图](https://c.d/x.png)");
+    assert.equal(plain, "见 文档 和 图");
+  });
+
+  it("去掉行首标记（标题/引用/任务列表/有序无序）", () => {
+    const src = [
+      "## 标题",
+      "> 引用",
+      "- [x] 完成",
+      "- 未完成",
+      "1. 第一",
+    ].join("\n");
+    const plain = markdownToPlain(src);
+    assert.ok(!plain.includes("##"), `标题标记应去除: ${plain}`);
+    assert.ok(!plain.includes("> 引用"), `引用标记应去除: ${plain}`);
+    assert.equal(plain, "标题\n引用\n完成\n未完成\n第一");
+  });
+
+  it("围栏代码块保留内容", () => {
+    const plain = markdownToPlain("说明\n```js\nvar x = 1;\n```");
+    assert.ok(plain.includes("var x = 1;"));
+    assert.ok(!plain.includes("```"));
+  });
+
+  it("水平线被移除", () => {
+    const plain = markdownToPlain("上\n\n---\n\n下");
+    assert.equal(plain, "上\n\n下");
+  });
+
+  it("无标记文本原样返回", () => {
+    assert.equal(markdownToPlain("普通文本 123"), "普通文本 123");
+    assert.equal(markdownToPlain(""), "");
   });
 });

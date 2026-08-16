@@ -128,3 +128,34 @@ export function renderMarkdown(src: string): string {
   if (!src || !src.trim()) return '<p class="empty-body">（无内容）</p>';
   return marked.parse(src, { async: false }) as string;
 }
+
+/**
+ * Markdown → 纯文本：copy_mode 为 plain 时去掉常见 Markdown 标记，
+ * 让粘贴目标（不支持 Markdown 的输入框）拿到可读文本。
+ * 轻量正则实现，目标是常见标记干净去除，不追求语义级还原；
+ * 表格保留竖线结构（去掉标记后仍可读）。
+ */
+export function markdownToPlain(src: string): string {
+  if (!src) return "";
+  let out = src;
+  // 围栏代码块：去围栏保留内容
+  out = out.replace(/```[^\n]*\n([\s\S]*?)```/g, "$1");
+  // 图片 ![alt](url) → alt；链接 [text](url) → text
+  out = out.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
+  out = out.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
+  // 行内标记：**x** / __x__ / ~~x~~ / `x` / *x* → x
+  out = out.replace(/\*\*([^*]+)\*\*/g, "$1");
+  out = out.replace(/__([^_]+)__/g, "$1");
+  out = out.replace(/~~([^~]+)~~/g, "$1");
+  out = out.replace(/`([^`]+)`/g, "$1");
+  out = out.replace(/\*([^*]+)\*/g, "$1");
+  out = out.replace(/(?<!\w)_([^_]+)_(?!\w)/g, "$1");
+  // 行首标记：标题 #、引用 >、任务列表 [ ]/[x]、无序 -/*/+、有序 1.
+  out = out.replace(
+    /^(\s*)(#{1,6}\s+|>\s?|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+\.\s+)/gm,
+    "$1",
+  );
+  // 水平线（--- / *** / ___）
+  out = out.replace(/^\s*([-*_]\s*){3,}$/gm, "");
+  return out.trim();
+}
