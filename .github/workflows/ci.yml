@@ -10,6 +10,10 @@ on:
     branches: ['**']
   pull_request:
 
+# 最小 token 权限：CI 只需要读代码，防止第三方 action 拿到多余写权限
+permissions:
+  contents: read
+
 # 同一分支新 push 时取消旧 run，省额度
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -50,11 +54,13 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # test/build 两个 job 共享同一份依赖缓存，避免依赖编译两遍
+          shared-key: ci
 
       # Linux：Tauri 2 需要的系统库
       # - libwebkit2gtk-4.1-dev：Tauri 2 专用（不是 4.0）
       # - libxdo-dev：enigo 模拟键盘输入
-      # - libsecret-1-dev：keyring crate 编译需要（运行时凭据存储）
+      # （keyring 4 的 linux-native 后端走 zbus，编译不需要 libsecret）
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
@@ -68,8 +74,7 @@ jobs:
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libsecret-1-dev
+            librsvg2-dev
 
       - name: Install npm dependencies
         run: npm ci
@@ -127,6 +132,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: ci
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -146,10 +152,9 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build frontend
-        run: npm run build
-
       # 验证 Tauri 应用在三平台都能打包（debug 模式更快，约 1-2 分钟）
-      # release 模式留给 release.yml（签名 + 发版时用）
+      # release 模式留给 release.yml（签名 + 发版时用）。
+      # 前端构建由 tauri.conf.json 的 beforeBuildCommand（npm run build）自动执行，
+      # 不再单独跑一遍避免重复
       - name: Build Tauri app (debug)
         run: npx tauri build --debug

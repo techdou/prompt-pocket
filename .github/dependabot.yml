@@ -1,0 +1,28 @@
+# Dependabot：自动跟进依赖更新
+# - github-actions：action 版本升级（含按 SHA pin 的 tauri-action，发 PR 提示换新 SHA）
+# - npm / cargo：前后端依赖安全补丁
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]

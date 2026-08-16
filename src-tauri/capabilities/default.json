@@ -12,10 +12,6 @@
     "core:window:allow-center",
     "core:window:allow-start-dragging",
     "core:window:allow-start-resize-dragging",
-    "global-shortcut:allow-register",
-    "global-shortcut:allow-unregister",
-    "global-shortcut:allow-is-registered",
-    "clipboard-manager:allow-write-text",
     "dialog:allow-message"
   ]
 }

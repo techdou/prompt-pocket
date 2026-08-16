@@ -73,8 +73,7 @@ Prompt Pocket 是一个轻量级桌面提示词管理工具。它用 `Ctrl+Alt+P
 
 ### 平台说明
 
-- **macOS**：自动粘贴依赖辅助功能权限。首次唤出粘贴时系统会弹授权框；若拒绝过，到「系统设置 → 隐私与安全性 → 辅助功能」里勾选 Prompt Pocket 后重启应用。
-- **Linux / Wayland**：Wayland 会话下模拟键盘粘贴（enigo）受协议限制可能无效，此时只会写入剪贴板，请手动 `Ctrl+V`；X11 会话不受影响。
+- **自动粘贴仅 Windows 生效**：当前版本的 macOS / Linux 前台焦点检测尚未实现，即使唤出前焦点在输入框，也只写入剪贴板，请手动 `Cmd+V` / `Ctrl+V` 粘贴。
 - **快捷键冲突**：`Ctrl+Alt+P` 若被其它软件占用，全局唤出会失效，请先在占用方里改键（当前版本快捷键为固定值）。
 
 ### 快捷键
@@ -183,6 +182,7 @@ npm run tauri:build
 ### 发布
 
 - GitHub Release：按平台上传 macOS 包、Windows 安装包、MSI 和便携版可执行文件。
+- 安装包未做代码签名：Windows 首次运行可能弹 SmartScreen 警告（选「仍要运行」）；macOS 首次打开需右键 →「打开」绕过 Gatekeeper。
 - GitHub Pages：落地页位于 `docs/index.html`，截图资源位于 `docs/screenshots/`。
 - Pages 配置为 `main` 分支的 `/docs` 目录；推送到 `main` 后按仓库配置重新发布。
 
@@ -201,7 +201,7 @@ python -m http.server 8010
 | 后端 | Rust |
 | 前端 | Svelte 5 + Vite + TypeScript |
 | Markdown | marked + marked-highlight |
-| 富内容增强 | Mermaid / KaTeX / highlight.js CDN 按需加载 |
+| 富内容增强 | Mermaid / KaTeX / highlight.js 本地内置、按需加载 |
 | 快捷键 | tauri-plugin-global-shortcut |
 | 剪贴板 | tauri-plugin-clipboard-manager |
 | 托盘 | Tauri tray icon |
@@ -251,8 +251,7 @@ If Prompt Pocket was opened from a text input, it copies the prompt and pastes i
 
 ### Platform Notes
 
-- **macOS**: auto-paste requires Accessibility permission. macOS prompts on first use; if you denied it, enable Prompt Pocket under System Settings → Privacy & Security → Accessibility, then restart the app.
-- **Linux / Wayland**: simulated paste (enigo) may not work under Wayland due to protocol restrictions — the prompt is still copied to the clipboard, so paste manually with `Ctrl+V`. X11 sessions are unaffected.
+- **Auto-paste works on Windows only**: foreground focus detection is not yet implemented on macOS / Linux. Even if the caret was in a text input, the prompt is only copied to the clipboard — paste manually with `Cmd+V` / `Ctrl+V`.
 - **Hotkey conflicts**: if another app owns `Ctrl+Alt+P`, the global hotkey will not register. Change the shortcut in the conflicting app first (the hotkey is fixed in this version).
 
 ### Keyboard Shortcuts
@@ -361,6 +360,7 @@ npm run tauri:build
 ### Publishing
 
 - GitHub Release: upload the macOS package, Windows installer, MSI package, and portable executable by platform.
+- Installers are unsigned: Windows may show a SmartScreen warning on first run (choose "Run anyway"); on macOS, right-click → Open to bypass Gatekeeper on first launch.
 - GitHub Pages: landing page lives in `docs/index.html`; screenshots live in `docs/screenshots/`.
 - Pages is configured to deploy from `/docs` on the `main` branch.
 
