@@ -330,8 +330,15 @@
   async function doCopy(mode: "markdown" | "plain") {
     if (!selectedPrompt) return;
     try {
+      // 内容加载是异步的：快速 ↓↓ 切换后按 Enter，editingBody 可能还是上一条的。
+      // 选中与已加载内容不一致时按路径直接读盘，保证复制内容与选中项一致
+      let body = editingBody;
+      if (lastLoadedPath !== selectedPrompt.path) {
+        const content = await readPrompt(selectedPrompt.path);
+        body = content.body;
+      }
       // copyOrPaste 内部：写剪贴板 → 隐藏窗口 → 按快捷键来源决定是否注入 Ctrl+V
-      await copyOrPaste(editingBody, mode);
+      await copyOrPaste(body, mode);
       copiedFlash = true;
       setTimeout(() => (copiedFlash = false), 800);
     } catch (e) {
@@ -373,6 +380,8 @@
   }
 
   async function doCreate() {
+    // 当前编辑有未保存修改时先确认（新建会重置全部编辑字段）
+    if (!(await confirmDiscardIfDirty())) return;
     const cat = selectedCategory === "__all__" ? "未分类" : selectedCategory;
     try {
       // 新建用占位标题（文件名是时间戳），进入编辑后用户填写真实标题
@@ -440,12 +449,20 @@
 
   async function onCtxMove(category: string) {
     if (!contextMenu.prompt) return;
+    const target = contextMenu.prompt;
+    // 移动正在编辑且有未保存修改的项会触发重载，先确认
+    if (target.path === selectedPath && !(await confirmDiscardIfDirty())) return;
     try {
-      await renamePrompt(
-        contextMenu.prompt.path,
-        contextMenu.prompt.title,
-        category,
-      );
+      const moved = await renamePrompt(target.path, target.title, category);
+      // 移动的就是当前选中项：跟随新路径，保住已加载内容不被相邻项覆盖
+      if (target.path === selectedPath) {
+        selectedPath = moved.path;
+        lastLoadedPath = moved.path;
+        editingCategory = moved.category;
+        if (loadedSnapshot) {
+          loadedSnapshot = { ...loadedSnapshot, category: moved.category };
+        }
+      }
       await refresh();
     } catch (e) {
       showError(String(e));
@@ -546,6 +563,10 @@
 
   // 重命名对话框提交
   async function submitRename() {
+    // 重命名当前正在编辑的项会强制重载内容，未保存修改先确认
+    if (renameDialog.path === selectedPath && !(await confirmDiscardIfDirty())) {
+      return;
+    }
     try {
       const newPrompt = await renamePrompt(
         renameDialog.path,
@@ -635,9 +656,11 @@
         settingsOpen = false;
         return;
       }
-      // 编辑态 Esc：先退出编辑（回到 view 并重载磁盘内容），而不是直接隐藏窗口
+      // 编辑态 Esc：先确认丢弃未保存修改，再退出编辑（回到 view 并重载磁盘内容）
       if (editorMode === "edit") {
-        cancelEdit();
+        void confirmDiscardIfDirty().then((ok) => {
+          if (ok) cancelEdit();
+        });
         return;
       }
       e.preventDefault();

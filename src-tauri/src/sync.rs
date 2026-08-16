@@ -106,8 +106,11 @@ pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<Syn
 
         // tombstone 判定：本地曾主动删除该文件
         if let Some(tomb) = tombstones.get(&file.rel) {
-            if tomb.size as i64 == file.content_length {
-                // 远程还是删除时的那个版本 → 不复活，跳过
+            // size=0 是"记录时文件已不存在"的失真值（旧版 rename_category 产生）：
+            // 与远程大小必然不等，会被误判成"远程新版本"而复活。
+            // 保守跳过（防复活优先），由下次 push 的删除传播收敛：DELETE 成功后清除记录。
+            if tomb.size == 0 || tomb.size as i64 == file.content_length {
+                // 远程还是删除时的那个版本（或大小未知）→ 不复活，跳过
                 skipped += 1;
                 continue;
             }

@@ -223,6 +223,14 @@ pub fn save_tombstones(root: &Path, map: &HashMap<String, Tombstone>) -> io::Res
 /// 记录一条删除（文件已不存在时 size 记 0）。失败不阻断主流程（调用方 let _）。
 pub fn record_tombstone(root: &Path, rel_unix: &str) -> io::Result<()> {
     let size = fs::metadata(root.join(rel_unix)).map(|m| m.len()).unwrap_or(0);
+    record_tombstone_with_size(root, rel_unix, size)
+}
+
+/// 记录一条删除，size 由调用方提供。
+/// 用于文件即将被移动/重命名、事后取不到 size 的场景：
+/// pull 端靠"tombstone size == 远程大小"判定防复活，size 失真（记成 0）
+/// 会让云端旧文件被当成新版本下载复活。
+pub fn record_tombstone_with_size(root: &Path, rel_unix: &str, size: u64) -> io::Result<()> {
     let mut map = load_tombstones(root);
     map.insert(
         rel_unix.to_string(),
@@ -703,6 +711,13 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
     let old_dir = root.join(&safe_old);
     let new_dir = root.join(&safe_new);
 
+    // sanitize 后同名（如新旧名仅差空格）：重命名是空操作，直接返回。
+    // 否则下面的合并分支会空转，却把该分类所有 .md 误记成 tombstone，
+    // 下次同步会把云端同路径文件当"本地已删除"删掉
+    if old_dir == new_dir {
+        return Ok(());
+    }
+
     if !old_dir.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -710,8 +725,10 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
         ));
     }
 
-    // 移动前先收集旧目录里的 .md 相对路径（用于 tombstone）
-    let old_mds: Vec<String> = WalkDir::new(&old_dir)
+    // 移动前先收集旧目录里的 .md（相对路径, 大小）。
+    // tombstone 必须带删除时刻的真实大小：rename 之后再取，旧路径已不存在只能得 0，
+    // pull 端"大小相同才防复活"的比对会失真，云端旧文件会被当成新版本下载复活
+    let old_mds: Vec<(String, u64)> = WalkDir::new(&old_dir)
         .min_depth(1)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -720,10 +737,13 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
                 && e.path().extension().and_then(|x| x.to_str()) == Some("md")
         })
         .filter_map(|e| {
-            e.path()
+            let rel = e
+                .path()
                 .strip_prefix(root)
                 .ok()
-                .map(path_to_unix)
+                .map(path_to_unix)?;
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            Some((rel, size))
         })
         .collect();
 
@@ -763,14 +783,14 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
     } else {
         fs::rename(&old_dir, &new_dir)?;
         // 整体重命名：新路径 = 旧路径换目录前缀
-        for rel in &old_mds {
+        for (rel, _) in &old_mds {
             new_rels.push(rel.replacen(&format!("{safe_old}/"), &format!("{safe_new}/"), 1));
         }
     }
 
-    // 旧路径全部记 tombstone（删除传播）；新路径清除 tombstone（防来回重命名后误删云端）
-    for rel in &old_mds {
-        let _ = record_tombstone(root, rel);
+    // 旧路径全部记 tombstone（删除传播，带移动前的真实大小）；新路径清除 tombstone（防来回重命名后误删云端）
+    for (rel, size) in &old_mds {
+        let _ = record_tombstone_with_size(root, rel, *size);
     }
     for rel in &new_rels {
         let _ = remove_tombstone(root, rel);
@@ -1391,6 +1411,52 @@ mod tests {
         let new_abs = save_prompt(&dir, &abs, &req).unwrap();
 
         assert!(new_abs.to_string_lossy().contains("原分类"), "不应移动目录");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// rename_category 的 tombstone 必须带移动前的真实大小：
+    /// size=0 会让 pull 端"大小相同才防复活"的比对失真，云端旧文件被当新版本复活
+    #[test]
+    fn rename_category_tombstone_records_real_size() {
+        let dir = std::env::temp_dir().join("pp_test_rename_tomb_size");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let abs = create_prompt(&dir, "旧分类", "移动我").unwrap();
+        let rel = path_to_unix(abs.strip_prefix(&dir).unwrap());
+        let real_size = std::fs::metadata(&abs).unwrap().len();
+
+        rename_category(&dir, "旧分类", "新分类").unwrap();
+
+        let tombstones = load_tombstones(&dir);
+        let tomb = tombstones.get(&rel).expect("旧路径应有 tombstone");
+        assert_eq!(tomb.size, real_size, "tombstone 应记录移动前的真实大小");
+        assert!(tomb.size > 0, "时间戳文件不可能为 0 字节");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 同名重命名（sanitize 后相同）是空操作：不产生 tombstone、文件原样保留。
+    /// 旧版会在合并分支把该分类所有 .md 误记成 tombstone，同步时云端被误删
+    #[test]
+    fn rename_category_to_same_name_is_noop() {
+        let dir = std::env::temp_dir().join("pp_test_rename_same");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        create_prompt(&dir, "写作", "内容").unwrap();
+        rename_category(&dir, "写作", "写作").unwrap();
+
+        assert!(
+            load_tombstones(&dir).is_empty(),
+            "同名重命名不应产生 tombstone"
+        );
+        let res = scan_prompts(&dir).unwrap();
+        assert!(
+            res.prompts.iter().any(|p| p.category == "写作"),
+            "文件应原样保留"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
