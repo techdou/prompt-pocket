@@ -467,35 +467,6 @@ fn remote_url(root: &str, rel: &str) -> String {
     format!("/{}/{}", encode_segments(root), encode_segments(rel))
 }
 
-/// 紧凑时间戳，用于备份文件名（如 20260628T153000）
-fn now_iso_compact() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86400;
-    let rem = secs % 86400;
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-    let s = rem % 60;
-    let (y, mo, d) = civil_from_days(days as i64);
-    format!("{:04}{:02}{:02}T{:02}{:02}{:02}", y, mo, d, h, m, s)
-}
-
-/// Howard Hinnant 的 days_from_civil 逆运算
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
-
 /// 从 WebDAV href 中提取相对于 remote_root 的路径
 /// href 形如 /dav/PromptPocket/%E5%86%99%E4%BD%9C/a.md
 /// 返回 写作/a.md（URL 解码 + 去掉根前缀）
@@ -593,20 +564,9 @@ fn clean_local_extra(
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
             if !remote_files.contains(&rel_unix) {
-                // 备份到 .trash/ 后删除（避免永久丢失）
-                let trash_dir = local_dir.join(".trash");
-                let _ = std::fs::create_dir_all(&trash_dir);
-                let backup_name = format!(
-                    "{}_{}.md",
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("untitled"),
-                    now_iso_compact()
-                );
-                let backup_path = trash_dir.join(backup_name);
-                if std::fs::rename(&path, &backup_path).is_err() {
-                    let _ = std::fs::remove_file(&path);
-                }
+                // 备份到 .trash/ 后删除（避免永久丢失）；与 store::move_to_trash
+                // 共用同一实现（含同秒同名备份的防覆盖序号）
+                let _ = crate::store::move_to_trash(local_dir, &path);
                 *deleted += 1;
             }
         }

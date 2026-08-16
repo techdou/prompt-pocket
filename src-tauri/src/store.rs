@@ -106,10 +106,14 @@ pub fn parse_markdown(content: &str) -> (PromptMeta, String) {
     if let Some(rest) = body_start {
         if let Some(end) = find_frontmatter_end(rest) {
             let fm_raw = &rest[..end];
-            let body = rest[end..]
-                .trim_start_matches("---")
-                .trim_start_matches(['\n', '\r', ' '])
-                .to_string();
+            // 精确剥离闭合的 `---` 分隔符一次。不能用 trim_start_matches：
+            // 它会贪婪吞掉正文开头多余的前导短横线（"---- 数据" 丢 3 个字符，
+            // 手写文件里闭合符后紧跟水平线 `---` 会整行丢失）
+            let after_fence = rest[end..]
+                .strip_prefix("---")
+                .unwrap_or(&rest[end..])
+                .trim_start_matches(['\n', '\r', ' ']);
+            let body = after_fence.to_string();
             let mut meta = parse_yaml_frontmatter(fm_raw);
             // 保留原始 created（解析到的），updated 留待保存时刷新
             if meta.created.is_empty() {
@@ -176,15 +180,22 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
 /// .trash 目录名：本地删除/被覆盖文件的备份位置（不进列表、不同步）
 pub const TRASH_DIR: &str = ".trash";
 
-/// 把文件移入 .trash/（rename 失败降级为删除，返回是否有备份留存）
+/// 把文件移入 .trash/（rename 失败降级为删除，返回是否有备份留存）。
+/// 备份名秒级时间戳，同秒删除同名文件时追加序号防覆盖。
 pub fn move_to_trash(root: &Path, abs: &Path) -> io::Result<()> {
     let trash_dir = root.join(TRASH_DIR);
     fs::create_dir_all(&trash_dir)?;
-    let backup_name = format!(
-        "{}_{}.md",
-        abs.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled"),
-        now_compact()
-    );
+    let stem = abs
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("untitled");
+    let stamp = now_compact();
+    let mut backup_name = format!("{stem}_{stamp}.md");
+    let mut n = 1;
+    while trash_dir.join(&backup_name).exists() {
+        backup_name = format!("{stem}_{stamp}-{n}.md");
+        n += 1;
+    }
     let backup_path = trash_dir.join(backup_name);
     if fs::rename(abs, &backup_path).is_err() {
         fs::remove_file(abs)?;
@@ -440,6 +451,24 @@ pub fn rename_category_in_order(root: &Path, old_name: &str, new_name: &str) -> 
         save_category_order(root, &order)?;
     }
     Ok(())
+}
+
+/// 重命名分类时同步迁移 .order.json：key 换新名，value 路径换目录前缀。
+/// 不迁移的话，重命名后 order 的 key 与路径全部失配，
+/// 该分类内用户拖好的顺序静默失效、回退到按修改时间排序。
+fn migrate_prompt_order_on_category_rename(root: &Path, old_name: &str, new_name: &str) {
+    let mut map = load_order_map(root);
+    let Some(paths) = map.remove(old_name) else {
+        return;
+    };
+    let new_paths: Vec<String> = paths
+        .iter()
+        .map(|p| p.replacen(&format!("{old_name}/"), &format!("{new_name}/"), 1))
+        .collect();
+    map.insert(new_name.to_string(), new_paths);
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = write_atomic(&root.join(ORDER_FILE), json.as_bytes());
+    }
 }
 
 fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
@@ -796,8 +825,11 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
         let _ = remove_tombstone(root, rel);
     }
 
-    // 同步更新 .category-order.json 里的旧名为新名（若存在）
-    let _ = rename_category_in_order(root, old_name, new_name);
+    // 同步更新排序文件（若存在）：.category-order.json 的分类名换新名，
+    // .order.json 的 key 和路径前缀一并迁移。两个文件的 key 都是磁盘目录名
+    // （sanitize 后的），传 safe 名而非用户原始输入，否则含特殊字符时失配
+    let _ = rename_category_in_order(root, &safe_old, &safe_new);
+    migrate_prompt_order_on_category_rename(root, &safe_old, &safe_new);
     Ok(())
 }
 
@@ -1457,6 +1489,55 @@ mod tests {
             res.prompts.iter().any(|p| p.category == "写作"),
             "文件应原样保留"
         );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 正文以连续短横线开头时不能被 frontmatter 解析吞掉
+    /// （旧版 trim_start_matches("---") 会把 "---- 数据" 吞成 "-- 数据"）
+    #[test]
+    fn parse_preserves_leading_dashes_in_body() {
+        let content = "---\ntitle: x\n---\n---- 数据分隔线\n\n正文";
+        let (_meta, body) = parse_markdown(content);
+        assert!(
+            body.starts_with("---- 数据分隔线"),
+            "正文开头短横线应完整保留，实际: {body}"
+        );
+
+        // 闭合分隔符后紧跟水平线（手写文件无空行场景）
+        let content2 = "---\ntitle: x\n---\n---\n水平线后的正文";
+        let (_m2, body2) = parse_markdown(content2);
+        assert!(
+            body2.starts_with("---\n水平线后的正文"),
+            "水平线应保留，实际: {body2}"
+        );
+    }
+
+    /// 重命名分类后 .order.json 的 key 与路径前缀同步迁移，自定义排序不丢失
+    #[test]
+    fn rename_category_migrates_order_json() {
+        let dir = std::env::temp_dir().join("pp_test_rename_order_migrate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let p1 = create_prompt(&dir, "旧分类", "甲").unwrap();
+        let p2 = create_prompt(&dir, "旧分类", "乙").unwrap();
+        let p1_rel = path_to_unix(p1.strip_prefix(&dir).unwrap());
+        let p2_rel = path_to_unix(p2.strip_prefix(&dir).unwrap());
+        reorder_category(&dir, "旧分类", &[p2_rel, p1_rel]).unwrap();
+
+        rename_category(&dir, "旧分类", "新分类").unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+        let cat: Vec<&str> = res
+            .prompts
+            .iter()
+            .filter(|p| p.category == "新分类")
+            .map(|p| p.title.as_str())
+            .collect();
+        assert_eq!(cat.len(), 2);
+        assert_eq!(cat[0], "乙", "重命名分类后自定义顺序应保留");
+        assert_eq!(cat[1], "甲");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

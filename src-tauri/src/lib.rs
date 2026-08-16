@@ -54,7 +54,8 @@ struct AppState {
     config_file: PathBuf,
     last_sync: Mutex<Option<String>>,
     last_error: Mutex<Option<String>>,
-    syncing: Mutex<bool>,
+    /// 本地写命令与同步命令的互斥闸（见 IoGate）
+    io_gate: Mutex<IoGate>,
     last_hotkey_had_text_input: Mutex<bool>,
 }
 
@@ -108,33 +109,68 @@ impl AppState {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
-            syncing: *self.syncing.lock().unwrap_or_else(|e| e.into_inner()),
+            syncing: self
+                .io_gate
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .syncing,
         }
     }
+}
+
+/// 本地写命令与同步命令的互斥状态，由一把锁保护：
+/// - 写命令在锁内检查 syncing==false 后**持有锁**做完磁盘写再释放，
+///   同步命令想置位 syncing 必须先拿到同一把锁——彻底消除
+///   "写命令检查通过 → 同步开始 → 两者互写同一文件"的 check-then-act 竞窗
+/// - 同步命令在锁内置位 syncing 后**释放锁**做网络 IO（async 不能持 std 锁跨 await），
+///   期间任何写命令进锁都能看到 syncing==true 而拒绝
+#[derive(Default)]
+struct IoGate {
+    syncing: bool,
+}
+
+/// 写命令的磁盘 IO 许可：持锁期间同步命令无法启动。
+/// 写命令是同步 fn（Tauri 线程池执行），持 std MutexGuard 跨磁盘 IO 是安全的；
+/// 本地文件写为毫秒级，同步命令开头至多等待一个写命令的时长。
+struct LocalIoPermit<'a> {
+    _guard: std::sync::MutexGuard<'a, IoGate>,
+}
+
+fn begin_local_io(state: &AppState) -> Result<LocalIoPermit<'_>, String> {
+    let guard = state
+        .io_gate
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if guard.syncing {
+        return Err("正在同步中，请稍候再编辑".to_string());
+    }
+    Ok(LocalIoPermit { _guard: guard })
 }
 
 /// syncing 标志的 RAII 守卫：创建时在单次加锁内完成 check-and-set（消除 TOCTOU），
 /// Drop 时自动复位——即使同步过程 panic，也不会永久卡在"同步中"需要重启。
 struct SyncGuard<'a> {
-    flag: &'a std::sync::Mutex<bool>,
+    gate: &'a std::sync::Mutex<IoGate>,
 }
 
 impl<'a> SyncGuard<'a> {
-    fn acquire(flag: &'a std::sync::Mutex<bool>) -> Result<Self, String> {
-        let mut guard = flag.lock().map_err(|e| e.to_string())?;
-        if *guard {
+    fn acquire(gate: &'a std::sync::Mutex<IoGate>) -> Result<Self, String> {
+        // 等待在飞的本地写完成（写命令持锁写盘，这里阻塞到它释放），
+        // 然后在同一临界区内置位 syncing——之后进来的写命令都会被拒绝
+        let mut guard = gate.lock().map_err(|e| e.to_string())?;
+        if guard.syncing {
             return Err("正在同步中，请稍候".to_string());
         }
-        *guard = true;
+        guard.syncing = true;
         drop(guard);
-        Ok(Self { flag })
+        Ok(Self { gate })
     }
 }
 
 impl Drop for SyncGuard<'_> {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.flag.lock() {
-            *guard = false;
+        if let Ok(mut guard) = self.gate.lock() {
+            guard.syncing = false;
         }
     }
 }
@@ -330,21 +366,15 @@ fn read_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<Prompt
     })
 }
 
-/// 同步进行中拒绝本地写操作：下载覆盖与本地保存互写同一文件会互相吞掉（后写赢、无提示）
-fn ensure_not_syncing(state: &AppState) -> Result<(), String> {
-    if *state.syncing.lock().map_err(|e| e.to_string())? {
-        return Err("正在同步中，请稍候再编辑".to_string());
-    }
-    Ok(())
-}
-
+/// 同步进行中拒绝本地写：写命令持 IoGate 锁写盘（begin_local_io），
+/// 与下载覆盖互斥——两者互写同一文件会互相吞掉（后写赢、无提示）
 #[tauri::command]
 fn save_prompt(
     path: String,
     req: SaveRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
-    ensure_not_syncing(&state)?;
+    let _io = begin_local_io(&state)?;
     let abs = resolve_abs(&state.local_dir, &path)?;
     // save_prompt 现在返回新路径（可能因标题重命名而变化）
     let new_abs = save_prompt_disk(&state.local_dir, &abs, &req).map_err(|e| {
@@ -371,7 +401,7 @@ fn rename_prompt(
     new_category: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
-    ensure_not_syncing(&state)?;
+    let _io = begin_local_io(&state)?;
     let old_abs = resolve_abs(&state.local_dir, &path)?;
     let new_abs = rename_prompt_disk(&state.local_dir, &old_abs, &new_title, &new_category)
         .map_err(|e| {
@@ -396,12 +426,14 @@ fn rename_category(
     new_name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let _io = begin_local_io(&state)?;
     rename_category_disk(&state.local_dir, &old_name, &new_name).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 fn create_category(name: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _io = begin_local_io(&state)?;
     create_category_disk(&state.local_dir, &name).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -412,6 +444,7 @@ fn create_prompt(
     title: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
+    let _io = begin_local_io(&state)?;
     let abs = create_prompt_disk(&state.local_dir, &category, &title).map_err(|e| e.to_string())?;
     let rel = abs.strip_prefix(&state.local_dir).unwrap_or(&abs);
     let rel_unix = store::path_to_unix(rel);
@@ -425,7 +458,7 @@ fn create_prompt(
 
 #[tauri::command]
 fn delete_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    ensure_not_syncing(&state)?;
+    let _io = begin_local_io(&state)?;
     let abs = resolve_abs(&state.local_dir, &path)?;
     delete_prompt_disk(&state.local_dir, &abs).map_err(|e| e.to_string())?;
     Ok(())
@@ -438,7 +471,7 @@ fn reorder(
     paths: Vec<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    ensure_not_syncing(&state)?;
+    let _io = begin_local_io(&state)?;
     reorder_category_disk(&state.local_dir, &category, &paths).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -446,6 +479,7 @@ fn reorder(
 /// 分类拖拽排序：重写 .category-order.json
 #[tauri::command]
 fn reorder_categories(names: Vec<String>, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _io = begin_local_io(&state)?;
     store::save_category_order(&state.local_dir, &names).map_err(|e| e.to_string())
 }
 
@@ -809,8 +843,9 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     if !cfg.is_configured() {
         return Err("未配置坚果云同步".to_string());
     }
-    // 并发保护：单次加锁内 check-and-set；guard drop 自动复位（panic 也不卡死）
-    let _guard = SyncGuard::acquire(&state.syncing)?;
+    // 并发保护：IoGate 单锁互斥（等待在飞的本地写完成后置位 syncing）；
+    // guard drop 自动复位（panic 也不卡死）
+    let _guard = SyncGuard::acquire(&state.io_gate)?;
     let result = push_all_to_remote(&cfg, &state.local_dir).await;
     match result {
         Ok(report) => {
@@ -844,8 +879,8 @@ async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     if !cfg.is_configured() {
         return Err("未配置坚果云同步".to_string());
     }
-    // 并发保护：单次加锁内 check-and-set；guard drop 自动复位
-    let _guard = SyncGuard::acquire(&state.syncing)?;
+    // 并发保护：IoGate 单锁互斥；guard drop 自动复位
+    let _guard = SyncGuard::acquire(&state.io_gate)?;
     let result = sync::pull_from_remote(&cfg, &state.local_dir).await;
     match result {
         Ok(report) => {
@@ -1135,7 +1170,7 @@ pub fn run() {
                 config_file,
                 last_sync: Mutex::new(None),
                 last_error: Mutex::new(None),
-                syncing: Mutex::new(false),
+                io_gate: Mutex::new(IoGate::default()),
                 last_hotkey_had_text_input: Mutex::new(false),
             });
 
