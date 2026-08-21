@@ -25,7 +25,7 @@
     "mermaid": "^11.16.1"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tauri-apps/cli": "^2",
     "svelte": "^5.56.9",
     "svelte-check": "^4.7.6",
