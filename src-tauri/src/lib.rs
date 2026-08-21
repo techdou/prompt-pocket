@@ -27,7 +27,7 @@ use crate::store::{
     reorder_category as reorder_category_disk, save_prompt as save_prompt_disk,
     scan_prompts as scan_disk, Prompt, PromptContent, SaveRequest, ScanResult,
 };
-use crate::sync::{push_all_to_remote, CloudConfig, SyncStatus};
+use crate::sync::{push_all_to_remote, CloudConfig, RemoteStore, SyncStatus, WebDavStore};
 
 const GLOBAL_HOTKEY: &str = "Ctrl+Alt+P";
 const FOCUS_RESTORE_TIMEOUT_MS: u64 = 120;
@@ -829,7 +829,7 @@ async fn test_cloud_connection(
         remote_root,
         enabled: true,
     };
-    sync::test_connection(&cfg).await
+    WebDavStore::new(&cfg)?.test().await
 }
 
 #[tauri::command]
@@ -867,7 +867,8 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     // 并发保护：IoGate 单锁互斥（等待在飞的本地写完成后置位 syncing）；
     // guard drop 自动复位（panic 也不卡死）
     let _guard = SyncGuard::acquire(&state.io_gate)?;
-    let result = push_all_to_remote(&cfg, &state.local_dir).await;
+    let store = WebDavStore::new(&cfg)?;
+    let result = push_all_to_remote(&store, &state.local_dir).await;
     match result {
         Ok(report) => {
             let mut msg = format!("上传完成：共 {} 个文件", report.uploaded);
@@ -902,7 +903,8 @@ async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     }
     // 并发保护：IoGate 单锁互斥；guard drop 自动复位
     let _guard = SyncGuard::acquire(&state.io_gate)?;
-    let result = sync::pull_from_remote(&cfg, &state.local_dir).await;
+    let store = WebDavStore::new(&cfg)?;
+    let result = sync::pull_from_remote(&store, &state.local_dir).await;
     match result {
         Ok(report) => {
             let mut msg = format!(
