@@ -60,7 +60,8 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 | 平台 | 文件 |
 | --- | --- |
 | macOS Apple Silicon | `Prompt.Pocket_2.1.0_aarch64.dmg` |
-| Windows x64 | `Prompt.Pocket_2.1.0_x64-setup.exe` / `Prompt.Pocket_2.1.0_x64_en-US.msi` |
+| Windows x64 | `Prompt.Pocket_2.1.0_x64_en-US.msi` |
+| Linux x64 | `Prompt.Pocket_2.1.0_amd64.deb` |
 
 安装包未做代码签名：Windows 首次运行可能弹 SmartScreen 警告（选「仍要运行」）；macOS 首次打开需右键 →「打开」绕过 Gatekeeper。
 
@@ -242,7 +243,8 @@ Grab the latest `v2.1.0` from [GitHub Releases](https://github.com/techdou/promp
 | Platform | File |
 | --- | --- |
 | macOS Apple Silicon | `Prompt.Pocket_2.1.0_aarch64.dmg` |
-| Windows x64 | `Prompt.Pocket_2.1.0_x64-setup.exe` / `Prompt.Pocket_2.1.0_x64_en-US.msi` |
+| Windows x64 | `Prompt.Pocket_2.1.0_x64_en-US.msi` |
+| Linux x64 | `Prompt.Pocket_2.1.0_amd64.deb` |
 
 Installers are unsigned: Windows may show a SmartScreen warning (choose "Run anyway"); on macOS, right-click → Open to bypass Gatekeeper on first launch.
 
