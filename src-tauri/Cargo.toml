@@ -31,7 +31,10 @@ walkdir = "2"
 sanitize-filename = "0.5"
 # 坚果云 WebDAV 同步
 reqwest_dav = "0.2"
-reqwest = "0.12"
+# json feature：GitHub Contents API 的请求/响应体都是 JSON
+reqwest = { version = "0.12", features = ["json"] }
+# GitHub Contents API 上传内容的 base64 编码
+base64 = "0.22"
 # 系统凭据库：WebDAV 应用密码不落入 config.json 明文
 keyring = "4"
 # async runtime（Tauri 自带，这里显式声明用于 spawn 后台同步）

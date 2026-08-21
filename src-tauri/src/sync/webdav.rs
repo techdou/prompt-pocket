@@ -232,7 +232,8 @@ fn sanitize_remote_path(s: &str) -> String {
 /// percent-encode 单段路径：保留 RFC 3986 unreserved（A-Za-z0-9 - _ . ~），
 /// 其余逐字节转 %XX。与 urlencoding_decode 对称。
 /// 标题里的空格、#、?、% 等字符不编码会在 URL 里产生歧义（# 被当 fragment 截断）。
-fn urlencoding_encode(s: &str) -> String {
+/// 通用编码，github.rs 拼 Contents API URL 也复用。
+pub(crate) fn urlencoding_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {
@@ -246,7 +247,7 @@ fn urlencoding_encode(s: &str) -> String {
 }
 
 /// 对多段路径逐段编码（保留 / 分隔符）
-fn encode_segments(path: &str) -> String {
+pub(crate) fn encode_segments(path: &str) -> String {
     path.split('/')
         .map(urlencoding_encode)
         .collect::<Vec<_>>()

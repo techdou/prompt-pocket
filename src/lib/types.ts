@@ -50,6 +50,14 @@ export interface CloudConfigView {
   remoteRoot: string;
   enabled: boolean;
   hasPassword: boolean;
+  /** 当前激活的同步后端："webdav"（缺省）| "github" */
+  provider?: string;
+  /** GitHub 存档配置（密钥只返回 hasToken，永不下发明文） */
+  ghRepo?: string;
+  ghBranch?: string;
+  ghPrefix?: string;
+  ghEnabled?: boolean;
+  hasToken?: boolean;
 }
 
 /** 同步状态 */

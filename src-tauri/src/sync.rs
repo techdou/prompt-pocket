@@ -13,8 +13,10 @@
 //   远程大小变了 → 视为远程新版本，下载。覆盖本地文件前先备份到 .trash/
 // - 排序文件（.order.json / .category-order.json）双向都同步
 
+pub mod github;
 pub mod webdav;
 
+pub use github::{GitHubConfig, GitHubStore};
 pub use webdav::{CloudConfig, WebDavStore};
 
 use std::collections::HashSet;

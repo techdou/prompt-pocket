@@ -27,12 +27,16 @@ use crate::store::{
     reorder_category as reorder_category_disk, save_prompt as save_prompt_disk,
     scan_prompts as scan_disk, Prompt, PromptContent, SaveRequest, ScanResult,
 };
-use crate::sync::{push_all_to_remote, CloudConfig, RemoteStore, SyncStatus, WebDavStore};
+use crate::sync::{
+    push_all_to_remote, CloudConfig, GitHubConfig, GitHubStore, RemoteStore, SyncStatus,
+    WebDavStore,
+};
 
 const GLOBAL_HOTKEY: &str = "Ctrl+Alt+P";
 const FOCUS_RESTORE_TIMEOUT_MS: u64 = 120;
 const FOCUS_RESTORE_POLL_MS: u64 = 10;
 const CLOUD_PASSWORD_SERVICE: &str = "com.promptpocket.webdav";
+const GITHUB_TOKEN_SERVICE: &str = "com.promptpocket.github";
 
 // ────────────────────────────────────────────────────────────
 // 配置持久化：config.json 存在 %APPDATA%/prompt-pocket/ 下
@@ -47,10 +51,43 @@ struct PersistedConfig {
     enabled: Option<bool>,
     /// 旧版配置迁移用：本地目录（v0.x）— 现已弃用
     data_dir: Option<String>,
+    // ── GitHub 存档（批次 B2）──
+    /// 同步后端："webdav"（缺省）| "github"
+    provider: Option<String>,
+    gh_repo: Option<String>,
+    gh_branch: Option<String>,
+    gh_prefix: Option<String>,
+    /// 仅作手改配置文件的兜底通道；正常由系统凭据库接管后清出 JSON（不落明文）
+    #[serde(default, skip_serializing)]
+    gh_token: Option<String>,
+}
+
+/// 同步后端选择
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncProvider {
+    WebDav,
+    GitHub,
+}
+
+impl SyncProvider {
+    fn parse(s: &str) -> Self {
+        match s {
+            "github" => Self::GitHub,
+            _ => Self::WebDav,
+        }
+    }
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::WebDav => "webdav",
+            Self::GitHub => "github",
+        }
+    }
 }
 
 struct AppState {
     cloud: Mutex<CloudConfig>,
+    github: Mutex<GitHubConfig>,
+    provider: Mutex<SyncProvider>,
     local_dir: PathBuf,
     config_file: PathBuf,
     last_sync: Mutex<Option<String>>,
@@ -84,7 +121,7 @@ impl AppState {
     }
 
     fn set_cloud_config(&self, cfg: CloudConfig) -> Result<(), String> {
-        let warning = persist_cloud_config(&self.config_file, &cfg, &SystemCloudSecretStore)?;
+        let warning = persist_cloud_config(&self.config_file, &cfg, &SystemCloudSecretStore::new(CLOUD_PASSWORD_SERVICE))?;
         {
             *self.cloud.lock().map_err(|e| e.to_string())? = cfg.clone();
         }
@@ -95,11 +132,56 @@ impl AppState {
         Ok(())
     }
 
+    fn github_config(&self) -> GitHubConfig {
+        self.github
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn set_github_config(&self, cfg: GitHubConfig) -> Result<(), String> {
+        let warning = persist_github_config(
+            &self.config_file,
+            &cfg,
+            &SystemCloudSecretStore::new(GITHUB_TOKEN_SERVICE),
+        )?;
+        {
+            *self.github.lock().map_err(|e| e.to_string())? = cfg;
+        }
+        if let Some(w) = warning {
+            *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(w);
+        }
+        Ok(())
+    }
+
+    fn provider(&self) -> SyncProvider {
+        *self.provider.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_provider(&self, p: SyncProvider) -> Result<(), String> {
+        // 合并写：只改 provider 字段，保留两侧配置
+        update_persisted_config(&self.config_file, |cfg| {
+            cfg.provider = Some(p.as_str().to_string());
+        })?;
+        *self.provider.lock().map_err(|e| e.to_string())? = p;
+        Ok(())
+    }
+
     fn sync_status(&self) -> SyncStatus {
-        let cfg = self.cloud_config();
+        // 状态跟随当前激活的后端
+        let (configured, enabled) = match self.provider() {
+            SyncProvider::WebDav => {
+                let c = self.cloud_config();
+                (c.is_configured(), c.enabled)
+            }
+            SyncProvider::GitHub => {
+                let c = self.github_config();
+                (c.is_configured(), c.enabled)
+            }
+        };
         SyncStatus {
-            configured: cfg.is_configured(),
-            enabled: cfg.enabled,
+            configured,
+            enabled,
             last_sync: self
                 .last_sync
                 .lock()
@@ -199,21 +281,40 @@ fn resolve_config_file(app: &tauri::AppHandle) -> PathBuf {
         .join("config.json")
 }
 
-/// 启动时加载配置
-fn load_cloud_config(config_file: &std::path::Path) -> CloudConfig {
-    load_cloud_config_with_store(config_file, &SystemCloudSecretStore)
+/// 启动时加载配置：两侧后端配置 + 当前选中的 provider
+fn load_cloud_config(config_file: &std::path::Path) -> (CloudConfig, GitHubConfig, SyncProvider) {
+    let webdav =
+        load_cloud_config_with_store(config_file, &SystemCloudSecretStore::new(CLOUD_PASSWORD_SERVICE));
+    let github =
+        load_github_config_with_store(config_file, &SystemCloudSecretStore::new(GITHUB_TOKEN_SERVICE));
+    let provider = std::fs::read_to_string(config_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<PersistedConfig>(&s).ok())
+        .and_then(|p| p.provider)
+        .map(|s| SyncProvider::parse(&s))
+        .unwrap_or(SyncProvider::WebDav);
+    (webdav, github, provider)
 }
 
+/// 系统凭据库读写。service 区分凭据归属（坚果云应用密码 / GitHub PAT 各自独立）
 trait CloudSecretStore {
     fn read_password(&self, username: &str) -> Result<Option<String>, String>;
     fn write_password(&self, username: &str, password: &str) -> Result<(), String>;
 }
 
-struct SystemCloudSecretStore;
+struct SystemCloudSecretStore {
+    service: &'static str,
+}
+
+impl SystemCloudSecretStore {
+    fn new(service: &'static str) -> Self {
+        Self { service }
+    }
+}
 
 impl CloudSecretStore for SystemCloudSecretStore {
     fn read_password(&self, username: &str) -> Result<Option<String>, String> {
-        let entry = keyring::Entry::new(CLOUD_PASSWORD_SERVICE, username)
+        let entry = keyring::Entry::new(self.service, username)
             .map_err(|e| format!("打开系统凭据库失败: {e}"))?;
         match entry.get_password() {
             Ok(password) => Ok(Some(password)),
@@ -226,21 +327,11 @@ impl CloudSecretStore for SystemCloudSecretStore {
         if username.is_empty() || password.is_empty() {
             return Ok(());
         }
-        let entry = keyring::Entry::new(CLOUD_PASSWORD_SERVICE, username)
+        let entry = keyring::Entry::new(self.service, username)
             .map_err(|e| format!("打开系统凭据库失败: {e}"))?;
         entry
             .set_password(password)
             .map_err(|e| format!("写入系统凭据失败: {e}"))
-    }
-}
-
-fn persisted_from_cloud_config(cfg: &CloudConfig) -> PersistedConfig {
-    PersistedConfig {
-        username: Some(cfg.username.clone()),
-        password: None,
-        remote_root: Some(cfg.remote_root.clone()),
-        enabled: Some(cfg.enabled),
-        data_dir: None,
     }
 }
 
@@ -252,7 +343,21 @@ fn write_persisted_config(config_file: &Path, cfg: &PersistedConfig) -> Result<(
     store::write_atomic(config_file, json.as_bytes()).map_err(|e| e.to_string())
 }
 
-/// 持久化云配置。返回 Ok(Some(警告)) 表示降级成功（密码未持久化）。
+/// 合并式更新 config.json：读出现有内容、只改指定字段再写回。
+/// 两侧后端的配置共存于同一文件——保存坚果云时绝不能把 GitHub 段抹掉，反之亦然
+fn update_persisted_config(
+    config_file: &Path,
+    mutate: impl FnOnce(&mut PersistedConfig),
+) -> Result<(), String> {
+    let mut cfg = std::fs::read_to_string(config_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<PersistedConfig>(&s).ok())
+        .unwrap_or_default();
+    mutate(&mut cfg);
+    write_persisted_config(config_file, &cfg)
+}
+
+/// 持久化坚果云配置。返回 Ok(Some(警告)) 表示降级成功（密码未持久化）。
 fn persist_cloud_config(
     config_file: &Path,
     cfg: &CloudConfig,
@@ -267,7 +372,35 @@ fn persist_cloud_config(
             Some("系统凭据库不可用：密码仅本次会话保留，重启后需重新填写".to_string())
         }
     };
-    write_persisted_config(config_file, &persisted_from_cloud_config(cfg))?;
+    update_persisted_config(config_file, |p| {
+        p.username = Some(cfg.username.clone());
+        p.password = None;
+        p.remote_root = Some(cfg.remote_root.clone());
+        p.enabled = Some(cfg.enabled);
+    })?;
+    Ok(warning)
+}
+
+/// 持久化 GitHub 配置（token 进系统凭据库，key 用仓库名）。返回 Ok(Some(警告)) 表降级。
+fn persist_github_config(
+    config_file: &Path,
+    cfg: &GitHubConfig,
+    secret_store: &impl CloudSecretStore,
+) -> Result<Option<String>, String> {
+    let warning = match secret_store.write_password(&cfg.repo, &cfg.token) {
+        Ok(()) => None,
+        Err(e) => {
+            eprintln!("[github] 系统凭据库不可用，PAT 仅本次会话保留: {e}");
+            Some("系统凭据库不可用：PAT 仅本次会话保留，重启后需重新填写".to_string())
+        }
+    };
+    update_persisted_config(config_file, |p| {
+        p.gh_repo = Some(cfg.repo.clone());
+        p.gh_branch = Some(cfg.branch.clone());
+        p.gh_prefix = Some(cfg.prefix.clone());
+        p.enabled = Some(cfg.enabled);
+        p.gh_token = None;
+    })?;
     Ok(warning)
 }
 
@@ -294,16 +427,10 @@ fn load_cloud_config_with_store(
         .or_else(|| legacy_password.clone())
         .unwrap_or_default();
 
+    // 旧版明文密码迁移进系统凭据库，并从 JSON 清出（合并写，保留其它字段）
     if let (Ok(None), Some(legacy)) = (&stored_password, legacy_password.as_ref()) {
         if !username.is_empty() && secret_store.write_password(&username, legacy).is_ok() {
-            let cfg = PersistedConfig {
-                username: Some(username.clone()),
-                password: None,
-                remote_root: parsed.as_ref().and_then(|p| p.remote_root.clone()),
-                enabled: parsed.as_ref().and_then(|p| p.enabled),
-                data_dir: None,
-            };
-            let _ = write_persisted_config(config_file, &cfg);
+            let _ = update_persisted_config(config_file, |p| p.password = None);
         }
     }
 
@@ -314,6 +441,55 @@ fn load_cloud_config_with_store(
             .as_ref()
             .and_then(|p| p.remote_root.clone())
             .unwrap_or_else(|| "PromptPocket".to_string()),
+        enabled: parsed.as_ref().and_then(|p| p.enabled).unwrap_or(false),
+    }
+}
+
+/// 加载 GitHub 配置：非密字段来自 config.json，token 来自系统凭据库（key = 仓库名）。
+/// gh_token 明文兜底仅服务手改配置文件的场景，加载后迁移进凭据库并清出 JSON。
+fn load_github_config_with_store(
+    config_file: &std::path::Path,
+    secret_store: &impl CloudSecretStore,
+) -> GitHubConfig {
+    let parsed = std::fs::read_to_string(config_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<PersistedConfig>(&s).ok());
+    let repo = parsed
+        .as_ref()
+        .and_then(|p| p.gh_repo.clone())
+        .unwrap_or_default();
+    let legacy_token = parsed.as_ref().and_then(|p| p.gh_token.clone());
+    let stored_token = if repo.is_empty() {
+        Ok(None)
+    } else {
+        secret_store.read_password(&repo)
+    };
+    let token = stored_token
+        .as_ref()
+        .ok()
+        .and_then(|t| t.clone())
+        .or_else(|| legacy_token.clone())
+        .unwrap_or_default();
+
+    // 手填明文 token 的迁移：进凭据库 + 清出 JSON
+    if let (Ok(None), Some(legacy)) = (&stored_token, legacy_token.as_ref()) {
+        if !repo.is_empty() && secret_store.write_password(&repo, legacy).is_ok() {
+            let _ = update_persisted_config(config_file, |p| p.gh_token = None);
+        }
+    }
+
+    GitHubConfig {
+        repo,
+        branch: parsed
+            .as_ref()
+            .and_then(|p| p.gh_branch.clone())
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| "main".to_string()),
+        prefix: parsed
+            .as_ref()
+            .and_then(|p| p.gh_prefix.clone())
+            .unwrap_or_default(),
+        token,
         enabled: parsed.as_ref().and_then(|p| p.enabled).unwrap_or(false),
     }
 }
@@ -809,11 +985,20 @@ fn get_sync_status(state: tauri::State<'_, AppState>) -> SyncStatus {
 #[tauri::command]
 fn get_cloud_config(state: tauri::State<'_, AppState>) -> serde_json::Value {
     let cfg = state.cloud_config();
+    let gh = state.github_config();
+    // 两侧配置一起下发：前端切换后端或回显表单时不丢另一侧的已存配置。
+    // 密钥永远不下发——hasPassword/hasToken 只告诉前端"有没有"，用于占位符显示
     serde_json::json!({
+        "provider": state.provider().as_str(),
         "username": cfg.username,
         "remoteRoot": cfg.remote_root,
         "enabled": cfg.enabled,
-        "hasPassword": !cfg.password.is_empty()
+        "hasPassword": !cfg.password.is_empty(),
+        "ghRepo": gh.repo,
+        "ghBranch": gh.branch,
+        "ghPrefix": gh.prefix,
+        "ghEnabled": gh.enabled,
+        "hasToken": !gh.token.is_empty()
     })
 }
 
@@ -856,19 +1041,85 @@ fn save_cloud_config(
     Ok(())
 }
 
-/// 上传到坚果云：本地所有文件推送到云端 + 删除传播（tombstone）
+#[tauri::command]
+async fn test_github_connection(
+    repo: String,
+    token: String,
+    branch: String,
+    prefix: String,
+) -> Result<(), String> {
+    let cfg = GitHubConfig {
+        repo,
+        branch,
+        prefix,
+        token,
+        enabled: true,
+    };
+    GitHubStore::new(&cfg)?.test().await
+}
+
+#[tauri::command]
+fn save_github_config(
+    repo: String,
+    token: String,
+    branch: String,
+    prefix: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    // __KEEP__ 占位符表示保留旧 PAT（用户未重新填写）
+    let final_token = if token == "__KEEP__" {
+        state.github_config().token
+    } else {
+        token
+    };
+
+    let cfg = GitHubConfig {
+        repo,
+        branch,
+        prefix,
+        token: final_token,
+        enabled: true,
+    };
+    state.set_github_config(cfg)?;
+    Ok(())
+}
+
+/// 切换同步后端（"webdav" | "github"）。只改激活标记，两侧配置都保留
+#[tauri::command]
+fn set_sync_provider(provider: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    match provider.as_str() {
+        "webdav" | "github" => state.set_provider(SyncProvider::parse(&provider)),
+        _ => Err(format!("未知同步后端: {provider}")),
+    }
+}
+
+/// 全量上传：本地所有文件推送到当前后端（坚果云 / GitHub）+ 删除传播（tombstone）
 #[tauri::command]
 async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<AppState>();
-    let cfg = state.cloud_config();
-    if !cfg.is_configured() {
-        return Err("未配置坚果云同步".to_string());
+    let provider = state.provider();
+    match provider {
+        SyncProvider::WebDav if !state.cloud_config().is_configured() => {
+            return Err("未配置坚果云同步".to_string());
+        }
+        SyncProvider::GitHub if !state.github_config().is_configured() => {
+            return Err("未配置 GitHub 存档（需仓库和 PAT）".to_string());
+        }
+        _ => {}
     }
     // 并发保护：IoGate 单锁互斥（等待在飞的本地写完成后置位 syncing）；
     // guard drop 自动复位（panic 也不卡死）
     let _guard = SyncGuard::acquire(&state.io_gate)?;
-    let store = WebDavStore::new(&cfg)?;
-    let result = push_all_to_remote(&store, &state.local_dir).await;
+    let result = match provider {
+        SyncProvider::WebDav => {
+            let store = WebDavStore::new(&state.cloud_config())?;
+            push_all_to_remote(&store, &state.local_dir).await
+        }
+        SyncProvider::GitHub => {
+            let store = GitHubStore::new(&state.github_config())?;
+            push_all_to_remote(&store, &state.local_dir).await
+        }
+    };
     match result {
         Ok(report) => {
             let mut msg = format!("上传完成：共 {} 个文件", report.uploaded);
@@ -893,18 +1144,32 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
-/// 下载到本地：从坚果云拉取并覆盖本地（覆盖前备份 .trash，tombstone 防复活）
+/// 全量下载：从当前后端拉取并覆盖本地（覆盖前备份 .trash，tombstone 防复活）
 #[tauri::command]
 async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<AppState>();
-    let cfg = state.cloud_config();
-    if !cfg.is_configured() {
-        return Err("未配置坚果云同步".to_string());
+    let provider = state.provider();
+    match provider {
+        SyncProvider::WebDav if !state.cloud_config().is_configured() => {
+            return Err("未配置坚果云同步".to_string());
+        }
+        SyncProvider::GitHub if !state.github_config().is_configured() => {
+            return Err("未配置 GitHub 存档（需仓库和 PAT）".to_string());
+        }
+        _ => {}
     }
     // 并发保护：IoGate 单锁互斥；guard drop 自动复位
     let _guard = SyncGuard::acquire(&state.io_gate)?;
-    let store = WebDavStore::new(&cfg)?;
-    let result = sync::pull_from_remote(&store, &state.local_dir).await;
+    let result = match provider {
+        SyncProvider::WebDav => {
+            let store = WebDavStore::new(&state.cloud_config())?;
+            sync::pull_from_remote(&store, &state.local_dir).await
+        }
+        SyncProvider::GitHub => {
+            let store = GitHubStore::new(&state.github_config())?;
+            sync::pull_from_remote(&store, &state.local_dir).await
+        }
+    };
     match result {
         Ok(report) => {
             let mut msg = format!(
@@ -1187,13 +1452,15 @@ pub fn run() {
         .setup(move |app| {
             let local_dir = resolve_local_dir(app.handle());
             let config_file = resolve_config_file(app.handle());
-            let cloud = load_cloud_config(&config_file);
+            let (cloud, github, provider) = load_cloud_config(&config_file);
 
             // 确保本地缓存目录存在
             let _ = std::fs::create_dir_all(&local_dir);
 
             app.manage(AppState {
-                cloud: Mutex::new(cloud.clone()),
+                cloud: Mutex::new(cloud),
+                github: Mutex::new(github),
+                provider: Mutex::new(provider),
                 local_dir: local_dir.clone(),
                 config_file,
                 last_sync: Mutex::new(None),
@@ -1343,6 +1610,9 @@ pub fn run() {
             get_cloud_config,
             test_cloud_connection,
             save_cloud_config,
+            test_github_connection,
+            save_github_config,
+            set_sync_provider,
             upload_all,
             download_all,
             open_url,
@@ -1534,15 +1804,18 @@ mod tests {
         let persisted = PersistedConfig {
             username: Some("user@example.com".into()),
             password: Some("secret-app-password".into()),
+            gh_token: Some("ghp_secret-token".into()),
             remote_root: Some("PromptPocket".into()),
             enabled: Some(true),
-            data_dir: None,
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&persisted).unwrap();
 
         assert!(!json.contains("secret-app-password"));
         assert!(!json.contains("\"password\""));
+        assert!(!json.contains("ghp_secret-token"));
+        assert!(!json.contains("\"gh_token\""));
     }
 
     #[test]
@@ -1602,6 +1875,85 @@ mod tests {
         let json = std::fs::read_to_string(&config_file).unwrap();
         assert!(!json.contains("legacy-secret"));
         assert!(!json.contains("\"password\""));
+    }
+
+    #[test]
+    fn github_config_roundtrip_preserves_webdav_fields() {
+        // 共存性：保存 GitHub 配置不得抹掉同文件里的坚果云段（合并写回归测试）
+        let dir = std::env::temp_dir().join("pp_test_github_config_merge");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.json");
+        let store = MemorySecretStore::default();
+
+        persist_cloud_config(
+            &config_file,
+            &CloudConfig {
+                username: "user@example.com".into(),
+                password: "webdav-secret".into(),
+                remote_root: "PromptPocket".into(),
+                enabled: true,
+            },
+            &store,
+        )
+        .unwrap();
+        persist_github_config(
+            &config_file,
+            &GitHubConfig {
+                repo: "someone/prompts".into(),
+                branch: "main".into(),
+                prefix: "archive".into(),
+                token: "ghp_secret".into(),
+                enabled: true,
+            },
+            &store,
+        )
+        .unwrap();
+
+        let json = std::fs::read_to_string(&config_file).unwrap();
+        assert!(json.contains("user@example.com"), "坚果云段必须保留");
+        assert!(json.contains("someone/prompts"));
+        assert!(!json.contains("ghp_secret"), "PAT 不应落入 JSON");
+
+        let gh = load_github_config_with_store(&config_file, &store);
+        assert_eq!(gh.repo, "someone/prompts");
+        assert_eq!(gh.branch, "main");
+        assert_eq!(gh.prefix, "archive");
+        assert_eq!(gh.token, "ghp_secret");
+        let webdav = load_cloud_config_with_store(&config_file, &store);
+        assert_eq!(webdav.username, "user@example.com");
+        assert_eq!(webdav.password, "webdav-secret");
+    }
+
+    #[test]
+    fn legacy_github_token_is_migrated_out_of_json() {
+        // 手改配置文件的明文 token：加载后迁入凭据库并从 JSON 清出
+        let dir = std::env::temp_dir().join("pp_test_github_token_migrate");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.json");
+        std::fs::write(
+            &config_file,
+            r#"{
+  "gh_repo": "someone/prompts",
+  "gh_token": "ghp_legacy",
+  "enabled": true
+}"#,
+        )
+        .unwrap();
+        let store = MemorySecretStore::default();
+
+        let cfg = load_github_config_with_store(&config_file, &store);
+
+        assert_eq!(cfg.token, "ghp_legacy");
+        assert_eq!(cfg.branch, "main", "branch 缺省应为 main");
+        assert_eq!(
+            store.read_password("someone/prompts").unwrap().as_deref(),
+            Some("ghp_legacy")
+        );
+        let json = std::fs::read_to_string(&config_file).unwrap();
+        assert!(!json.contains("ghp_legacy"));
+        assert!(!json.contains("\"gh_token\""));
     }
 
     #[test]
