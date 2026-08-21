@@ -46,7 +46,7 @@ enigo = "0.6"
 # 仅 Windows 需要，放 target-specific 避免在 macOS/Linux 拉取无用的 windows crate
 [target.'cfg(windows)'.dependencies]
 # 版本与 enigo 传递依赖一致（0.61），避免双版本拉取
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_UI_Accessibility",
