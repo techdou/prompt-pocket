@@ -28,9 +28,9 @@
   <a href="https://github.com/techdou/prompt-pocket/releases/latest">Download</a>
 </p>
 
-Prompt Pocket 是一个轻量级桌面提示词管理工具。`Ctrl+Alt+P` 从任意应用快速唤出，提示词以本地 Markdown 文件保存，支持通过坚果云 WebDAV 手动同步。
+Prompt Pocket 是一个轻量级桌面提示词管理工具。`Ctrl+Alt+P` 从任意应用快速唤出，提示词以本地 Markdown 文件保存，支持通过坚果云 WebDAV 或 GitHub 仓库手动同步。
 
-Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere with `Ctrl+Alt+P`, store prompts as local Markdown files, and sync manually through Jianguoyun WebDAV.
+Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere with `Ctrl+Alt+P`, store prompts as local Markdown files, and sync manually through Jianguoyun WebDAV or a GitHub repository.
 
 ---
 
@@ -41,14 +41,16 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 | 功能 | 说明 |
 | --- | --- |
 | 全局秒唤 | `Ctrl+Alt+P` 从任意应用唤出或隐藏，多屏下在鼠标所在屏居中 |
+| 全文搜索 | `Ctrl+F` 同时匹配标题与正文；正文命中时列表显示上下文摘录 |
 | 智能复制 / 粘贴 | `Enter` 写入剪贴板；唤出前焦点在输入框时自动粘贴（仅 Windows） |
 | 双复制模式 | `markdown` 复制原文；`plain` 自动剥离 Markdown 标记后复制 |
 | Markdown 存储 | 一条提示词一个 `.md` 文件，文件夹就是分类，文件名跟随标题 |
 | 富 Markdown 预览 | GFM 表格、任务列表、代码块；Mermaid、KaTeX、highlight.js 全部本地内置、按需加载，无 CDN 依赖 |
 | 提示词排序 | 单个分类内拖动列表项手柄，顺序写入 `.order.json` |
 | 分类排序 | 横向拖动分类标签手柄，顺序写入 `.category-order.json` |
-| 手动 WebDAV 同步 | 上传 / 下载均由用户显式触发，避免自动同步误覆盖 |
-| 安全凭据存储 | WebDAV 应用密码存系统凭据库，不落明文 JSON |
+| 开机自启动 | 设置页一键开关，读写系统真实状态（注册表 / LaunchAgent） |
+| 手动云同步 | 坚果云 WebDAV 或 GitHub 仓库存档二选一，上传 / 下载均由用户显式触发，避免自动同步误覆盖 |
+| 安全凭据存储 | WebDAV 应用密码 / GitHub PAT 存系统凭据库，不落明文 JSON |
 | 轻量桌面壳 | Tauri v2 + Rust 后端，无 Electron |
 
 ### 下载安装
@@ -141,20 +143,31 @@ updated: 2026-06-27T00:00:00Z
 - Mermaid、KaTeX、highlight.js 本地打包、按需加载，无网络也可用。
 - raw HTML 一律转义显示，危险协议的链接/图片被拦截；渲染失败降级显示源码。
 
-### 坚果云同步
+### 云同步
+
+同步后端二选一（设置页顶部切换），两侧配置各自独立保存、互不影响。
+
+**坚果云 WebDAV**：
 
 1. 登录坚果云，打开「账户信息 → 安全选项 → 第三方应用管理」。
 2. 添加应用并生成应用密码。
 3. 在 Prompt Pocket 设置中填写账号、应用密码和远程目录，可先「测试连接」。
-4. 需要同步时显式点「上传到坚果云」或「下载到本地」。
+4. 需要同步时显式点「上传」或「下载」。
 
-同步规则：
+**GitHub 仓库存档**：
 
-- **上传**：以本地为准推送变更；本地删除过的文件会同步删除云端对应文件（删除传播）。
-- **下载**：以云端为准拉取；本地已删除的文件不会被云端「复活」，被覆盖的本地旧文件自动备份到 `.trash/`。
+1. 在 GitHub 创建一个仓库（建议私有；需已有至少一个提交，创建时勾选初始化 README 即可）。
+2. 创建 fine-grained PAT（GitHub → Settings → Developer settings → Personal access tokens），只授权这一个仓库的 **Contents 读写**权限。
+3. 在设置页切换到「GitHub 存档」，填写 `owner/repo`、PAT，可选分支（默认 `main`）与仓库内路径前缀（默认根目录），先「测试连接」再保存。
+4. 同步操作与坚果云一致，每条提示词的变更在仓库里体现为独立提交。
+
+同步规则（两种后端一致）：
+
+- **上传**：以本地为准推送变更；本地删除过的文件会同步删除远端对应文件（删除传播）。
+- **下载**：以远端为准拉取；本地已删除的文件不会被远端「复活」，被覆盖的本地旧文件自动备份到 `.trash/`。
 - `.trash`、隐藏文件和同步元数据不参与同步；排序文件（`.order.json` / `.category-order.json`）随同步传输。
 - 同步进行中编辑操作会被暂时拒绝，结束后自动恢复。
-- 应用密码保存到系统凭据库；旧版本明文 JSON 中的密码会在读取时自动迁移出去。
+- 应用密码 / PAT 保存到系统凭据库；旧版本明文 JSON 中的密码会在读取时自动迁移出去。
 
 ### 开发
 
@@ -194,30 +207,32 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 | 前端 | Svelte 5 + Vite + TypeScript |
 | Markdown | marked + marked-highlight |
 | 富内容增强 | Mermaid / KaTeX / highlight.js 本地内置、按需加载 |
-| 快捷键 / 剪贴板 / 托盘 / 单实例 | tauri-plugin-global-shortcut / clipboard-manager / tray icon / single-instance |
+| 快捷键 / 剪贴板 / 托盘 / 单实例 / 自启动 | tauri-plugin-global-shortcut / clipboard-manager / tray icon / single-instance / autostart |
 | 凭据存储 | keyring + 系统凭据库 |
-| 云同步 | reqwest_dav + 坚果云 WebDAV |
+| 云同步 | reqwest_dav（坚果云 WebDAV）/ GitHub Contents API |
 | 数据格式 | Markdown + YAML frontmatter |
 
 ---
 
 ## English
 
-Prompt Pocket is a lightweight desktop prompt manager: summon it from any app with `Ctrl+Alt+P`, keep prompts as local Markdown files, and sync on demand through Jianguoyun WebDAV.
+Prompt Pocket is a lightweight desktop prompt manager: summon it from any app with `Ctrl+Alt+P`, keep prompts as local Markdown files, and sync on demand through Jianguoyun WebDAV or a GitHub repository.
 
 ### Features
 
 | Feature | Description |
 | --- | --- |
 | Global launcher | Open or hide with `Ctrl+Alt+P`; centers on the monitor under the cursor |
+| Full-text search | `Ctrl+F` matches titles and prompt bodies; body hits show a context excerpt |
 | Smart copy / paste | `Enter` copies to clipboard; auto-pastes back when launched from a text input (Windows only) |
 | Dual copy modes | `markdown` copies the source; `plain` strips Markdown syntax before copying |
 | Markdown storage | One prompt per `.md` file; folders are categories; filenames follow titles |
 | Rich preview | GFM tables, task lists, code blocks; Mermaid / KaTeX / highlight.js bundled locally, lazy-loaded, no CDN |
 | Prompt ordering | Drag handles within one category; saved to `.order.json` |
 | Category ordering | Drag category tabs horizontally; saved to `.category-order.json` |
-| Manual WebDAV sync | Upload / download only when explicitly triggered |
-| Secure credentials | App passwords live in the system credential store, never plaintext JSON |
+| Launch at login | One toggle in Settings, backed by the real system state (registry / LaunchAgent) |
+| Manual cloud sync | Jianguoyun WebDAV or GitHub repository archive; upload / download only when explicitly triggered |
+| Secure credentials | App passwords / GitHub PATs live in the system credential store, never plaintext JSON |
 | Lightweight shell | Tauri v2 + Rust backend, no Electron |
 
 ### Download
@@ -298,20 +313,31 @@ Rewrite the following text to be concise and professional:
 
 Deleted prompts are backed up to `.trash/` inside the data directory before removal.
 
-### Jianguoyun Sync
+### Cloud Sync
+
+Pick one sync backend (switch at the top of Settings); both configurations are kept independently.
+
+**Jianguoyun WebDAV**:
 
 1. Sign in to Jianguoyun, open "Account Info → Security Options → Third-party App Management".
 2. Create an app password.
 3. Enter the account, app password, and remote directory in Settings; "Test connection" first.
 4. Click "Upload" or "Download" explicitly when you want to sync.
 
-Sync rules:
+**GitHub repository archive**:
+
+1. Create a GitHub repository (private recommended; it must have at least one commit — check "Initialize with README").
+2. Create a fine-grained PAT (GitHub → Settings → Developer settings → Personal access tokens) with **Contents read/write** on that repository only.
+3. Switch to "GitHub archive" in Settings, enter `owner/repo` and the PAT; optionally set a branch (default `main`) and a path prefix (default repo root). Test the connection, then save.
+4. Sync works the same as WebDAV; each prompt change becomes its own commit in the repository.
+
+Sync rules (identical for both backends):
 
 - **Upload** treats local as the source of truth; files deleted locally are also deleted remotely (deletion propagation).
 - **Download** treats remote as the source of truth; locally deleted files are not resurrected, and local files about to be overwritten are backed up to `.trash/` first.
 - `.trash`, hidden files, and sync metadata are excluded; ordering files (`.order.json` / `.category-order.json`) travel with sync.
 - Editing is briefly rejected while a sync is in flight.
-- App passwords are stored in the system credential store; legacy plaintext JSON passwords are migrated on read.
+- App passwords / PATs are stored in the system credential store; legacy plaintext JSON secrets are migrated on read.
 
 ### Development
 
