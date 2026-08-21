@@ -28,7 +28,7 @@ serde_yaml = "0.9"
 # 递归目录扫描
 walkdir = "2"
 # 文件名非法字符清理
-sanitize-filename = "0.5"
+sanitize-filename = "0.6"
 # 坚果云 WebDAV 同步
 reqwest_dav = "0.2"
 # json feature：GitHub Contents API 的请求/响应体都是 JSON
