@@ -13,8 +13,11 @@
     getSyncStatus,
     openUrl,
     saveCloudConfig,
+    saveGithubConfig,
     setAutostart,
+    setSyncProvider,
     testCloudConnection,
+    testGithubConnection,
     uploadAll,
   } from "./api";
 
@@ -43,6 +46,15 @@
   // 密码编辑模式：已配置时默认锁定（显示"已保存"），点"修改"才解锁
   let editingPassword = $state(false);
 
+  // 同步后端 + GitHub 表单（provider 切换立即持久化，两侧配置互不影响）
+  let provider = $state<"webdav" | "github">("webdav");
+  let providerBusy = $state(false);
+  let ghRepo = $state("");
+  let ghToken = $state("");
+  let ghBranch = $state("");
+  let ghPrefix = $state("");
+  let editingToken = $state(false);
+
   let testing = $state(false);
   let saving = $state(false);
   let transferring = $state<"upload" | "download" | null>(null);
@@ -54,9 +66,18 @@
 
   // 坚果云帮助页：如何获取应用密码
   const HELP_URL = "https://help.jianguoyun.com/?p=2064";
+  // GitHub fine-grained PAT 创建页
+  const GH_HELP_URL = "https://github.com/settings/personal-access-tokens";
 
   // 密码是否已保存（用于显示状态）
   let hasPassword = $derived(!!config?.hasPassword);
+  let hasToken = $derived(!!config?.hasToken);
+  // 上传按钮目标跟随当前后端
+  let uploadLabel = $derived(
+    t("settings.upload", {
+      target: provider === "github" ? "GitHub" : t("settings.providerWebdav"),
+    }),
+  );
 
   let lastOpen = false;
   $effect(() => {
@@ -75,10 +96,35 @@
       // 密码不回显（安全）；已配置则锁定编辑模式，点"修改"才解锁
       password = "";
       editingPassword = !config.hasPassword;
+      // GitHub 表单回显；token 同样不回显
+      provider = config.provider === "github" ? "github" : "webdav";
+      ghRepo = config.ghRepo ?? "";
+      ghBranch = config.ghBranch ?? "";
+      ghPrefix = config.ghPrefix ?? "";
+      ghToken = "";
+      editingToken = !config.hasToken;
       // 自启动状态读系统真实值；读取失败不阻断设置页其余内容
       autostart = await getAutostart().catch(() => false);
     } catch (e) {
       message = { type: "err", text: String(e) };
+    }
+  }
+
+  // 切换后端：立即持久化（set_sync_provider 只改激活标记，不动两侧配置），失败回滚
+  async function switchProvider(next: "webdav" | "github") {
+    if (provider === next || providerBusy) return;
+    providerBusy = true;
+    const prev = provider;
+    provider = next; // 乐观更新，失败回滚
+    message = null;
+    try {
+      await setSyncProvider(next);
+      await refreshStatus();
+    } catch (e) {
+      provider = prev;
+      message = { type: "err", text: String(e) };
+    } finally {
+      providerBusy = false;
     }
   }
 
@@ -106,6 +152,7 @@
   }
 
   async function doTest() {
+    if (provider === "github") return doTestGithub();
     if (!username.trim() || !password.trim()) {
       message = { type: "err", text: t("settings.fillCredentials") };
       return;
@@ -125,7 +172,32 @@
     }
   }
 
+  async function doTestGithub() {
+    if (!ghRepo.trim()) {
+      message = { type: "err", text: t("settings.fillGhRepo") };
+      return;
+    }
+    if (!ghToken.trim()) {
+      message = { type: "err", text: t("settings.fillGhToken") };
+      return;
+    }
+    testing = true;
+    message = null;
+    try {
+      await testGithubConnection(ghRepo.trim(), ghToken.trim(), ghBranch.trim(), ghPrefix.trim());
+      message = { type: "ok", text: t("settings.ghTestOk") };
+    } catch (e) {
+      message = {
+        type: "err",
+        text: t("settings.connectionFailed", { error: String(e) }),
+      };
+    } finally {
+      testing = false;
+    }
+  }
+
   async function doSave() {
+    if (provider === "github") return doSaveGithub();
     if (!username.trim()) {
       message = { type: "err", text: t("settings.fillUsername") };
       return;
@@ -160,7 +232,40 @@
     }
   }
 
-  // 上传到坚果云：本地覆盖云端（只增不删云端）
+  async function doSaveGithub() {
+    if (!ghRepo.trim()) {
+      message = { type: "err", text: t("settings.fillGhRepo") };
+      return;
+    }
+    const tok = ghToken.trim();
+    // 与坚果云密码同规则：已配置未点"修改"→ __KEEP__ 保留旧 token
+    if (editingToken && !tok) {
+      message = { type: "err", text: t("settings.fillGhToken") };
+      return;
+    }
+    if (editingToken && tok === "__KEEP__") {
+      message = { type: "err", text: t("settings.ghTokenKeepReserved") };
+      return;
+    }
+    saving = true;
+    message = null;
+    try {
+      await saveGithubConfig(
+        ghRepo.trim(),
+        editingToken ? tok : "__KEEP__",
+        ghBranch.trim(),
+        ghPrefix.trim(),
+      );
+      message = { type: "ok", text: t("settings.configSaved") };
+      await load();
+    } catch (e) {
+      message = { type: "err", text: String(e) };
+    } finally {
+      saving = false;
+    }
+  }
+
+  // 全量上传到当前后端（坚果云 / GitHub，按 provider 分派）
   async function doUpload() {
     transferring = "upload";
     message = null;
@@ -176,7 +281,7 @@
     }
   }
 
-  // 下载到本地：云端覆盖本地
+  // 从当前后端全量下载并覆盖本地（覆盖前备份 .trash）
   async function doDownload() {
     transferring = "download";
     message = null;
@@ -226,7 +331,7 @@
       <div class="modal-body">
         <section class="field">
           <span class="field-label">{t("settings.language")}</span>
-          <div class="language-segment" role="group" aria-label={t("settings.language")}>
+          <div class="segment" role="group" aria-label={t("settings.language")}>
             <button
               type="button"
               class:active={language === "zh"}
@@ -262,7 +367,30 @@
           <p class="hint">{t("settings.autostartHint")}</p>
         </section>
 
-        <!-- 同步状态 -->
+        <!-- 同步后端切换：立即持久化，两侧配置互不影响 -->
+        <section class="field">
+          <span class="field-label">{t("settings.provider")}</span>
+          <div class="segment" role="group" aria-label={t("settings.provider")}>
+            <button
+              type="button"
+              class:active={provider === "webdav"}
+              disabled={providerBusy}
+              onclick={() => void switchProvider("webdav")}
+            >
+              {t("settings.providerWebdav")}
+            </button>
+            <button
+              type="button"
+              class:active={provider === "github"}
+              disabled={providerBusy}
+              onclick={() => void switchProvider("github")}
+            >
+              {t("settings.providerGithub")}
+            </button>
+          </div>
+        </section>
+
+        <!-- 同步状态（跟随当前激活的后端） -->
         {#if status}
           <div class="status-box" class:syncing={status.syncing} class:error={status.lastError}>
             {#if status.syncing}
@@ -282,70 +410,150 @@
           {/if}
         {/if}
 
-        <!-- 配置表单 -->
-        <section class="field">
-          <span class="field-label">{t("settings.account")}</span>
-          <input
-            class="form-input"
-            type="text"
-            bind:value={username}
-            placeholder={t("settings.accountPlaceholder")}
-            spellcheck="false"
-          />
-        </section>
-
-        <section class="field">
-          <span class="field-label">
-            {t("settings.appPassword")}
-            <button class="help-link" onclick={() => void openUrl(HELP_URL)}>
-              {t("settings.help")}
-            </button>
-          </span>
-          {#if hasPassword && !editingPassword}
-            <!-- 已保存：显示状态 + 修改按钮（明确告知密码已持久化）-->
-            <div class="pwd-saved">
-              <span class="pwd-saved-text">{t("settings.passwordSaved")}</span>
-              <button
-                class="pwd-edit-btn"
-                onclick={() => {
-                  editingPassword = true;
-                  password = "";
-                }}
-              >
-                {t("settings.editPassword")}
-              </button>
-            </div>
-          {:else}
-            <!-- 未配置或编辑模式：输入框 -->
+        <!-- 配置表单：按当前后端切换 -->
+        {#if provider === "github"}
+          <section class="field">
+            <span class="field-label">{t("settings.ghRepo")}</span>
             <input
               class="form-input"
-              type="password"
-              bind:value={password}
-              placeholder={t("settings.passwordPlaceholder")}
+              type="text"
+              bind:value={ghRepo}
+              placeholder={t("settings.ghRepoPlaceholder")}
               spellcheck="false"
-              autocomplete="off"
             />
-          {/if}
-          <p class="hint">
-            {t("settings.passwordHintBefore")}
-            <button class="inline-link" onclick={() => void openUrl(HELP_URL)}>
-              {t("settings.passwordHintLink")}
-            </button>
-            {t("settings.passwordHintAfter")}
-          </p>
-        </section>
+            <p class="hint">{t("settings.ghRepoHint")}</p>
+          </section>
 
-        <section class="field">
-          <span class="field-label">{t("settings.remoteRoot")}</span>
-          <input
-            class="form-input"
-            type="text"
-            bind:value={remoteRoot}
-            placeholder="PromptPocket"
-            spellcheck="false"
-          />
-          <p class="hint">{t("settings.remoteRootHint")}</p>
-        </section>
+          <section class="field">
+            <span class="field-label">
+              {t("settings.ghToken")}
+              <button class="help-link" onclick={() => void openUrl(GH_HELP_URL)}>
+                {t("settings.help")}
+              </button>
+            </span>
+            {#if hasToken && !editingToken}
+              <!-- 已保存：显示状态 + 修改按钮 -->
+              <div class="pwd-saved">
+                <span class="pwd-saved-text">{t("settings.passwordSaved")}</span>
+                <button
+                  class="pwd-edit-btn"
+                  onclick={() => {
+                    editingToken = true;
+                    ghToken = "";
+                  }}
+                >
+                  {t("settings.editPassword")}
+                </button>
+              </div>
+            {:else}
+              <input
+                class="form-input"
+                type="password"
+                bind:value={ghToken}
+                placeholder={t("settings.ghTokenPlaceholder")}
+                spellcheck="false"
+                autocomplete="off"
+              />
+            {/if}
+            <p class="hint">
+              {t("settings.ghTokenHintBefore")}
+              <button class="inline-link" onclick={() => void openUrl(GH_HELP_URL)}>
+                {t("settings.ghTokenHintLink")}
+              </button>
+              {t("settings.ghTokenHintAfter")}
+            </p>
+          </section>
+
+          <div class="field-row">
+            <section class="field">
+              <span class="field-label">{t("settings.ghBranch")}</span>
+              <input
+                class="form-input"
+                type="text"
+                bind:value={ghBranch}
+                placeholder="main"
+                spellcheck="false"
+              />
+              <p class="hint">{t("settings.ghBranchHint")}</p>
+            </section>
+
+            <section class="field">
+              <span class="field-label">{t("settings.ghPrefix")}</span>
+              <input
+                class="form-input"
+                type="text"
+                bind:value={ghPrefix}
+                placeholder="archive"
+                spellcheck="false"
+              />
+              <p class="hint">{t("settings.ghPrefixHint")}</p>
+            </section>
+          </div>
+        {:else}
+          <section class="field">
+            <span class="field-label">{t("settings.account")}</span>
+            <input
+              class="form-input"
+              type="text"
+              bind:value={username}
+              placeholder={t("settings.accountPlaceholder")}
+              spellcheck="false"
+            />
+          </section>
+
+          <section class="field">
+            <span class="field-label">
+              {t("settings.appPassword")}
+              <button class="help-link" onclick={() => void openUrl(HELP_URL)}>
+                {t("settings.help")}
+              </button>
+            </span>
+            {#if hasPassword && !editingPassword}
+              <!-- 已保存：显示状态 + 修改按钮（明确告知密码已持久化）-->
+              <div class="pwd-saved">
+                <span class="pwd-saved-text">{t("settings.passwordSaved")}</span>
+                <button
+                  class="pwd-edit-btn"
+                  onclick={() => {
+                    editingPassword = true;
+                    password = "";
+                  }}
+                >
+                  {t("settings.editPassword")}
+                </button>
+              </div>
+            {:else}
+              <!-- 未配置或编辑模式：输入框 -->
+              <input
+                class="form-input"
+                type="password"
+                bind:value={password}
+                placeholder={t("settings.passwordPlaceholder")}
+                spellcheck="false"
+                autocomplete="off"
+              />
+            {/if}
+            <p class="hint">
+              {t("settings.passwordHintBefore")}
+              <button class="inline-link" onclick={() => void openUrl(HELP_URL)}>
+                {t("settings.passwordHintLink")}
+              </button>
+              {t("settings.passwordHintAfter")}
+            </p>
+          </section>
+
+          <section class="field">
+            <span class="field-label">{t("settings.remoteRoot")}</span>
+            <input
+              class="form-input"
+              type="text"
+              bind:value={remoteRoot}
+              placeholder="PromptPocket"
+              spellcheck="false"
+            />
+            <p class="hint">{t("settings.remoteRootHint")}</p>
+          </section>
+        {/if}
 
         <!-- 手动同步操作区 -->
         {#if status?.configured}
@@ -357,7 +565,7 @@
                 onclick={doUpload}
                 disabled={transferring !== null}
               >
-                {#if transferring === "upload"}{t("settings.uploading")}{:else}{t("settings.upload")}{/if}
+                {#if transferring === "upload"}{t("settings.uploading")}{:else}{uploadLabel}{/if}
               </button>
               <button
                 class="sync-btn download"
@@ -511,7 +719,7 @@
     align-items: center;
     justify-content: space-between;
   }
-  .language-segment {
+  .segment {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 4px;
@@ -520,7 +728,7 @@
     border-radius: 8px;
     background: var(--bg);
   }
-  .language-segment button {
+  .segment button {
     height: 28px;
     border: 1px solid transparent;
     border-radius: 6px;
@@ -530,15 +738,21 @@
     font-weight: 600;
     cursor: pointer;
   }
-  .language-segment button:hover {
+  .segment button:hover:not(:disabled) {
     color: var(--fg);
     background: var(--bg-hover);
   }
-  .language-segment button.active {
+  .segment button.active {
     border-color: var(--border);
     background: var(--bg-elevated);
     color: var(--accent);
     box-shadow: 0 1px 2px rgba(31, 42, 68, 0.06);
+  }
+  /* 双列表单行（分支 / 路径前缀） */
+  .field-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
   }
   /* 自启动开关：pill 滑块，状态即系统真实状态 */
   .switch {

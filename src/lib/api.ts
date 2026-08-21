@@ -180,12 +180,37 @@ export async function saveCloudConfig(
   return invoke<void>("save_cloud_config", { username, password, remoteRoot });
 }
 
-/** 上传到坚果云：本地所有文件推送到云端（只增不删） */
+// ── GitHub 存档 ──
+
+export async function testGithubConnection(
+  repo: string,
+  token: string,
+  branch: string,
+  prefix: string,
+): Promise<void> {
+  return invoke<void>("test_github_connection", { repo, token, branch, prefix });
+}
+
+export async function saveGithubConfig(
+  repo: string,
+  token: string,
+  branch: string,
+  prefix: string,
+): Promise<void> {
+  return invoke<void>("save_github_config", { repo, token, branch, prefix });
+}
+
+/** 切换同步后端（"webdav" | "github"）；两侧配置互不影响，立即持久化 */
+export async function setSyncProvider(provider: string): Promise<void> {
+  return invoke<void>("set_sync_provider", { provider });
+}
+
+/** 全量上传到当前后端（坚果云 / GitHub，按 provider 分派） */
 export async function uploadAll(): Promise<string> {
   return invoke<string>("upload_all");
 }
 
-/** 下载到本地：从坚果云拉取并覆盖本地 */
+/** 从当前后端全量下载并覆盖本地（覆盖前备份 .trash） */
 export async function downloadAll(): Promise<string> {
   return invoke<string>("download_all");
 }
