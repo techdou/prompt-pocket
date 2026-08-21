@@ -427,9 +427,14 @@ fn load_cloud_config_with_store(
         .or_else(|| legacy_password.clone())
         .unwrap_or_default();
 
-    // 旧版明文密码迁移进系统凭据库，并从 JSON 清出（合并写，保留其它字段）
-    if let (Ok(None), Some(legacy)) = (&stored_password, legacy_password.as_ref()) {
-        if !username.is_empty() && secret_store.write_password(&username, legacy).is_ok() {
+    // JSON 里的明文密码（旧版遗留或手改）只要凭据库已接管就必须清出：
+    // 不能因凭据库已有副本而留着明文不动
+    if let Some(legacy) = legacy_password.as_ref() {
+        let in_keyring = matches!(&stored_password, Ok(Some(_)));
+        let migrated = !in_keyring
+            && !username.is_empty()
+            && secret_store.write_password(&username, legacy).is_ok();
+        if in_keyring || migrated {
             let _ = update_persisted_config(config_file, |p| p.password = None);
         }
     }
@@ -471,9 +476,13 @@ fn load_github_config_with_store(
         .or_else(|| legacy_token.clone())
         .unwrap_or_default();
 
-    // 手填明文 token 的迁移：进凭据库 + 清出 JSON
-    if let (Ok(None), Some(legacy)) = (&stored_token, legacy_token.as_ref()) {
-        if !repo.is_empty() && secret_store.write_password(&repo, legacy).is_ok() {
+    // 手填明文 token 只要凭据库已接管（本就有，或本次迁移成功）就从 JSON 清出
+    if let Some(legacy) = legacy_token.as_ref() {
+        let in_keyring = matches!(&stored_token, Ok(Some(_)));
+        let migrated = !in_keyring
+            && !repo.is_empty()
+            && secret_store.write_password(&repo, legacy).is_ok();
+        if in_keyring || migrated {
             let _ = update_persisted_config(config_file, |p| p.gh_token = None);
         }
     }
@@ -1080,6 +1089,8 @@ fn save_github_config(
         token: final_token,
         enabled: true,
     };
+    // 落盘前先校验（repo 形态 / PAT 非法字符），不构造网络请求
+    GitHubStore::new(&cfg)?;
     state.set_github_config(cfg)?;
     Ok(())
 }
@@ -1954,6 +1965,42 @@ mod tests {
         let json = std::fs::read_to_string(&config_file).unwrap();
         assert!(!json.contains("ghp_legacy"));
         assert!(!json.contains("\"gh_token\""));
+    }
+
+    #[test]
+    fn plaintext_secret_is_scrubbed_even_when_keyring_already_has_it() {
+        // 凭据库已有密钥、JSON 又出现明文（手改配置）：明文也必须清出
+        let dir = std::env::temp_dir().join("pp_test_plaintext_scrub");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_file = dir.join("config.json");
+        std::fs::write(
+            &config_file,
+            r#"{
+  "username": "user@example.com",
+  "password": "stray-plaintext",
+  "gh_repo": "someone/prompts",
+  "gh_token": "stray-token"
+}"#,
+        )
+        .unwrap();
+        let store = MemorySecretStore::default();
+        store
+            .write_password("user@example.com", "keyring-secret")
+            .unwrap();
+        store
+            .write_password("someone/prompts", "keyring-token")
+            .unwrap();
+
+        let webdav = load_cloud_config_with_store(&config_file, &store);
+        let github = load_github_config_with_store(&config_file, &store);
+
+        // 凭据库优先：加载到的是 keyring 里的值
+        assert_eq!(webdav.password, "keyring-secret");
+        assert_eq!(github.token, "keyring-token");
+        let json = std::fs::read_to_string(&config_file).unwrap();
+        assert!(!json.contains("stray-plaintext"), "明文密码必须清出");
+        assert!(!json.contains("stray-token"), "明文 token 必须清出");
     }
 
     #[test]

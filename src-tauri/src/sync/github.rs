@@ -124,13 +124,33 @@ impl GitHubStore {
             .map_err(|e| format!("解析文件元数据失败: {e}"))?;
         Ok(Some(meta.sha))
     }
+
+    /// 仓库是否为空（无任何分支）。用于区分"空仓库"与"分支名写错"两种 404
+    async fn repo_is_empty(&self) -> Result<bool, String> {
+        let resp = self
+            .http
+            .get(format!(
+                "{GH_API}/repos/{}/branches?per_page=1",
+                self.repo
+            ))
+            .send()
+            .await
+            .map_err(|e| format!("查询分支列表失败: {e}"))?;
+        let branches: Vec<serde_json::Value> = check_status(resp, "查询分支列表")?
+            .json()
+            .await
+            .map_err(|e| format!("解析分支列表失败: {e}"))?;
+        Ok(branches.is_empty())
+    }
 }
 
 impl RemoteStore for GitHubStore {
     /// Trees API 一次请求拿全树（顺带返回每个 blob 的 SHA 和大小，
     /// 比 WebDAV 逐层 PROPFIND 高效；SHA 做内容指纹的增强留待后续）
     async fn list_all(&self) -> Result<(Vec<RemoteFile>, Vec<String>), String> {
-        // 先取分支头 sha；分支 404 = 空仓库（还没任何提交）→ 空列表
+        // 先取分支头 sha；分支 404 有两种含义：仓库是空的（还没任何提交）→ 空列表；
+        // 或仓库非空但分支名写错 → 明确报错（静默当空列表会让 pull 报
+        // "未获取到远程文件列表"，用户摸不着头脑）
         let branch_url = format!("{GH_API}/repos/{}/branches/{}", self.repo, self.branch);
         let resp = self
             .http
@@ -139,7 +159,13 @@ impl RemoteStore for GitHubStore {
             .await
             .map_err(|e| format!("查询分支失败: {e}"))?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok((Vec::new(), Vec::new()));
+            if self.repo_is_empty().await? {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            return Err(format!(
+                "分支 {} 不存在：仓库非空但没有这个分支（检查配置的分支名）",
+                self.branch
+            ));
         }
         let branch: BranchResp = check_status(resp, "查询分支")?
             .json()
@@ -232,8 +258,9 @@ impl RemoteStore for GitHubStore {
         Ok(())
     }
 
-    /// 自检：GET 仓库信息——仓库存在且 PAT 可读即通过
-    /// （Contents 写权限只有真实写操作才能验证，测试连接不制造 commit）
+    /// 自检：GET 仓库信息——仓库存在、PAT 可读，且响应里的 permissions
+    /// 明确报告无写权限时直接报错（省得用户到上传时才发现 PAT 只读）。
+    /// permissions 缺失（旧版 PAT 形态等）不阻塞，靠真实写操作暴露。
     async fn test(&self) -> Result<(), String> {
         let resp = self
             .http
@@ -241,7 +268,18 @@ impl RemoteStore for GitHubStore {
             .send()
             .await
             .map_err(|e| format!("连接失败: {e}"))?;
-        check_status(resp, "测试连接")?;
+        let info: RepoInfo = check_status(resp, "测试连接")?
+            .json()
+            .await
+            .map_err(|e| format!("解析仓库信息失败: {e}"))?;
+        if let Some(perms) = info.permissions {
+            if perms.push == Some(false) {
+                return Err(
+                    "PAT 对该仓库无写权限：请确认 PAT 勾选了此仓库的 Contents 读写权限"
+                        .to_string(),
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -329,6 +367,17 @@ struct TreeEntry {
 #[derive(serde::Deserialize)]
 struct ContentMeta {
     sha: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RepoInfo {
+    /// 认证用户的仓库权限；只在带认证的请求里返回，缺失时按未知处理
+    permissions: Option<RepoPermissions>,
+}
+
+#[derive(serde::Deserialize)]
+struct RepoPermissions {
+    push: Option<bool>,
 }
 
 #[cfg(test)]
