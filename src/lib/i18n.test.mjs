@@ -58,8 +58,8 @@ describe("i18n language helpers", () => {
   });
 
   it("translates fixed labels and interpolated copy", () => {
-    assert.equal(translate("en", "app.searchPlaceholder"), "Search prompts...");
-    assert.equal(translate("zh", "app.searchPlaceholder"), "搜索提示词...");
+    assert.equal(translate("en", "app.searchPlaceholder"), "Search titles or content...");
+    assert.equal(translate("zh", "app.searchPlaceholder"), "搜索标题或内容...");
     assert.equal(
       createTranslator("en")("app.deleteConfirm", { title: "Example" }),
       'Delete "Example"? The file will be moved to the .trash backup folder.',

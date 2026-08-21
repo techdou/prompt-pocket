@@ -44,6 +44,8 @@ impl Default for PromptMeta {
 }
 
 /// 单条 prompt 的精简视图（列表用）
+/// body 也随列表返回：前端内容搜索（标题记混、只记得正文关键词的场景）
+/// 需要全量正文做内存匹配。prompt 文件普遍只有几 KB，全量随列表下发的开销可忽略。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Prompt {
@@ -53,6 +55,8 @@ pub struct Prompt {
     pub path: String,
     pub abs_path: String,
     pub meta: PromptMeta,
+    /// 正文全文（供前端内容搜索；与 read_prompt 口径一致，去掉尾部换行）
+    pub body: String,
     /// 在分类内的排序权重（来自 .order.json），None 表示未定义（排末尾）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<i32>,
@@ -471,38 +475,13 @@ fn migrate_prompt_order_on_category_rename(root: &Path, old_name: &str, new_name
     }
 }
 
-/// 列表扫描读取的文件头部窗口（frontmatter 元数据都在这个范围内）
-const HEAD_WINDOW: usize = 16 * 1024;
-
-/// 读取文件头部至多 max 字节，按 UTF-8 边界截断（尾部不完整的多字节序列丢弃）
-fn read_head(path: &Path, max: usize) -> io::Result<String> {
-    use std::io::Read;
-    let mut file = fs::File::open(path)?;
-    let mut bytes: Vec<u8> = Vec::with_capacity(4096);
-    let mut buf = [0u8; 4096];
-    while bytes.len() < max {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buf[..n]);
-    }
-    bytes.truncate(max);
-    match String::from_utf8(bytes) {
-        Ok(s) => Ok(s),
-        Err(e) => {
-            let valid = e.utf8_error().valid_up_to();
-            Ok(String::from_utf8_lossy(&e.as_bytes()[..valid]).into_owned())
-        }
-    }
-}
-
 fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
-    // 只读文件头部：title/updated 位于 frontmatter 前几十字节，列表扫描不必
-    // 全文读取。frontmatter 超过头部窗口（极罕见）时解析退化为默认 meta，
-    // title 由文件名兜底（保存时文件名本就跟随标题）
-    let content = read_head(abs, HEAD_WINDOW).ok()?;
-    let (mut meta, _body) = parse_markdown(&content);
+    // 全文读取：列表要携带正文供前端内容搜索。prompt 文件普遍只有几 KB，
+    // 相比旧的"只读头部窗口"方案多出的 IO 可忽略，换来的是搜索不遗漏正文后半段
+    let content = fs::read_to_string(abs).ok()?;
+    let (mut meta, body) = parse_markdown(&content);
+    // 与 read_prompt 同口径：去掉尾部换行，避免保存时附加的 \n 带进搜索文本
+    let body = body.trim_end_matches(['\n', '\r']).to_string();
 
     let rel = abs.strip_prefix(root).ok()?;
     let rel_str = path_to_unix(rel);
@@ -533,6 +512,7 @@ fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
         path: rel_str,
         abs_path: abs.to_string_lossy().to_string(),
         meta,
+        body,
         order,
     })
 }
@@ -1605,24 +1585,31 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// read_head：头部窗口内的完整 frontmatter 正常解析；
-    /// UTF-8 截断不产生替换字符（多字节序列在边界被丢弃而非替换）
+    /// 内容搜索依赖列表携带正文：scan 结果必须带完整 body（含 frontmatter 之后的内容，
+    /// 且与 read_prompt 同口径去掉尾部换行）。旧版只读头部窗口，正文会被截断。
     #[test]
-    fn read_head_truncates_at_utf8_boundary() {
-        let dir = std::env::temp_dir().join("pp_test_read_head");
+    fn scan_includes_full_body_for_content_search() {
+        let dir = std::env::temp_dir().join("pp_test_scan_body");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // 窗口内：正常解析
-        std::fs::write(dir.join("a.md"), "---\ntitle: 标题\n---\n\n正文").unwrap();
-        let head = read_head(&dir.join("a.md"), HEAD_WINDOW).unwrap();
-        assert!(head.contains("title: 标题"));
+        // 正文超过旧的 16KB 头部窗口，验证不再截断
+        let long_body = format!("开头标记\n{}\n结尾标记", "填".repeat(20 * 1024));
+        std::fs::write(
+            dir.join("长文.md"),
+            format!("---\ntitle: 长文\n---\n\n{long_body}\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("无头.md"), "纯正文没有 frontmatter").unwrap();
 
-        // 构造多字节字符横跨截断边界：前缀 + "写"（3 字节）截 1 字节
-        let content = "x".repeat(8) + "写";
-        std::fs::write(dir.join("b.md"), &content).unwrap();
-        let truncated = read_head(&dir.join("b.md"), 9).unwrap();
-        assert_eq!(truncated, "x".repeat(8), "不完整多字节序列应被丢弃");
+        let res = scan_prompts(&dir).unwrap();
+        let long = res.prompts.iter().find(|p| p.title == "长文").expect("应扫到长文");
+        assert!(long.body.starts_with("开头标记"));
+        assert!(long.body.ends_with("结尾标记"), "正文应完整不被头部窗口截断");
+        assert!(!long.body.ends_with('\n'), "尾部换行应被去掉");
+
+        let plain = res.prompts.iter().find(|p| p.title == "无头").expect("应扫到无头");
+        assert_eq!(plain.body, "纯正文没有 frontmatter");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

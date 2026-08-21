@@ -874,6 +874,7 @@
         prompts={visiblePrompts}
         {selectedPath}
         {selectedIndex}
+        {query}
         draggable={canReorderPrompts}
         disabledReason={reorderDisabledLabel}
         onmounted={(fn) => (scrollToIndexFn = fn)}

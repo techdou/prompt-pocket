@@ -27,6 +27,8 @@ export interface Prompt {
   abs_path: string;
   /** frontmatter 元数据 */
   meta: PromptMeta;
+  /** 正文全文（扫描时随列表返回，供内容搜索） */
+  body: string;
   /** 在分类内的排序权重（来自 .order.json），undefined 表示未定义 */
   order?: number;
 }

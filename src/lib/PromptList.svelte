@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { Prompt } from "./types";
+  import { bodyMatchSnippet } from "./search";
   import { createTranslator, type Translator } from "./i18n";
 
   const fallbackT = createTranslator("zh");
@@ -17,6 +18,7 @@
     ondragend,
     draggable = true,
     disabledReason = "",
+    query = "",
     t = fallbackT,
   }: {
     prompts: Prompt[];
@@ -33,6 +35,8 @@
     ondragend?: () => void;
     draggable?: boolean;
     disabledReason?: string;
+    /** 当前搜索词：正文命中时列表项展示命中摘录 */
+    query?: string;
     t?: Translator;
   } = $props();
 
@@ -182,6 +186,7 @@
   ondragstart={onNativeDragStart}
 >
   {#each prompts as p, i (p.path)}
+    {@const snippet = bodyMatchSnippet(p, query)}
     <li
       bind:this={itemEls[i]}
       data-idx={i}
@@ -224,6 +229,9 @@
         </div>
         <div class="sub">
           <span class="cat">{categoryLabel(p.category)}</span>
+          {#if snippet}
+            <span class="snippet" title={snippet}>{snippet}</span>
+          {/if}
         </div>
       </div>
       <button
@@ -372,6 +380,13 @@
   }
   .cat {
     flex-shrink: 0;
+  }
+  /* 正文命中摘录：搜索词只命中正文时展示，帮用户认出目标 */
+  .snippet {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.85;
   }
 
   .more-btn {

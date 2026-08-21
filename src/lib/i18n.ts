@@ -7,7 +7,7 @@ type TranslationValues = Record<string, string | number>;
 
 const zh = {
   "app.loading": "正在加载提示词...",
-  "app.searchPlaceholder": "搜索提示词...",
+  "app.searchPlaceholder": "搜索标题或内容...",
   "app.newPrompt": "新建 (Ctrl+N)",
   "app.settings": "设置",
   "app.switchLanguageTitle": "切换到英文",
@@ -108,7 +108,7 @@ const zh = {
 
 const en: Record<keyof typeof zh, string> = {
   "app.loading": "Loading prompts...",
-  "app.searchPlaceholder": "Search prompts...",
+  "app.searchPlaceholder": "Search titles or content...",
   "app.newPrompt": "New (Ctrl+N)",
   "app.settings": "Settings",
   "app.switchLanguageTitle": "Switch to Chinese",
