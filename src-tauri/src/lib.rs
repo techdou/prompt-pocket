@@ -14,6 +14,7 @@ use tauri::{
     Emitter, LogicalPosition, Manager, WindowEvent,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -777,6 +778,26 @@ fn reveal_in_finder(path: String, state: tauri::State<'_, AppState>) -> Result<(
 }
 
 // ────────────────────────────────────────────────────────────
+// 开机自启动：开关状态读写系统真实状态（注册表 Run 键 / LaunchAgent），
+// 不落 config.json——避免配置文件与系统状态双源打架
+// ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())
+    } else {
+        manager.disable().map_err(|e| e.to_string())
+    }
+}
+
+// ────────────────────────────────────────────────────────────
 // 云同步命令
 // ────────────────────────────────────────────────────────────
 
@@ -1156,6 +1177,11 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // 开机自启动：Windows 写注册表 Run 键 / macOS LaunchAgent；参数 None = 不带参数启动
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(move |app| {
             let local_dir = resolve_local_dir(app.handle());
             let config_file = resolve_config_file(app.handle());
@@ -1318,6 +1344,8 @@ pub fn run() {
             upload_all,
             download_all,
             open_url,
+            get_autostart,
+            set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

@@ -19,6 +19,8 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
+# 开机自启动（设置页开关，读写系统真实状态，不落 config.json）
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # YAML frontmatter 解析

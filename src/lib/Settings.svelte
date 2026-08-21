@@ -8,10 +8,12 @@
   } from "./i18n";
   import {
     downloadAll,
+    getAutostart,
     getCloudConfig,
     getSyncStatus,
     openUrl,
     saveCloudConfig,
+    setAutostart,
     testCloudConnection,
     uploadAll,
   } from "./api";
@@ -46,6 +48,10 @@
   let transferring = $state<"upload" | "download" | null>(null);
   let message = $state<{ type: "ok" | "err"; text: string } | null>(null);
 
+  // 开机自启动：状态读系统真实值，切换失败时回滚开关
+  let autostart = $state(false);
+  let autostartBusy = $state(false);
+
   // 坚果云帮助页：如何获取应用密码
   const HELP_URL = "https://help.jianguoyun.com/?p=2064";
 
@@ -69,8 +75,25 @@
       // 密码不回显（安全）；已配置则锁定编辑模式，点"修改"才解锁
       password = "";
       editingPassword = !config.hasPassword;
+      // 自启动状态读系统真实值；读取失败不阻断设置页其余内容
+      autostart = await getAutostart().catch(() => false);
     } catch (e) {
       message = { type: "err", text: String(e) };
+    }
+  }
+
+  async function toggleAutostart() {
+    if (autostartBusy) return;
+    autostartBusy = true;
+    const next = !autostart;
+    autostart = next; // 乐观更新，失败回滚
+    try {
+      await setAutostart(next);
+    } catch (e) {
+      autostart = !next;
+      message = { type: "err", text: t("settings.autostartFailed", { error: String(e) }) };
+    } finally {
+      autostartBusy = false;
     }
   }
 
@@ -220,6 +243,23 @@
             </button>
           </div>
           <p class="hint">{t("settings.languageHint")}</p>
+        </section>
+
+        <section class="field">
+          <span class="field-label">{t("settings.autostart")}</span>
+          <button
+            type="button"
+            class="switch"
+            class:on={autostart}
+            role="switch"
+            aria-checked={autostart}
+            aria-label={t("settings.autostart")}
+            disabled={autostartBusy}
+            onclick={toggleAutostart}
+          >
+            <span class="switch-dot"></span>
+          </button>
+          <p class="hint">{t("settings.autostartHint")}</p>
         </section>
 
         <!-- 同步状态 -->
@@ -499,6 +539,39 @@
     background: var(--bg-elevated);
     color: var(--accent);
     box-shadow: 0 1px 2px rgba(31, 42, 68, 0.06);
+  }
+  /* 自启动开关：pill 滑块，状态即系统真实状态 */
+  .switch {
+    width: 38px;
+    height: 22px;
+    border-radius: 11px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    padding: 2px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    transition: background 0.15s, border-color 0.15s;
+    align-self: flex-start;
+  }
+  .switch:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .switch-dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: transform 0.15s, background 0.15s;
+  }
+  .switch.on {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .switch.on .switch-dot {
+    transform: translateX(16px);
+    background: #fff;
   }
   .help-link {
     background: transparent;

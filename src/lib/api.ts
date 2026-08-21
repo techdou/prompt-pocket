@@ -193,3 +193,14 @@ export async function downloadAll(): Promise<string> {
 export async function openUrl(url: string): Promise<void> {
   return invoke<void>("open_url", { url });
 }
+
+// ── 开机自启动 ──
+
+/** 读取系统真实自启动状态（注册表/LaunchAgent），不读配置文件 */
+export async function getAutostart(): Promise<boolean> {
+  return invoke<boolean>("get_autostart");
+}
+
+export async function setAutostart(enabled: boolean): Promise<void> {
+  return invoke<void>("set_autostart", { enabled });
+}
