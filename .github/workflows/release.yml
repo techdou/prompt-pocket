@@ -110,7 +110,7 @@ jobs:
       # action 按 commit SHA pin（tag 可被移动重指向，SHA 不可），升级时更新 SHA 并
       # 在注释中保留版本号对照
       - name: Build and publish
-        uses: tauri-apps/tauri-action@8c94c894075e92c8a2b668b2d35c57e1e38cfdfb # v0.5.21
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
