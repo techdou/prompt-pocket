@@ -20,9 +20,9 @@
     "@tauri-apps/plugin-global-shortcut": "^2",
     "highlight.js": "^11.12.0",
     "katex": "^0.18.4",
-    "marked": "^18.0.9",
+    "marked": "^18.0.10",
     "marked-highlight": "^2.2.4",
-    "mermaid": "^11.16.1"
+    "mermaid": "^11.17.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^4.0.0",
