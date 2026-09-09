@@ -137,17 +137,27 @@ export function renderMarkdown(src: string): string {
  */
 export function markdownToPlain(src: string): string {
   if (!src) return "";
-  let out = src;
-  // 围栏代码块：去围栏保留内容
-  out = out.replace(/```[^\n]*\n([\s\S]*?)```/g, "$1");
-  // 图片 ![alt](url) → alt；链接 [text](url) → text
-  out = out.replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1");
-  out = out.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1");
-  // 行内标记：**x** / __x__ / ~~x~~ / `x` / *x* → x
+  // 先抽走代码段暂存：代码里的 __init__、*args、[i](j) 都是字面标识符而非
+  // Markdown 语法，必须在任何标记剥离之前保护，最后原样还原（去围栏/反引号）
+  const codeSlots: string[] = [];
+  const stashCode = (raw: string): string => {
+    codeSlots.push(raw);
+    return `\u0000${codeSlots.length - 1}\u0000`;
+  };
+  let out = src.replace(/```[^\n]*\n[\s\S]*?```/g, stashCode);
+  out = out.replace(/`[^`]+`/g, stashCode);
+
+  // 图片 ![alt](url) → alt；链接 [text](url) → text。
+  // url 允许一层嵌套括号：Wikipedia 风格 .../Foo_(bar) 不能在 (bar) 处截断
+  const url = String.raw`(?:[^()]|\([^()]*\))*`;
+  out = out.replace(new RegExp(String.raw`!\[([^\]]*)\]\(${url}\)`, "g"), "$1");
+  out = out.replace(new RegExp(String.raw`\[([^\]]*)\]\(${url}\)`, "g"), "$1");
+  // 行内标记：**x** / __x__ / ~~x~~ / *x* → x。
+  // __/_ 粗斜体带词边界守卫（CommonMark 词中强调不生效）：foo__bar__baz 不剥，
+  // 否则 Python 的 __init__/__main__ 等标识符会被静默损坏
   out = out.replace(/\*\*([^*]+)\*\*/g, "$1");
-  out = out.replace(/__([^_]+)__/g, "$1");
+  out = out.replace(/(^|[^\w])__([^_]+)__(?!\w)/gm, "$1$2");
   out = out.replace(/~~([^~]+)~~/g, "$1");
-  out = out.replace(/`([^`]+)`/g, "$1");
   out = out.replace(/\*([^*]+)\*/g, "$1");
   // 斜体 _x_：无 lookbehind 写法（lookbehind 是 ES2018，老 WKWebView/WebKitGTK
   // 不支持，静态 import 下模块解析即 SyntaxError 会让整个应用白屏）
@@ -159,5 +169,13 @@ export function markdownToPlain(src: string): string {
   );
   // 水平线（--- / *** / ___）
   out = out.replace(/^\s*([-*_]\s*){3,}$/gm, "");
+  // 还原代码段：围栏块去首尾 ``` 行，行内代码去反引号
+  out = out.replace(/\u0000(\d+)\u0000/g, (_, i: string) => {
+    const raw = codeSlots[Number(i)] ?? "";
+    if (raw.startsWith("```")) {
+      return raw.replace(/^```[^\n]*\n/, "").replace(/```\s*$/, "");
+    }
+    return raw.slice(1, -1);
+  });
   return out.trim();
 }

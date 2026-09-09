@@ -164,4 +164,34 @@ describe("markdownToPlain - plain 复制模式", () => {
     assert.equal(markdownToPlain("普通文本 123"), "普通文本 123");
     assert.equal(markdownToPlain(""), "");
   });
+
+  it("行内代码与围栏块内的 dunder 标识符原样保留", () => {
+    // 编程提示词高频场景：`__init__` 是字面标识符，不是粗体语法
+    const inline = markdownToPlain("入口是 `python -m __main__`，构造器 __init__ 之外");
+    assert.ok(inline.includes("__main__"), `行内代码应保留: ${inline}`);
+    const fenced = markdownToPlain("```python\nif __name__ == \"__main__\":\n    pass\n```");
+    assert.ok(fenced.includes("__main__"), `围栏块应保留: ${fenced}`);
+    assert.ok(fenced.includes("__name__"), `围栏块应保留: ${fenced}`);
+  });
+
+  it("词中双下划线不剥（CommonMark 词中强调不生效）", () => {
+    const plain = markdownToPlain("调用 foo__bar__baz 入口");
+    assert.ok(plain.includes("foo__bar__baz"), `词中标识符不应被剥: ${plain}`);
+  });
+
+  it("空格包围的 __粗体__ 正常剥（合法 Markdown 语法）", () => {
+    assert.equal(markdownToPlain("__重点__内容前"), "重点内容前");
+    assert.equal(markdownToPlain("中文 __粗体__ 结尾"), "中文 粗体 结尾");
+  });
+
+  it("行内代码内的标记语法原样保留", () => {
+    const plain = markdownToPlain("写 `**不是粗体**` 和 `[不是链接](x)`");
+    assert.ok(plain.includes("**不是粗体**"), `行内代码内标记应保留: ${plain}`);
+    assert.ok(plain.includes("[不是链接](x)"), `行内代码内标记应保留: ${plain}`);
+  });
+
+  it("链接 url 含一层嵌套括号时完整去除", () => {
+    const plain = markdownToPlain("见 [wiki](https://en.wikipedia.org/wiki/Foo_(bar))");
+    assert.equal(plain, "见 wiki");
+  });
 });
