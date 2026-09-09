@@ -159,8 +159,9 @@
       showError(String(e));
     } finally {
       loading = false;
-      // 首启窗口在 webview 就绪前就 emit 过 window-shown（监听未注册必丢），
-      // loading 翻 false、DOM 渲染出搜索框后直接聚焦，兑现首启直接打字
+      // 首启窗口显示早于 webview JS 就绪（Rust 侧不为此 emit window-shown，
+      // 监听未注册必丢）：loading 翻 false、DOM 渲染出搜索框后直接聚焦，
+      // 兑现首启直接打字
       void tick().then(() => {
         if (editorMode === "view") {
           document.querySelector<HTMLInputElement>("#search-input")?.focus();
