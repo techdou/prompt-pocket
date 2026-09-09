@@ -60,7 +60,7 @@ export function filterPrompts(
   // 每条 prompt 的搜索串只归一化一次（而非每个关键词算一遍）
   const rows: Row[] = prompts.map((p) => ({
     p,
-    meta: norm(p.title + " " + p.category + " " + (p.meta.tags?.join(" ") ?? "")),
+    meta: norm(p.title + " " + p.category),
     body: norm(p.body),
   }));
 
@@ -83,7 +83,7 @@ export function filterPrompts(
 }
 
 /**
- * 正文命中摘录：当关键词只命中正文、标题/分类/标签解释不了"为什么搜到它"时，
+ * 正文命中摘录：当关键词只命中正文、标题/分类解释不了"为什么搜到它"时，
  * 返回命中词上下文的一行摘录（供列表展示，帮用户认出目标）。
  * 元信息能解释或正文没命中 → 返回 null（列表保持原样）。
  */
@@ -91,9 +91,7 @@ export function bodyMatchSnippet(prompt: Prompt, query: string): string | null {
   const terms = norm(query.trim()).split(" ").filter(Boolean);
   if (terms.length === 0) return null;
 
-  const meta = norm(
-    prompt.title + " " + prompt.category + " " + (prompt.meta.tags?.join(" ") ?? ""),
-  );
+  const meta = norm(prompt.title + " " + prompt.category);
   // 摘录展示用折叠空白后的原文（保留大小写），索引用其小写副本定位
   const flat = prompt.body.replace(/\s+/g, " ").trim();
   const flatLower = flat.toLowerCase();

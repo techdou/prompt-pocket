@@ -1,11 +1,15 @@
-// prompt 数据结构，与 Rust 端 Prompt struct 一一对应（serde 自动转 camelCase）
+// ── 前后端数据形状契约 ──
+// Rust 端结构体全部 serde(rename_all = "camelCase")，invoke 返回的运行时
+// 形状是 camelCase（copyMode / absPath / lastSync）；本文件的前端类型约定
+// snake_case（copy_mode / abs_path），翻译只发生在 api.ts 的 normalize* 层。
+// 因此：新增 command 的返回必须经过 normalize 再进组件，不得绕过 normalize
+// 直接消费 invoke 结果——类型标注说有 copy_mode、运行时却是 undefined，
+// 编译期查不出来。
 export type CopyMode = "markdown" | "plain";
 
 export interface PromptMeta {
   /** 标题，缺省时取文件名（去扩展名） */
   title: string;
-  /** 旧版 frontmatter 兼容字段；新文件不再写入 */
-  tags?: string[];
   /** 复制时是否先转纯文本：markdown 渲染成纯文本 / 原样 */
   copy_mode: CopyMode;
   /** 创建时间 ISO 字符串 */

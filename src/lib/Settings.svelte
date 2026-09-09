@@ -408,7 +408,7 @@
             <button
               type="button"
               class:active={provider === "webdav"}
-              disabled={providerBusy}
+              disabled={providerBusy || transferring !== null}
               onclick={() => void switchProvider("webdav")}
             >
               {t("settings.providerWebdav")}
@@ -416,7 +416,7 @@
             <button
               type="button"
               class:active={provider === "github"}
-              disabled={providerBusy}
+              disabled={providerBusy || transferring !== null}
               onclick={() => void switchProvider("github")}
             >
               {t("settings.providerGithub")}

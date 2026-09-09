@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { filterPrompts, bodyMatchSnippet } from "./search.ts";
 
-// 最小 Prompt  stub：search.ts 只读 title / category / meta.tags / body
+// 最小 Prompt  stub：search.ts 只读 title / category / body
 const mk = (title, body, { category = "默认", path } = {}) => ({
   title,
   body,

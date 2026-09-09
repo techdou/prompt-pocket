@@ -201,23 +201,26 @@
   }
 
   async function refresh() {
+    // 更新前 capture 选中在过滤视图里的位置：列表更新后 selectedIndex 读到
+    // 的是新列表（选中已不在其中，恒 -1），要旧位置才能兑现"选相邻项"
+    const prevIdx = selectedIndex;
     const res = await scanPrompts();
     allPrompts = res.prompts;
     categories = res.categories;
-    reconcileSelection();
+    reconcileSelection(prevIdx);
   }
 
   // 刷新后的选中调和：selectedPath 还在全局列表 → 保持；
   // 不在了（外部删除/同步清理）→ 选可见列表里同位置的相邻项。
   // 这是 selectedPath 唯一真相原则的关键：任何重排都不能劫持选中。
-  function reconcileSelection() {
+  function reconcileSelection(prevIdx = 0) {
     if (!selectedPath) {
       // 无选中（首启/删除后）：列表非空时默认选第一条，保证 Enter 始终可用
       if (visiblePrompts.length > 0) selectedPath = visiblePrompts[0].path;
       return;
     }
     if (allPrompts.some((p) => p.path === selectedPath)) return;
-    const idx = selectedIndex >= 0 ? selectedIndex : 0;
+    const idx = prevIdx >= 0 ? prevIdx : 0;
     const next = visiblePrompts[Math.min(idx, visiblePrompts.length - 1)];
     selectedPath = next?.path ?? null;
   }
@@ -1036,6 +1039,8 @@
     </nav>
 
     <main class="body">
+      <!-- 副行内容只看视图：「全部」显示分类名（跨分类有辨识度），
+           单分类显示相对时间（该视图下分类名永远冗余，与是否搜索无关） -->
       <PromptList
         prompts={visiblePrompts}
         {selectedPath}
@@ -1043,7 +1048,7 @@
         {query}
         draggable={canReorderPrompts}
         disabledReason={reorderDisabledLabel}
-        subMode={query.trim() || selectedCategory === "__all__" ? "category" : "time"}
+        subMode={selectedCategory === "__all__" ? "category" : "time"}
         {language}
         onmounted={(fn) => (scrollToIndexFn = fn)}
         onselect={async (path) => {

@@ -10,13 +10,17 @@ import type {
   SyncStatus,
 } from "./types";
 
-type BackendPromptMeta = Partial<Omit<PromptMeta, "copy_mode">> & {
-  copy_mode?: CopyMode;
+// 后端实际形状：Rust 结构体全部 serde(rename_all = "camelCase")，
+// invoke 返回运行时就是 camelCase。前端类型约定 snake_case，翻译只发生在
+// 本文件 normalize* 层（契约详见 types.ts 顶部说明）。
+type BackendPromptMeta = {
+  title?: string;
   copyMode?: CopyMode;
+  created?: string;
+  updated?: string;
 };
 
 type BackendPrompt = Omit<Prompt, "abs_path" | "meta"> & {
-  abs_path?: string;
   absPath?: string;
   meta?: BackendPromptMeta;
 };
@@ -36,8 +40,7 @@ export function normalizeCopyMode(mode: unknown): CopyMode {
 export function normalizePromptMeta(meta: BackendPromptMeta = {}): PromptMeta {
   return {
     title: meta.title ?? "",
-    tags: meta.tags,
-    copy_mode: normalizeCopyMode(meta.copy_mode ?? meta.copyMode),
+    copy_mode: normalizeCopyMode(meta.copyMode),
     created: meta.created ?? "",
     updated: meta.updated ?? "",
   };
@@ -46,7 +49,7 @@ export function normalizePromptMeta(meta: BackendPromptMeta = {}): PromptMeta {
 export function normalizePrompt(prompt: BackendPrompt): Prompt {
   return {
     ...prompt,
-    abs_path: prompt.abs_path ?? prompt.absPath ?? "",
+    abs_path: prompt.absPath ?? "",
     meta: normalizePromptMeta(prompt.meta),
   };
 }
