@@ -1025,7 +1025,15 @@ async fn test_cloud_connection(
     username: String,
     password: String,
     remote_root: String,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    // __KEEP__：已配置用户密码不回显，测试连接复用已存值
+    // （与 save_cloud_config 同语义，否则"测试连接"要求重输密码）
+    let password = if password == "__KEEP__" {
+        state.cloud_config().password
+    } else {
+        password
+    };
     let cfg = CloudConfig {
         username,
         password,
@@ -1065,7 +1073,15 @@ async fn test_github_connection(
     token: String,
     branch: String,
     prefix: String,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    // __KEEP__：已配置用户 PAT 不回显，测试连接复用已存值
+    // （与 save_github_config 同语义）
+    let token = if token == "__KEEP__" {
+        state.github_config().token
+    } else {
+        token
+    };
     let cfg = GitHubConfig {
         repo,
         branch,

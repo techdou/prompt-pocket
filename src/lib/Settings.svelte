@@ -153,14 +153,34 @@
 
   async function doTest() {
     if (provider === "github") return doTestGithub();
-    if (!username.trim() || !password.trim()) {
-      message = { type: "err", text: t("settings.fillCredentials") };
+    if (!username.trim()) {
+      message = { type: "err", text: t("settings.fillUsername") };
       return;
+    }
+    // 与 doSave 同一套凭据规则：编辑模式必须填新密码；非编辑模式（已保存
+    // 不回显）传 __KEEP__ 让后端复用已存值——否则"测试连接"对已配置用户
+    // 永远要求重输密码，密码不回显的设计反而堵死了连通性测试
+    let finalPwd = password.trim();
+    if (editingPassword) {
+      if (!finalPwd) {
+        message = { type: "err", text: t("settings.fillPassword") };
+        return;
+      }
+      if (finalPwd === "__KEEP__") {
+        message = { type: "err", text: t("settings.passwordKeepReserved") };
+        return;
+      }
+    } else {
+      if (!hasPassword) {
+        message = { type: "err", text: t("settings.fillPassword") };
+        return;
+      }
+      finalPwd = "__KEEP__";
     }
     testing = true;
     message = null;
     try {
-      await testCloudConnection(username.trim(), password.trim(), remoteRoot.trim() || "PromptPocket");
+      await testCloudConnection(username.trim(), finalPwd, remoteRoot.trim() || "PromptPocket");
       message = { type: "ok", text: t("settings.testOk") };
     } catch (e) {
       message = {
@@ -177,14 +197,28 @@
       message = { type: "err", text: t("settings.fillGhRepo") };
       return;
     }
-    if (!ghToken.trim()) {
-      message = { type: "err", text: t("settings.fillGhToken") };
-      return;
+    // 同 doTest：非编辑模式复用已存 token（__KEEP__），编辑模式必须填新值
+    let finalTok = ghToken.trim();
+    if (editingToken) {
+      if (!finalTok) {
+        message = { type: "err", text: t("settings.fillGhToken") };
+        return;
+      }
+      if (finalTok === "__KEEP__") {
+        message = { type: "err", text: t("settings.ghTokenKeepReserved") };
+        return;
+      }
+    } else {
+      if (!hasToken) {
+        message = { type: "err", text: t("settings.fillGhToken") };
+        return;
+      }
+      finalTok = "__KEEP__";
     }
     testing = true;
     message = null;
     try {
-      await testGithubConnection(ghRepo.trim(), ghToken.trim(), ghBranch.trim(), ghPrefix.trim());
+      await testGithubConnection(ghRepo.trim(), finalTok, ghBranch.trim(), ghPrefix.trim());
       message = { type: "ok", text: t("settings.ghTestOk") };
     } catch (e) {
       message = {
