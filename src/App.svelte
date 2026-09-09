@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { fly } from "svelte/transition";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { ask } from "@tauri-apps/plugin-dialog";
@@ -159,6 +159,13 @@
       showError(String(e));
     } finally {
       loading = false;
+      // 首启窗口在 webview 就绪前就 emit 过 window-shown（监听未注册必丢），
+      // loading 翻 false、DOM 渲染出搜索框后直接聚焦，兑现首启直接打字
+      void tick().then(() => {
+        if (editorMode === "view") {
+          document.querySelector<HTMLInputElement>("#search-input")?.focus();
+        }
+      });
     }
   }
 
@@ -218,6 +225,9 @@
   // 高亮第一条（Raycast/Alfred 惯例：结果列表永远有默认选中项，搜完 Enter 永远有效）。
   // 只由过滤条件驱动——列表数据刷新（保存/同步/拖拽）走 reconcileSelection，
   // 不会劫持用户正在查看或编辑的选中项。首跑只记录基准不动作（首启由 refresh 负责）。
+  // 编辑态跳过：切分类/搜索时 CategoryTabs 与搜索框没有脏确认入口，
+  // 此处移动选中会让 loadPromptContent 无确认覆盖编辑中的内容（旧版注释
+  // 警告过的 effect 反写劫持）；编辑态维持选中不动，退出编辑后自然恢复。
   let lastFilterKey: string | null = null;
   $effect(() => {
     const key = `${selectedCategory}\u0000${query}`;
@@ -226,6 +236,7 @@
       return;
     }
     lastFilterKey = key;
+    if (editorMode === "edit") return;
     if (visiblePrompts.length === 0 || selectedIndex >= 0) return;
     selectedPath = visiblePrompts[0].path;
   });
@@ -316,6 +327,12 @@
             catContextMenu.open ||
             settingsOpen;
           if (overlayOpen) return;
+          // 编辑态唤出：焦点回正文 textarea（唤出前多半就在编辑，
+          // 抢到搜索框会把打字引进搜索框，连带触发过滤劫持编辑内容）
+          if (editorMode === "edit") {
+            document.querySelector<HTMLTextAreaElement>("#f-body")?.focus();
+            return;
+          }
           const input = document.querySelector<HTMLInputElement>("#search-input");
           if (!input) return;
           input.focus();
@@ -867,11 +884,12 @@
       void navigateSelection(-1);
     } else if (e.key === "Enter") {
       e.preventDefault();
-      // 选中项不在当前过滤结果（或无选中）时兜底取第一条：搜完直接按 Enter 永远有效
-      const cur =
-        selectedIndex >= 0 ? visiblePrompts[selectedIndex] : visiblePrompts[0];
-      if (cur) {
-        const stored = cur.meta.copy_mode === "plain" ? "plain" : "markdown";
+      // 复制目标恒为 selectedPrompt，copy_mode 同样取自它——内容与模式永远
+      // 同源。无选中且列表非空的态已被 reconcileSelection/过滤调和双保险
+      // 消除（编辑态选中被过滤出列表时复制正在编辑的那条，语义一致）
+      if (selectedPrompt) {
+        const stored =
+          selectedPrompt.meta.copy_mode === "plain" ? "plain" : "markdown";
         // Shift+Enter = 临时用另一复制模式（markdown↔plain），不改存储的 copy_mode
         const mode = e.shiftKey
           ? stored === "markdown"

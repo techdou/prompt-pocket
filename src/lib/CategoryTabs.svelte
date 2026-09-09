@@ -210,12 +210,14 @@
 <div class="tabs-row" data-tauri-drag-region>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <!-- drag-region 只作用于带属性的元素本身：tabs-row/tabs-scroll 的空白区
-       可拖动整窗，tab 按钮与手柄不受影响 -->
+  <!-- drag-region 只作用于带属性的元素本身（tauri 注入脚本按命中元素精确
+       匹配）：tabs-row 与 tabs-scroll 的空白区可拖动整窗；tab 按钮和手柄
+       是交互元素，注入脚本自行豁免，点击/拖拽不受影响 -->
   <div
     class="tabs-scroll"
     class:faded-left={fadedLeft}
     class:faded-right={fadedRight}
+    data-tauri-drag-region
     bind:this={scrollEl}
     ondragstart={onNativeDragStart}
     onscroll={updateScrollFade}

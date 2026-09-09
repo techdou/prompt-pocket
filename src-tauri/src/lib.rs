@@ -1583,8 +1583,8 @@ pub fn run() {
                 if first_run {
                     first_run_window_was_shown = win.show().is_ok();
                     let _ = win.set_focus();
-                    // 首启同样聚焦搜索框：新用户第一眼就能直接打字搜索
-                    let _ = app.emit("window-shown", ());
+                    // 首启聚焦由前端 bootstrap 完成后自行处理：此刻 webview 的
+                    // JS 尚未执行、事件监听未注册，emit window-shown 必丢
                     // 首次启动豁免一次失焦隐藏：避免新用户鼠标一点别的窗口主界面就消失
                     if first_run_window_was_shown {
                         FIRST_RUN_SUPPRESS_BLUR_HIDE.store(true, Ordering::SeqCst);
