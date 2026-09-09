@@ -968,12 +968,15 @@
         />
         <button class="new-btn" onclick={doCreate} title={t("app.newPrompt")}>+</button>
         {#if syncStatus?.configured}
-          <span
+          <button
+            type="button"
             class="sync-indicator"
             class:syncing={syncStatus.syncing}
             class:error={!!syncStatus.lastError}
             title={syncStatus.lastError || syncStatus.lastSync || t("app.syncConnected")}
-          ></span>
+            aria-label={t("app.syncStatusAria")}
+            onclick={() => (settingsOpen = true)}
+          ><span class="sync-dot" aria-hidden="true"></span></button>
         {/if}
         <button
           class="new-btn lang-btn"
@@ -1292,21 +1295,39 @@
   }
 
   .sync-indicator {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .sync-indicator .sync-dot {
     width: 9px;
     height: 9px;
     border-radius: 50%;
     background: var(--success);
-    flex-shrink: 0;
-    cursor: help;
     box-shadow: 0 0 0 3px var(--success-soft);
+    pointer-events: none;
+    transition: transform 0.12s;
   }
-  .sync-indicator.syncing {
+  .sync-indicator:hover .sync-dot {
+    transform: scale(1.2);
+  }
+  .sync-indicator.syncing .sync-dot {
     background: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-soft);
     animation: sync-pulse 1s infinite;
   }
-  .sync-indicator.error {
+  .sync-indicator.error .sync-dot {
     background: var(--danger);
+    /* 出错态脉冲提醒：静默小红点几乎不可能被注意到 */
+    animation: sync-pulse 1s infinite;
   }
   @keyframes sync-pulse {
     50% {

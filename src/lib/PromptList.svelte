@@ -248,7 +248,17 @@
       </button>
     </li>
   {:else}
-    <li class="empty">{t("prompt.empty")}</li>
+    <!-- 空态分化：搜不到（换词/清空引导） vs 真的没有（新建引导），
+         用户不用猜「是没这个词还是没这功能」 -->
+    <li class="empty">
+      {#if query.trim()}
+        <p>{t("prompt.emptySearch", { query: query.trim() })}</p>
+        <p class="empty-hint">{t("prompt.emptySearchHint")}</p>
+      {:else}
+        <p>{t("prompt.empty")}</p>
+        <p class="empty-hint">{t("prompt.emptyHint")}</p>
+      {/if}
+    </li>
   {/each}
 </ul>
 
@@ -412,5 +422,13 @@
     text-align: center;
     color: var(--muted);
     font-size: 13px;
+  }
+  .empty p {
+    margin: 0;
+  }
+  .empty .empty-hint {
+    margin-top: 6px;
+    font-size: 12px;
+    opacity: 0.8;
   }
 </style>
