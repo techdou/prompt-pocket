@@ -673,7 +673,7 @@
     background: var(--accent-soft);
   }
   .status-box.error {
-    background: rgba(217, 48, 37, 0.08);
+    background: var(--danger-soft);
   }
   .dot {
     width: 8px;
@@ -682,7 +682,7 @@
     flex-shrink: 0;
   }
   .ok-dot {
-    background: #22a06b;
+    background: var(--success);
   }
   .syncing-dot {
     background: var(--accent);
@@ -846,13 +846,13 @@
     justify-content: space-between;
     gap: 8px;
     padding: 8px 12px;
-    background: rgba(34, 160, 107, 0.1);
-    border: 1px solid rgba(34, 160, 107, 0.3);
+    background: var(--success-soft);
+    border: 1px solid var(--success-border);
     border-radius: 8px;
   }
   .pwd-saved-text {
     font-size: 13px;
-    color: #1a7a52;
+    color: var(--success-strong);
   }
   .pwd-edit-btn {
     background: transparent;
@@ -889,9 +889,9 @@
     border-color: var(--accent);
   }
   .sync-btn.download:hover:not(:disabled) {
-    background: #22a06b;
+    background: var(--success);
     color: #fff;
-    border-color: #22a06b;
+    border-color: var(--success);
   }
   .sync-btn:disabled {
     opacity: 0.5;
@@ -904,11 +904,11 @@
     font-size: 12.5px;
   }
   .msg.ok {
-    background: rgba(34, 160, 107, 0.1);
-    color: #1a7a52;
+    background: var(--success-soft);
+    color: var(--success-strong);
   }
   .msg.err {
-    background: rgba(217, 48, 37, 0.1);
+    background: var(--danger-soft);
     color: var(--danger);
   }
 

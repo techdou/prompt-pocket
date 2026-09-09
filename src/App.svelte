@@ -1295,10 +1295,10 @@
     width: 9px;
     height: 9px;
     border-radius: 50%;
-    background: #22a06b;
+    background: var(--success);
     flex-shrink: 0;
     cursor: help;
-    box-shadow: 0 0 0 3px rgba(34, 160, 107, 0.12);
+    box-shadow: 0 0 0 3px var(--success-soft);
   }
   .sync-indicator.syncing {
     background: var(--accent);

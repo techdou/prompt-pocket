@@ -291,7 +291,7 @@
   }
   .item.active {
     background: var(--bg-active);
-    border-color: #c9dafc;
+    border-color: var(--accent-border);
     box-shadow: 0 1px 2px rgba(37, 99, 235, 0.08);
   }
   .item.active .more-btn {

@@ -361,7 +361,7 @@
     min-height: 56px;
     padding: 10px 28px;
     border-top: 1px solid var(--border);
-    background: #f8fbff;
+    background: var(--bg-subtle);
   }
   .copy-action {
     display: inline-flex;
@@ -534,7 +534,7 @@
     padding: 10px 12px;
     font-family: var(--font-mono);
     font-size: 13px;
-    line-height: 1.6;
+    line-height: 1.7;
     resize: none;
     outline: none;
     min-height: 160px;
@@ -586,7 +586,7 @@
     font-size: 12.5px;
   }
   .prose :global(pre) {
-    background: #f8fbff;
+    background: var(--bg-subtle);
     border: 1px solid var(--border);
     padding: 12px;
     border-radius: 8px;

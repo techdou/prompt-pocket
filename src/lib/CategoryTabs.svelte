@@ -326,7 +326,7 @@
   .tab.active {
     color: var(--accent);
     background: var(--accent-soft);
-    border-color: #c9dafc;
+    border-color: var(--accent-border);
     font-weight: 600;
   }
   .tab:hover .drag-handle,
@@ -406,7 +406,7 @@
   }
   .add-btn:hover {
     background: var(--accent-soft);
-    border-color: #c9dafc;
+    border-color: var(--accent-border);
     color: var(--accent-hover);
   }
 
@@ -443,6 +443,6 @@
   }
   .mini:hover {
     background: var(--accent-soft);
-    border-color: #c9dafc;
+    border-color: var(--accent-border);
   }
 </style>

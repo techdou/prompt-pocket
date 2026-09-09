@@ -4,22 +4,32 @@
   --bg-elevated: #ffffff;
   --bg-hover: #eef4ff;
   --bg-active: #e5efff;
+  --bg-subtle: #f8fbff;
   --fg: #1f2a44;
-  --muted: #748094;
+  --muted: #5d6b82;
   --border: #dde6f2;
   --border-strong: #b9c8dd;
   --accent: #2563eb;
   --accent-hover: #1d4ed8;
   --accent-soft: #eaf2ff;
+  --accent-border: #c9dafc;
   --danger: #dc2626;
   --danger-muted: #c05252;
+  --danger-soft: rgba(220, 38, 38, 0.08);
+  --success: #22a06b;
+  --success-strong: #1a7a52;
+  --success-soft: rgba(34, 160, 107, 0.1);
+  --success-border: rgba(34, 160, 107, 0.3);
   --shadow-soft: 0 10px 32px rgba(31, 42, 68, 0.08);
   --font-en: "Segoe UI Variable Text", "Aptos", "Avenir Next", "Segoe UI";
-  --font-zh: "Noto Serif SC", "Noto Sans SC", "Microsoft YaHei UI",
-    "PingFang SC";
+  /* UI 黑体打底：Windows 默认不装 Noto 字体，衬线首选会让绝大多数用户
+     静默回退到与开发预期完全不同的观感；黑体在各平台都有可靠回退 */
+  --font-zh: "Microsoft YaHei UI", "PingFang SC", "Noto Sans SC";
   --font-ui: var(--font-en), var(--font-zh), sans-serif;
+  /* mono 栈末尾挂中文回退：等宽字体无中文字形，中文若落到 WebView 默认
+     字体则不受控（textarea 正文、代码块里的中文注释都吃这条回退） */
   --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas,
-    monospace;
+    var(--font-zh), monospace;
 }
 
 * {
