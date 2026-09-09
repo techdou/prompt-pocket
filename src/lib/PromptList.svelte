@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import type { Prompt } from "./types";
   import { bodyMatchSnippet } from "./search";
-  import { createTranslator, type Translator } from "./i18n";
+  import { createTranslator, formatRelativeTime, type Language, type Translator } from "./i18n";
 
   const fallbackT = createTranslator("zh");
 
@@ -19,6 +19,9 @@
     draggable = true,
     disabledReason = "",
     query = "",
+    /** 副行内容：分类名（全部视图/搜索时）或相对更新时间（单分类视图） */
+    subMode = "category",
+    language = "zh",
     t = fallbackT,
   }: {
     prompts: Prompt[];
@@ -37,6 +40,8 @@
     disabledReason?: string;
     /** 当前搜索词：正文命中时列表项展示命中摘录 */
     query?: string;
+    subMode?: "category" | "time";
+    language?: Language;
     t?: Translator;
   } = $props();
 
@@ -187,6 +192,8 @@
 >
   {#each prompts as p, i (p.path)}
     {@const snippet = bodyMatchSnippet(p, query)}
+    {@const relTime =
+      subMode === "time" ? formatRelativeTime(p.meta.updated, language) : ""}
     <li
       bind:this={itemEls[i]}
       data-idx={i}
@@ -228,7 +235,11 @@
           <span class="title">{p.title}</span>
         </div>
         <div class="sub">
-          <span class="cat">{categoryLabel(p.category)}</span>
+          {#if relTime}
+            <span class="cat">{relTime}</span>
+          {:else}
+            <span class="cat">{categoryLabel(p.category)}</span>
+          {/if}
           {#if snippet}
             <span class="snippet" title={snippet}>{snippet}</span>
           {/if}
@@ -297,7 +308,7 @@
     opacity: 1;
   }
   .item:hover .drag-handle {
-    opacity: 0.4;
+    opacity: 0.7;
   }
   .item.active {
     background: var(--bg-active);
@@ -308,7 +319,7 @@
     opacity: 0.7;
   }
   .item.active .drag-handle {
-    opacity: 0.4;
+    opacity: 0.7;
   }
   .item.disabled .drag-handle {
     opacity: 0;
@@ -351,8 +362,11 @@
     gap: 5px;
   }
   .drag-handle {
-    width: 12px;
-    height: 16px;
+    /* 视觉仍是窄符号，热区用宽度+负 margin 撑到 20px（对齐可点击区域
+       可用性下限），拖拽起手不再容易失焦 */
+    width: 20px;
+    height: 18px;
+    margin-left: -8px;
     display: inline-flex;
     align-items: center;
     justify-content: center;

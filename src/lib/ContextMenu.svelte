@@ -110,7 +110,11 @@
     </button>
 
     <button class="item" onclick={() => (showMoveMenu = !showMoveMenu)}>
-      <span class="ico">📁</span> {t("context.moveToCategory")}
+      <span class="ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+      </span> {t("context.moveToCategory")}
       <span class="arrow">{showMoveMenu ? "▾" : "▸"}</span>
     </button>
 
@@ -132,7 +136,12 @@
     <div class="sep"></div>
 
     <button class="item danger" onclick={() => handle(ondelete)}>
-      <span class="ico">🗑</span> {t("context.delete")}
+      <span class="ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6" />
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        </svg>
+      </span> {t("context.delete")}
     </button>
   </div>
 {/if}
@@ -182,8 +191,14 @@
   }
   .ico {
     width: 16px;
-    text-align: center;
+    display: inline-flex;
+    justify-content: center;
     opacity: 0.8;
+  }
+  .ico svg {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
   }
   .arrow {
     margin-left: auto;

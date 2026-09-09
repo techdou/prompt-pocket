@@ -7,6 +7,7 @@
   import type { CategoryCount } from "./types";
   import { createTranslator, type Translator } from "./i18n";
   import { autofocus } from "./actions";
+  import { onMount } from "svelte";
 
   const fallbackT = createTranslator("zh");
 
@@ -178,12 +179,47 @@
   function showDropLineAfter(tabIdx: number): boolean {
     return isDragging && dropLineIndex === tabIdx && !dropLineBefore && tabIdx !== dragFromIndex;
   }
+
+  // 横向溢出渐隐：分类多到滚出视口时在溢出侧加 24px 渐隐，提示还有更多 tab；
+  // 分类少时不显示（scroll 事件 + ResizeObserver 覆盖增删分类和窗口缩放）
+  let fadedLeft = $state(false);
+  let fadedRight = $state(false);
+
+  function updateScrollFade() {
+    if (!scrollEl) return;
+    fadedLeft = scrollEl.scrollLeft > 4;
+    fadedRight = scrollEl.scrollLeft + scrollEl.clientWidth < scrollEl.scrollWidth - 4;
+  }
+
+  $effect(() => {
+    // 分类数量/窗口尺寸变化后重算（读一下依赖即可，DOM 测量在微任务里做）
+    void categories;
+    void total;
+    const el = scrollEl;
+    if (!el) return;
+    const raf = requestAnimationFrame(updateScrollFade);
+    const ro = new ResizeObserver(() => updateScrollFade());
+    ro.observe(el);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  });
 </script>
 
-<div class="tabs-row">
+<div class="tabs-row" data-tauri-drag-region>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="tabs-scroll" bind:this={scrollEl} ondragstart={onNativeDragStart}>
+  <!-- drag-region 只作用于带属性的元素本身：tabs-row/tabs-scroll 的空白区
+       可拖动整窗，tab 按钮与手柄不受影响 -->
+  <div
+    class="tabs-scroll"
+    class:faded-left={fadedLeft}
+    class:faded-right={fadedRight}
+    bind:this={scrollEl}
+    ondragstart={onNativeDragStart}
+    onscroll={updateScrollFade}
+  >
     <!-- "全部"：固定首位，不可拖，但可作为落点（拖到它右侧 = 排第一） -->
     <button
       type="button"
@@ -296,6 +332,31 @@
   .tabs-scroll::-webkit-scrollbar {
     display: none;
   }
+  /* 溢出侧 24px 渐隐：内容滚出视口的提示，分类少时不显示 */
+  .tabs-scroll.faded-right {
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+  }
+  .tabs-scroll.faded-left {
+    -webkit-mask-image: linear-gradient(to left, black calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to left, black calc(100% - 24px), transparent);
+  }
+  .tabs-scroll.faded-left.faded-right {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 24px,
+      black calc(100% - 24px),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 24px,
+      black calc(100% - 24px),
+      transparent 100%
+    );
+  }
 
   .tab {
     display: inline-flex;
@@ -331,7 +392,7 @@
   }
   .tab:hover .drag-handle,
   .tab.active .drag-handle {
-    opacity: 0.55;
+    opacity: 0.8;
   }
   /* 拖动中的源项半透明 */
   .tab.dragging {
@@ -362,8 +423,11 @@
     text-overflow: ellipsis;
   }
   .drag-handle {
-    width: 12px;
-    height: 16px;
+    /* 热区 20px（负 margin 抵消布局位移，视觉宽度不变），命中宽度对齐
+       可用性下限，拖拽起手不易失焦 */
+    width: 20px;
+    height: 18px;
+    margin: 0 -4px;
     display: inline-flex;
     align-items: center;
     justify-content: center;

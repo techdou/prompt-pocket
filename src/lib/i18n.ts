@@ -321,6 +321,31 @@ export function nextLanguage(language: Language): Language {
   return language === "zh" ? "en" : "zh";
 }
 
+/** 相对时间（列表副行用）：分钟/小时/天/月/年两语言就近取档 */
+export function formatRelativeTime(iso: string, language: Language): string {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "";
+  const minutes = Math.floor((Date.now() - then) / 60000);
+  if (minutes < 1) return language === "zh" ? "刚刚" : "just now";
+  if (minutes < 60) {
+    return language === "zh" ? `${minutes} 分钟前` : `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return language === "zh" ? `${hours} 小时前` : `${hours}h ago`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 30) {
+    return language === "zh" ? `${days} 天前` : `${days}d ago`;
+  }
+  const months = Math.floor(days / 30);
+  if (months < 12) {
+    return language === "zh" ? `${months} 个月前` : `${months}mo ago`;
+  }
+  const years = Math.floor(days / 365);
+  return language === "zh" ? `${years} 年前` : `${years}y ago`;
+}
+
 export function translate(
   language: Language,
   key: TranslationKey,

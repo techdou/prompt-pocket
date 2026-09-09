@@ -1020,6 +1020,8 @@
         {query}
         draggable={canReorderPrompts}
         disabledReason={reorderDisabledLabel}
+        subMode={query.trim() || selectedCategory === "__all__" ? "category" : "time"}
+        {language}
         onmounted={(fn) => (scrollToIndexFn = fn)}
         onselect={async (path) => {
           if (path === selectedPath) return;

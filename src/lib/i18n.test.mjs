@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   LANGUAGE_STORAGE_KEY,
   createTranslator,
+  formatRelativeTime,
   getStoredLanguage,
   isLanguage,
   nextLanguage,
@@ -78,5 +79,31 @@ describe("i18n language helpers", () => {
       translate("en", "app.deleteConfirm"),
       'Delete "{title}"? The file will be moved to the .trash backup folder.',
     );
+  });
+});
+
+describe("formatRelativeTime", () => {
+  const now = Date.now();
+  const iso = (msAgo) => new Date(now - msAgo).toISOString();
+
+  it("buckets elapsed time into both languages", () => {
+    assert.equal(formatRelativeTime(iso(30 * 1000), "zh"), "刚刚");
+    assert.equal(formatRelativeTime(iso(30 * 1000), "en"), "just now");
+    assert.equal(formatRelativeTime(iso(5 * 60 * 1000), "zh"), "5 分钟前");
+    assert.equal(formatRelativeTime(iso(5 * 60 * 1000), "en"), "5m ago");
+    assert.equal(formatRelativeTime(iso(3 * 3600 * 1000), "zh"), "3 小时前");
+    assert.equal(formatRelativeTime(iso(3 * 3600 * 1000), "en"), "3h ago");
+    assert.equal(formatRelativeTime(iso(2 * 86400 * 1000), "zh"), "2 天前");
+    assert.equal(formatRelativeTime(iso(2 * 86400 * 1000), "en"), "2d ago");
+    assert.equal(formatRelativeTime(iso(45 * 86400 * 1000), "zh"), "1 个月前");
+    assert.equal(formatRelativeTime(iso(45 * 86400 * 1000), "en"), "1mo ago");
+    assert.equal(formatRelativeTime(iso(400 * 86400 * 1000), "zh"), "1 年前");
+    assert.equal(formatRelativeTime(iso(400 * 86400 * 1000), "en"), "1y ago");
+  });
+
+  it("returns empty string for unparseable dates", () => {
+    // 非法/缺失时间（meta.updated 为空）→ 空串，副行留白而不是渲染 NaN
+    assert.equal(formatRelativeTime("", "zh"), "");
+    assert.equal(formatRelativeTime("not-a-date", "en"), "");
   });
 });
