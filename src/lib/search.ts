@@ -6,8 +6,8 @@ import type { Prompt } from "./types";
  *
  * 规则：
  * - 空查询：返回全部（按后端排好的顺序）
- * - 多关键词（空格分隔）：每段都需命中（标题/分类/标签/正文 任一）
- * - 匹配范围分两档：元信息（标题/分类/标签）> 正文
+ * - 多关键词（空格分隔）：每段都需命中（标题/分类/正文 任一）
+ * - 匹配范围分两档：元信息（标题/分类）> 正文
  * - 计分：元信息子串命中（1000 档）> 正文子串命中（500 档）> 元信息字符级模糊（个位数）
  * - 正文不做字符级模糊：长文本里任何字符序列都能"跳跃"凑出来，命中全是噪音
  */
@@ -17,7 +17,7 @@ const norm = (s: string): string => s.toLowerCase().replace(/\s+/g, " ");
 
 interface Row {
   p: Prompt;
-  /** 归一化后的元信息搜索串：标题 + 分类 + 标签 */
+  /** 归一化后的元信息搜索串：标题 + 分类 */
   meta: string;
   /** 归一化后的正文搜索串 */
   body: string;
@@ -97,7 +97,7 @@ export function bodyMatchSnippet(prompt: Prompt, query: string): string | null {
   const flatLower = flat.toLowerCase();
 
   for (const t of terms) {
-    if (meta.includes(t)) continue; // 标题/分类/标签能解释这条结果，无需摘录
+    if (meta.includes(t)) continue; // 标题/分类能解释这条结果，无需摘录
     const idx = flatLower.indexOf(t);
     if (idx < 0) continue;
 

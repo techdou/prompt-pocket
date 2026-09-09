@@ -1,10 +1,12 @@
 // ── 前后端数据形状契约 ──
 // Rust 端结构体全部 serde(rename_all = "camelCase")，invoke 返回的运行时
-// 形状是 camelCase（copyMode / absPath / lastSync）；本文件的前端类型约定
-// snake_case（copy_mode / abs_path），翻译只发生在 api.ts 的 normalize* 层。
-// 因此：新增 command 的返回必须经过 normalize 再进组件，不得绕过 normalize
-// 直接消费 invoke 结果——类型标注说有 copy_mode、运行时却是 undefined，
-// 编译期查不出来。
+// 形状是 camelCase。本文件分两类：
+// - Prompt 族（Prompt/PromptMeta/PromptContent/ScanResult/CategoryCount）：
+//   前端类型约定 snake_case（copy_mode/abs_path），翻译只发生在 api.ts 的
+//   normalize* 层——新增 command 的返回必须过 normalize 再进组件，绕过
+//   normalize 直接消费 invoke 结果会拿到 camelCase，类型说有 copy_mode、
+//   运行时却是 undefined，编译期查不出来。
+// - SyncStatus / CloudConfigView：camelCase 直映 wire，不经 normalize。
 export type CopyMode = "markdown" | "plain";
 
 export interface PromptMeta {

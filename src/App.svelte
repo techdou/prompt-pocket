@@ -669,7 +669,7 @@
       await reorderPrompts(categoryName, newPathOrder);
     } catch (e) {
       showError(String(e));
-      await refresh();
+      await refresh().catch((e2) => showError(String(e2)));
     } finally {
       reorderInFlight = false;
       if (pendingRefresh) {
@@ -695,7 +695,7 @@
       await reorderCategories(next.map((c) => c.name));
     } catch (e) {
       showError(String(e));
-      await refresh();
+      await refresh().catch((e2) => showError(String(e2)));
     } finally {
       reorderInFlight = false;
       if (pendingRefresh) {
