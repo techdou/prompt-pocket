@@ -845,18 +845,26 @@
             </article>
             <article class="feature">
               <span class="feature-kicker">05 / Sync</span>
-              <h3><span class="zh">坚果云 WebDAV 手动同步</span><span class="en">Manual Jianguoyun WebDAV sync</span></h3>
+              <h3><span class="zh">WebDAV / GitHub 手动同步</span><span class="en">Manual WebDAV / GitHub sync</span></h3>
               <p>
-                <span class="zh">上传和下载由用户主动触发，减少自动同步误覆盖。</span>
-                <span class="en">Upload and download are explicit actions, reducing accidental overwrite from automatic sync.</span>
+                <span class="zh">坚果云 WebDAV 或 GitHub 仓库存档二选一，上传和下载由用户主动触发，减少误覆盖。</span>
+                <span class="en">Jianguoyun WebDAV or a GitHub repository archive. Upload and download are explicit actions, reducing accidental overwrite.</span>
+              </p>
+            </article>
+            <article class="feature">
+              <span class="feature-kicker">06 / Variables</span>
+              <h3><span class="zh">变量填空</span><span class="en">Variable fill-in</span></h3>
+              <p>
+                <span class="zh">正文含 `{{占位符}}` 时，复制前弹窗填值替换；留空的变量保留原文。</span>
+                <span class="en">Prompts with `{{placeholders}}` open a fill-in dialog before copying; empty fields keep the original text.</span>
               </p>
             </article>
             <article class="feature feature-wide">
-              <span class="feature-kicker">06 / Secure</span>
+              <span class="feature-kicker">07 / Secure</span>
               <h3><span class="zh">系统凭据库存密码</span><span class="en">Passwords in system credential store</span></h3>
               <p>
-                <span class="zh">WebDAV 应用密码不写入明文 JSON；旧版本明文配置会在读取时迁移出去。</span>
-                <span class="en">WebDAV app passwords are not written to plaintext JSON. Legacy plaintext configs are migrated on read.</span>
+                <span class="zh">WebDAV 应用密码与 GitHub PAT 不写入明文 JSON；旧版本明文配置会在读取时迁移出去。</span>
+                <span class="en">WebDAV app passwords and GitHub PATs are never written to plaintext JSON. Legacy plaintext configs are migrated on read.</span>
               </p>
             </article>
           </div>
@@ -915,8 +923,8 @@
               </h2>
             </div>
             <p class="section-note">
-              <span class="zh">最新版 v2.0.3 三平台 CI 全绿，安装包均由 GitHub Actions 构建。</span>
-              <span class="en">Latest v2.0.3 passes CI on all three platforms; installers are built by GitHub Actions.</span>
+              <span class="zh">最新版 v2.2.0 三平台 CI 全绿，安装包均由 GitHub Actions 构建。</span>
+              <span class="en">Latest v2.2.0 passes CI on all three platforms; installers are built by GitHub Actions.</span>
             </p>
           </div>
 

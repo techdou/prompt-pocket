@@ -44,6 +44,7 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 | 全文搜索 | `Ctrl+F` 同时匹配标题与正文；正文命中时列表显示上下文摘录 |
 | 智能复制 / 粘贴 | `Enter` 写入剪贴板；唤出前焦点在输入框时自动粘贴（仅 Windows） |
 | 双复制模式 | `markdown` 复制原文；`plain` 自动剥离 Markdown 标记后复制；`Shift+Enter` 临时用另一模式复制 |
+| 变量填空 | 正文含 `{{占位符}}` 时复制前弹窗填值替换，留空保留原文 |
 | Markdown 存储 | 一条提示词一个 `.md` 文件，文件夹就是分类，文件名跟随标题 |
 | 富 Markdown 预览 | GFM 表格、任务列表、代码块；Mermaid、KaTeX、highlight.js 全部本地内置、按需加载，无 CDN 依赖 |
 | 提示词排序 | 单个分类内拖动列表项手柄，顺序写入 `.order.json` |
@@ -55,13 +56,13 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 
 ### 下载安装
 
-从 [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest) 下载最新版 `v2.1.2`，安装包由 GitHub Actions 三平台构建：
+从 [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest) 下载最新版 `v2.2.0`，安装包由 GitHub Actions 三平台构建：
 
 | 平台 | 文件 |
 | --- | --- |
-| macOS Apple Silicon | `Prompt.Pocket_2.1.2_aarch64.dmg` |
-| Windows x64 | `Prompt.Pocket_2.1.2_x64-setup.exe`（NSIS 安装器）或 `Prompt.Pocket_2.1.2_x64_en-US.msi` |
-| Linux x64 | `Prompt.Pocket_2.1.2_amd64.deb`、`Prompt.Pocket-2.1.2-1.x86_64.rpm` 或 `Prompt.Pocket_2.1.2_amd64.AppImage`（免安装） |
+| macOS Apple Silicon | `Prompt.Pocket_2.2.0_aarch64.dmg` |
+| Windows x64 | `Prompt.Pocket_2.2.0_x64-setup.exe`（NSIS 安装器）或 `Prompt.Pocket_2.2.0_x64_en-US.msi` |
+| Linux x64 | `Prompt.Pocket_2.2.0_amd64.deb`、`Prompt.Pocket-2.2.0-1.x86_64.rpm` 或 `Prompt.Pocket_2.2.0_amd64.AppImage`（免安装） |
 
 安装包未做代码签名：Windows 首次运行可能弹 SmartScreen 警告（选「仍要运行」）；macOS 首次打开需右键 →「打开」绕过 Gatekeeper。
 
@@ -229,6 +230,7 @@ Prompt Pocket is a lightweight desktop prompt manager: summon it from any app wi
 | Full-text search | `Ctrl+F` matches titles and prompt bodies; body hits show a context excerpt |
 | Smart copy / paste | `Enter` copies to clipboard; auto-pastes back when launched from a text input (Windows only) |
 | Dual copy modes | `markdown` copies the source; `plain` strips Markdown syntax before copying; `Shift+Enter` copies with the other mode temporarily |
+| Variable fill-in | Prompts with `{{placeholders}}` open a fill-in dialog before copying; empty fields keep the original text |
 | Markdown storage | One prompt per `.md` file; folders are categories; filenames follow titles |
 | Rich preview | GFM tables, task lists, code blocks; Mermaid / KaTeX / highlight.js bundled locally, lazy-loaded, no CDN |
 | Prompt ordering | Drag handles within one category; saved to `.order.json` |
@@ -240,13 +242,13 @@ Prompt Pocket is a lightweight desktop prompt manager: summon it from any app wi
 
 ### Download
 
-Grab the latest `v2.1.2` from [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest):
+Grab the latest `v2.2.0` from [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest):
 
 | Platform | File |
 | --- | --- |
-| macOS Apple Silicon | `Prompt.Pocket_2.1.2_aarch64.dmg` |
-| Windows x64 | `Prompt.Pocket_2.1.2_x64-setup.exe` (NSIS installer) or `Prompt.Pocket_2.1.2_x64_en-US.msi` |
-| Linux x64 | `Prompt.Pocket_2.1.2_amd64.deb`, `Prompt.Pocket-2.1.2-1.x86_64.rpm`, or `Prompt.Pocket_2.1.2_amd64.AppImage` (portable) |
+| macOS Apple Silicon | `Prompt.Pocket_2.2.0_aarch64.dmg` |
+| Windows x64 | `Prompt.Pocket_2.2.0_x64-setup.exe` (NSIS installer) or `Prompt.Pocket_2.2.0_x64_en-US.msi` |
+| Linux x64 | `Prompt.Pocket_2.2.0_amd64.deb`, `Prompt.Pocket-2.2.0-1.x86_64.rpm`, or `Prompt.Pocket_2.2.0_amd64.AppImage` (portable) |
 
 Installers are unsigned: Windows may show a SmartScreen warning (choose "Run anyway"); on macOS, right-click → Open to bypass Gatekeeper on first launch.
 
