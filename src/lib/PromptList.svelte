@@ -143,12 +143,14 @@
   function finishPointerDrag(commit: boolean) {
     const from = dragFromIndex;
     const to = dropToIndex;
-    resetDrag();
 
-    if (!commit || from < 0 || to < 0) return;
-    // 落在原位（自身上方或自身正下方）→ 无变化
-    if (to === from || to === from + 1) return;
-    onreorder(from, to);
+    // 先提交重排再结束手势：onreorder 的同步段会置起 reorderInFlight，
+    // resetDrag 触发的 ondragend 补刷看到标志位在飞就会挂起，由 doReorder
+    // 的 finally 补刷——顺序反了，手势期间攒下的补刷会抢在写盘前发出，
+    // 把刚拖的顺序冲掉
+    const noChange = !commit || from < 0 || to < 0 || to === from || to === from + 1;
+    if (!noChange) onreorder(from, to);
+    resetDrag();
   }
 
   function resetDrag() {

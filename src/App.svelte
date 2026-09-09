@@ -671,7 +671,9 @@
       reorderInFlight = false;
       if (pendingRefresh) {
         pendingRefresh = false;
-        await refresh();
+        // 补刷失败要走 showError，裸 await 的 rejection 会从 onreorder
+        // 回调逃逸成 unhandled rejection（其余 refresh 调用点都带 catch）
+        await refresh().catch((e) => showError(String(e)));
       }
     }
   }
@@ -695,7 +697,9 @@
       reorderInFlight = false;
       if (pendingRefresh) {
         pendingRefresh = false;
-        await refresh();
+        // 补刷失败要走 showError，裸 await 的 rejection 会从 onreorder
+        // 回调逃逸成 unhandled rejection（其余 refresh 调用点都带 catch）
+        await refresh().catch((e) => showError(String(e)));
       }
     }
   }

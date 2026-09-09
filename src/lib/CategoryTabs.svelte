@@ -142,12 +142,12 @@
   function finishPointerDrag(commit: boolean) {
     const from = dragFromIndex;
     const to = dropToIndex;
-    resetDrag();
 
-    if (!commit || from < 0 || to < 0) return;
-    // 落在原位（自身左侧或自身右侧）→ 无变化
-    if (to === from || to === from + 1) return;
-    onreorder(from, to);
+    // 先提交重排再结束手势（与 PromptList 同因）：onreorder 同步段置起
+    // reorderInFlight 后，resetDrag 触发的补刷才会正确挂起
+    const noChange = !commit || from < 0 || to < 0 || to === from || to === from + 1;
+    if (!noChange) onreorder(from, to);
+    resetDrag();
   }
 
   function resetDrag() {
