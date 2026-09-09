@@ -23,11 +23,13 @@
   } from "./lib/api";
   import { filterPrompts } from "./lib/search";
   import { markdownToPlain } from "./lib/markdown";
+  import { applyVariables, extractVariables } from "./lib/variables";
   import CategoryTabs from "./lib/CategoryTabs.svelte";
   import PromptList from "./lib/PromptList.svelte";
   import Editor from "./lib/Editor.svelte";
   import Settings from "./lib/Settings.svelte";
   import ContextMenu from "./lib/ContextMenu.svelte";
+  import VariableDialog from "./lib/VariableDialog.svelte";
   import { autofocus } from "./lib/actions";
   import {
     canReorderPromptList,
@@ -358,15 +360,55 @@
         const content = await readPrompt(selectedPrompt.path);
         body = content.body;
       }
-      // plain 模式：剥掉 Markdown 标记再复制，粘贴到纯文本输入框可读
+      // 正文含 {{占位符}}：先弹窗填空再复制（替换发生在 plain 剥离之前，
+      // 用户填的值以原文参与后续转换）
+      const vars = extractVariables(body);
+      if (vars.length > 0) {
+        variableDialog = { open: true, variables: vars, body, mode };
+        return;
+      }
+      await finishCopy(body, mode);
+    } catch (e) {
+      showError(String(e));
+    }
+  }
+
+  // 复制的最终段：plain 模式剥掉 Markdown 标记 → 写剪贴板 → 隐藏窗口 →
+  // 按快捷键来源决定是否注入 Ctrl+V（copyOrPaste 内部处理）
+  async function finishCopy(body: string, mode: "markdown" | "plain") {
+    try {
       if (mode === "plain") body = markdownToPlain(body);
-      // copyOrPaste 内部：写剪贴板 → 隐藏窗口 → 按快捷键来源决定是否注入 Ctrl+V
       await copyOrPaste(body, mode);
       copiedFlash = true;
       setTimeout(() => (copiedFlash = false), 800);
     } catch (e) {
       showError(String(e));
     }
+  }
+
+  // 变量填空弹窗：正文含 {{占位符}} 时复制前先填写
+  let variableDialog = $state<{
+    open: boolean;
+    variables: string[];
+    body: string;
+    mode: "markdown" | "plain";
+  }>({ open: false, variables: [], body: "", mode: "markdown" });
+
+  function closeVarDialog() {
+    variableDialog = { ...variableDialog, open: false };
+  }
+
+  function onVarsConfirm(values: Record<string, string>) {
+    const { body, mode } = variableDialog;
+    closeVarDialog();
+    void finishCopy(applyVariables(body, values), mode);
+  }
+
+  // 逃生门：正文恰好天然含 {{}}（如模板示例）时跳过替换，按原文复制
+  function onVarsCopyRaw() {
+    const { body, mode } = variableDialog;
+    closeVarDialog();
+    void finishCopy(body, mode);
   }
 
   // 问题5修复：保存用结构化字段，Rust 端规范序列化
@@ -681,6 +723,12 @@
         contextMenu.open = false;
         return;
       }
+      // 变量弹窗优先于其他弹窗关闭（backdrop 已拦截聚焦态的 Esc，这里是
+      // 焦点不在弹窗内时的兜底，防止关弹窗的同时隐藏整个窗口）
+      if (variableDialog.open) {
+        closeVarDialog();
+        return;
+      }
       if (catContextMenu.open) {
         catContextMenu.open = false;
         return;
@@ -708,6 +756,9 @@
       void hideWindow();
       return;
     }
+    // 变量填空弹窗打开：挂起其余全局快捷键（Ctrl+N/F、列表导航），
+    // 防止隔空操作背后的列表/编辑器（Esc 已在上方分支处理）
+    if (variableDialog.open) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
       e.preventDefault();
       void doCreate();
@@ -947,6 +998,16 @@
       ondelete={onCtxDelete}
       onclose={() => (contextMenu.prompt = null)}
     />
+
+    {#if variableDialog.open}
+      <VariableDialog
+        variables={variableDialog.variables}
+        {t}
+        onconfirm={onVarsConfirm}
+        oncopyraw={onVarsCopyRaw}
+        oncancel={closeVarDialog}
+      />
+    {/if}
 
     {#if renameDialog.open}
       <div

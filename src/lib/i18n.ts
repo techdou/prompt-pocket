@@ -40,6 +40,11 @@ const zh = {
   "prompt.moreActions": "更多操作",
   "prompt.empty": "没有匹配的提示词",
 
+  "vars.title": "填写变量",
+  "vars.hint": "替换提示词中的占位符后复制；留空的变量保留原样。",
+  "vars.copyRaw": "复制原文",
+  "vars.copy": "复制",
+
   "editor.emptyTitle": "选中一条提示词查看详情",
   "editor.emptyHint": "或按 Ctrl+N 新建",
   "editor.edit": "编辑",
@@ -162,6 +167,11 @@ const en: Record<keyof typeof zh, string> = {
   "prompt.dragSort": "Drag to reorder",
   "prompt.moreActions": "More actions",
   "prompt.empty": "No matching prompts",
+
+  "vars.title": "Fill in variables",
+  "vars.hint": "Placeholders are substituted before copying; empty fields keep the original text.",
+  "vars.copyRaw": "Copy as-is",
+  "vars.copy": "Copy",
 
   "editor.emptyTitle": "Select a prompt to view details",
   "editor.emptyHint": "Or press Ctrl+N to create one",
