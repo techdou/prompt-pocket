@@ -134,7 +134,9 @@
             {t("editor.delete")}
           </button>
         {:else}
-          <button class="primary" onclick={onsave}>{t("editor.save")}</button>
+          <button class="primary" onclick={onsave} title={t("editor.saveTitle")}>
+            {t("editor.save")}<kbd class="save-kbd">Ctrl+S</kbd>
+          </button>
           <button class="ghost" onclick={oncancel}>{t("common.cancel")}</button>
         {/if}
       </div>
@@ -152,9 +154,10 @@
         {@html renderMarkdown(body)}
       </div>
       <footer class="editor-foot">
+        <!-- 按钮跟随当前 copy_mode（与 Enter 行为一致）；Shift+Enter 临时切换另一模式 -->
         <button
           class="copy-action"
-          onclick={() => oncopy("markdown")}
+          onclick={() => oncopy(copyMode === "plain" ? "plain" : "markdown")}
           title={t("editor.copyTitle")}
           aria-label={t("editor.copyAria")}
         >
@@ -162,6 +165,17 @@
           <span class="copy-label">{t("editor.copyLabel")}</span>
           <kbd>Enter</kbd>
         </button>
+        <span
+          class="meta-info mode-info"
+          title={t("editor.copyModeHint", {
+            mode:
+              copyMode === "plain"
+                ? t("editor.modePlain")
+                : t("editor.modeMarkdown"),
+          })}
+        >
+          {copyMode === "plain" ? t("editor.modePlain") : t("editor.modeMarkdown")}
+        </span>
         <span class="meta-info">
           {categoryLabel(prompt.category)}
         </span>
@@ -298,6 +312,23 @@
   .text-btn.danger:hover {
     color: var(--danger);
   }
+  /* 破坏性操作与常规操作视觉分离：前置竖分隔线 + 常驻淡红，
+     降低与相邻「编辑」按钮的误触混淆 */
+  .text-btn.danger {
+    position: relative;
+    margin-left: 6px;
+    color: var(--danger-muted);
+  }
+  .text-btn.danger::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 1px;
+    height: 14px;
+    background: var(--border);
+  }
   .actions {
     display: flex;
     gap: 6px;
@@ -390,6 +421,22 @@
     border: 1px solid rgba(255, 255, 255, 0.35);
     border-radius: 5px;
   }
+  /* 保存按钮上的 Ctrl+S 提示：与 primary 白字搭配的轻量 kbd */
+  .primary .save-kbd {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    margin-left: 6px;
+    padding: 0 5px;
+    font-size: 10.5px;
+    font-family: var(--font-mono);
+    font-weight: 500;
+    line-height: 1;
+    color: rgba(255, 255, 255, 0.85);
+    background: rgba(255, 255, 255, 0.14);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 4px;
+  }
   .meta-info {
     margin-left: auto;
     display: inline-flex;
@@ -405,6 +452,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* 复制模式徽章排在分类前；第一个徽章不吃 margin-left:auto 语义 */
+  .mode-info {
+    margin-left: auto;
+  }
+  .mode-info + .meta-info {
+    margin-left: 0;
   }
 
   /* ── 填空式表单 ── */

@@ -203,12 +203,32 @@
   // 不在了（外部删除/同步清理）→ 选可见列表里同位置的相邻项。
   // 这是 selectedPath 唯一真相原则的关键：任何重排都不能劫持选中。
   function reconcileSelection() {
-    if (!selectedPath) return;
+    if (!selectedPath) {
+      // 无选中（首启/删除后）：列表非空时默认选第一条，保证 Enter 始终可用
+      if (visiblePrompts.length > 0) selectedPath = visiblePrompts[0].path;
+      return;
+    }
     if (allPrompts.some((p) => p.path === selectedPath)) return;
     const idx = selectedIndex >= 0 ? selectedIndex : 0;
     const next = visiblePrompts[Math.min(idx, visiblePrompts.length - 1)];
     selectedPath = next?.path ?? null;
   }
+
+  // 过滤条件变化后的选中调和：搜索/切分类后，当前选中项不在可见列表时自动
+  // 高亮第一条（Raycast/Alfred 惯例：结果列表永远有默认选中项，搜完 Enter 永远有效）。
+  // 只由过滤条件驱动——列表数据刷新（保存/同步/拖拽）走 reconcileSelection，
+  // 不会劫持用户正在查看或编辑的选中项。首跑只记录基准不动作（首启由 refresh 负责）。
+  let lastFilterKey: string | null = null;
+  $effect(() => {
+    const key = `${selectedCategory}\u0000${query}`;
+    if (lastFilterKey === null || key === lastFilterKey) {
+      lastFilterKey = key;
+      return;
+    }
+    lastFilterKey = key;
+    if (visiblePrompts.length === 0 || selectedIndex >= 0) return;
+    selectedPath = visiblePrompts[0].path;
+  });
 
   // 设置界面切换数据目录后：更新配置、重置选中、重新扫描
   // 同步完成后：重新加载列表 + 刷新同步状态
@@ -267,6 +287,41 @@
             .catch(() => {});
         }).then((fn) => {
           // 注册完成时组件已卸载：立即反注册，防止监听器泄漏
+          if (disposed) fn();
+          else unlisten = fn;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  });
+
+  // 唤出（快捷键/托盘/单实例/首启）后把焦点放进搜索框并全选残留词：
+  // 「唤出→直接打字」核心链路的最后一环。弹窗/设置开着时不抢焦点（焦点归弹窗）。
+  // 普通点击窗口获得焦点不触发该事件，用户点回窗口继续编辑不会被劫持。
+  $effect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => {
+        if (disposed) return;
+        listen("window-shown", () => {
+          const overlayOpen =
+            variableDialog.open ||
+            renameDialog.open ||
+            catRenameDialog.open ||
+            contextMenu.open ||
+            catContextMenu.open ||
+            settingsOpen;
+          if (overlayOpen) return;
+          const input = document.querySelector<HTMLInputElement>("#search-input");
+          if (!input) return;
+          input.focus();
+          // 全选残留搜索词：唤出后直接打字即覆盖，无需逐字删除
+          input.select();
+        }).then((fn) => {
           if (disposed) fn();
           else unlisten = fn;
         });
@@ -349,7 +404,9 @@
     void guardedRefresh().catch((e) => showError(String(e)));
   }
 
-  async function doCopy(mode: "markdown" | "plain") {
+  // hideAfter：Enter 快捷键链路 = true（复制后隐藏窗口回到原应用）；
+  // 主窗口内点「复制」按钮 = false（窗口保持可见，方便连续复制/继续浏览）
+  async function doCopy(mode: "markdown" | "plain", hideAfter = true) {
     if (!selectedPrompt) return;
     try {
       // 内容加载是异步的：快速 ↓↓ 切换后按 Enter，editingBody 可能还是上一条的。
@@ -364,10 +421,10 @@
       // 用户填的值以原文参与后续转换）
       const vars = extractVariables(body);
       if (vars.length > 0) {
-        variableDialog = { open: true, variables: vars, body, mode };
+        variableDialog = { open: true, variables: vars, body, mode, hideAfter };
         return;
       }
-      await finishCopy(body, mode);
+      await finishCopy(body, mode, hideAfter);
     } catch (e) {
       showError(String(e));
     }
@@ -375,12 +432,19 @@
 
   // 复制的最终段：plain 模式剥掉 Markdown 标记 → 写剪贴板 → 隐藏窗口 →
   // 按快捷键来源决定是否注入 Ctrl+V（copyOrPaste 内部处理）
-  async function finishCopy(body: string, mode: "markdown" | "plain") {
+  async function finishCopy(
+    body: string,
+    mode: "markdown" | "plain",
+    hideAfter = true,
+  ) {
     try {
       if (mode === "plain") body = markdownToPlain(body);
-      await copyOrPaste(body, mode);
-      copiedFlash = true;
-      setTimeout(() => (copiedFlash = false), 800);
+      await copyOrPaste(body, mode, hideAfter);
+      if (!hideAfter) {
+        // 窗口内复制：窗口不隐藏，toast 是唯一的确认反馈
+        copiedFlash = true;
+        setTimeout(() => (copiedFlash = false), 800);
+      }
     } catch (e) {
       showError(String(e));
     }
@@ -392,23 +456,24 @@
     variables: string[];
     body: string;
     mode: "markdown" | "plain";
-  }>({ open: false, variables: [], body: "", mode: "markdown" });
+    hideAfter: boolean;
+  }>({ open: false, variables: [], body: "", mode: "markdown", hideAfter: true });
 
   function closeVarDialog() {
     variableDialog = { ...variableDialog, open: false };
   }
 
   function onVarsConfirm(values: Record<string, string>) {
-    const { body, mode } = variableDialog;
+    const { body, mode, hideAfter } = variableDialog;
     closeVarDialog();
-    void finishCopy(applyVariables(body, values), mode);
+    void finishCopy(applyVariables(body, values), mode, hideAfter);
   }
 
   // 逃生门：正文恰好天然含 {{}}（如模板示例）时跳过替换，按原文复制
   function onVarsCopyRaw() {
-    const { body, mode } = variableDialog;
+    const { body, mode, hideAfter } = variableDialog;
     closeVarDialog();
-    void finishCopy(body, mode);
+    void finishCopy(body, mode, hideAfter);
   }
 
   // 问题5修复：保存用结构化字段，Rust 端规范序列化
@@ -752,6 +817,12 @@
         });
         return;
       }
+      // 裸视图下 Esc：搜索框有词先清词（一次 Esc 回到全列表），再按才隐藏窗口
+      if (query.trim()) {
+        query = "";
+        e.preventDefault();
+        return;
+      }
       e.preventDefault();
       void hideWindow();
       return;
@@ -767,6 +838,15 @@
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
       e.preventDefault();
       document.querySelector<HTMLInputElement>("#search-input")?.focus();
+      return;
+    }
+    // 编辑态 Ctrl/Cmd+S：保存。必须在下方输入控件早退之前处理——
+    // 否则正文 textarea 里的 Ctrl+S 永远到不了这里（键盘优先工具的保存闭环）
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      if (editorMode === "edit" && !settingsOpen) {
+        e.preventDefault();
+        void doSave();
+      }
       return;
     }
 
@@ -787,9 +867,18 @@
       void navigateSelection(-1);
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const cur = selectedIndex >= 0 ? visiblePrompts[selectedIndex] : undefined;
+      // 选中项不在当前过滤结果（或无选中）时兜底取第一条：搜完直接按 Enter 永远有效
+      const cur =
+        selectedIndex >= 0 ? visiblePrompts[selectedIndex] : visiblePrompts[0];
       if (cur) {
-        void doCopy(cur.meta.copy_mode as "markdown" | "plain");
+        const stored = cur.meta.copy_mode === "plain" ? "plain" : "markdown";
+        // Shift+Enter = 临时用另一复制模式（markdown↔plain），不改存储的 copy_mode
+        const mode = e.shiftKey
+          ? stored === "markdown"
+            ? "plain"
+            : "markdown"
+          : stored;
+        void doCopy(mode);
       }
     }
   }
@@ -951,7 +1040,7 @@
         bind:copyMode={editingCopyMode}
         {categories}
         {t}
-        oncopy={(m) => doCopy(m)}
+        oncopy={(m) => doCopy(m, false)}
         onsave={doSave}
         oncancel={cancelEdit}
         onedit={() => {

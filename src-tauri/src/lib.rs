@@ -677,12 +677,15 @@ async fn copy_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
 /// 智能复制/注入：写剪贴板 → 隐藏窗口 → 等焦点回归 → 按快捷键来源决定是否注入。
 /// - Ctrl+Alt+P 按下时外部前台有 caret：模拟 Ctrl+V 把内容注入原输入框
 /// - Ctrl+Alt+P 按下时不在输入框：纯复制到剪贴板，不误粘贴
+/// - hide=false（主窗口内按钮触发）：只写剪贴板，窗口保持可见，也不注入——
+///   焦点还在本窗口，注入会粘错地方
 ///
 /// mode 参数当前未区分转换（前端传 editingBody 原文），保留以兼容现有调用契约。
 #[tauri::command]
 async fn copy_or_paste(
     text: String,
     mode: String,
+    hide: Option<bool>,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
@@ -693,7 +696,13 @@ async fn copy_or_paste(
         .write_text(&text)
         .map_err(|e| e.to_string())?;
 
+    // 消费快捷键来源标志：不隐藏时复制即结束，标志不能留到下次（期间用户可能
+    // 切换过前台应用，过期标志会让下一次复制误注入）
     let invoked_from_text_input = state.take_last_hotkey_had_text_input();
+
+    if !hide.unwrap_or(true) {
+        return Ok(());
+    }
 
     // 2. 隐藏当前窗口，让 OS 焦点回归到用户原本聚焦的应用
     if let Some(win) = app.get_webview_window("main") {
@@ -1348,6 +1357,17 @@ fn seed_sample_prompts(dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 唤起主窗口：显示 + 聚焦 + 通知前端（前端把焦点放进搜索框，兑现
+/// 「唤出→直接打字」的核心链路；普通点击窗口获得焦点不发此事件，不抢焦点）
+fn show_main_window(app: &tauri::AppHandle) {
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
+    let _ = win.show();
+    let _ = win.set_focus();
+    let _ = app.emit("window-shown", ());
+}
+
 fn toggle_main_window(app: &tauri::AppHandle) {
     let Some(win) = app.get_webview_window("main") else {
         return;
@@ -1359,8 +1379,7 @@ fn toggle_main_window(app: &tauri::AppHandle) {
         _ => {
             // 多屏跟随鼠标定位：找到鼠标所在的显示器，在该屏居中显示
             position_window_at_cursor(&win);
-            let _ = win.show();
-            let _ = win.set_focus();
+            show_main_window(app);
         }
     }
 }
@@ -1447,10 +1466,7 @@ pub fn run() {
         // 单实例锁必须最先注册：第二实例启动时唤起已有窗口，而不是新开进程
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 用户再次双击 exe 时走到这里：聚焦到已有窗口
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1548,12 +1564,7 @@ pub fn run() {
                 })
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
-                        "show" => {
-                            if let Some(win) = app.get_webview_window("main") {
-                                let _ = win.show();
-                                let _ = win.set_focus();
-                            }
-                        }
+                        "show" => show_main_window(app),
                         "quit" => {
                             app.exit(0);
                         }
@@ -1572,6 +1583,8 @@ pub fn run() {
                 if first_run {
                     first_run_window_was_shown = win.show().is_ok();
                     let _ = win.set_focus();
+                    // 首启同样聚焦搜索框：新用户第一眼就能直接打字搜索
+                    let _ = app.emit("window-shown", ());
                     // 首次启动豁免一次失焦隐藏：避免新用户鼠标一点别的窗口主界面就消失
                     if first_run_window_was_shown {
                         FIRST_RUN_SUPPRESS_BLUR_HIDE.store(true, Ordering::SeqCst);

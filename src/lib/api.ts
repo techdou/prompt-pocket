@@ -138,12 +138,18 @@ export async function copyText(text: string): Promise<void> {
 /**
  * 智能复制/注入：写剪贴板 + 隐藏窗口 + 自动判断是否注入输入框。
  * 前台有文本光标 → 模拟 Ctrl+V 注入；否则纯复制到剪贴板。
+ * hide=false（主窗口内按钮触发）时窗口保持可见，只写剪贴板。
  */
 export async function copyOrPaste(
   text: string,
   mode: CopyMode,
+  hide = true,
 ): Promise<void> {
-  return invoke<void>("copy_or_paste", { text, mode: normalizeCopyMode(mode) });
+  return invoke<void>("copy_or_paste", {
+    text,
+    mode: normalizeCopyMode(mode),
+    hide,
+  });
 }
 
 export async function hideWindow(): Promise<void> {
