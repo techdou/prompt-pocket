@@ -43,7 +43,7 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 | 全局秒唤 | `Ctrl+Alt+P` 从任意应用唤出或隐藏，多屏下在鼠标所在屏居中 |
 | 全文搜索 | `Ctrl+F` 同时匹配标题与正文；正文命中时列表显示上下文摘录 |
 | 智能复制 / 粘贴 | `Enter` 写入剪贴板；唤出前焦点在输入框时自动粘贴（仅 Windows） |
-| 双复制模式 | `markdown` 复制原文；`plain` 自动剥离 Markdown 标记后复制 |
+| 双复制模式 | `markdown` 复制原文；`plain` 自动剥离 Markdown 标记后复制；`Shift+Enter` 临时用另一模式复制 |
 | Markdown 存储 | 一条提示词一个 `.md` 文件，文件夹就是分类，文件名跟随标题 |
 | 富 Markdown 预览 | GFM 表格、任务列表、代码块；Mermaid、KaTeX、highlight.js 全部本地内置、按需加载，无 CDN 依赖 |
 | 提示词排序 | 单个分类内拖动列表项手柄，顺序写入 `.order.json` |
@@ -83,9 +83,11 @@ Windows 上唤出前焦点在输入框时，内容写入剪贴板后自动粘贴
 | 全局唤出 / 隐藏 | `Ctrl+Alt+P` |
 | 新建提示词 | `Ctrl+N` |
 | 聚焦搜索框 | `Ctrl+F` |
+| 保存编辑 | `Ctrl+S` |
 | 上下选择 | `↑` / `↓` |
 | 复制选中项 | `Enter` |
-| 隐藏窗口 | `Esc` |
+| 以另一复制模式复制 | `Shift+Enter` |
+| 清空搜索 / 隐藏窗口 | `Esc`（搜索框有词时先清空，再按才隐藏） |
 
 ### 平台说明
 
@@ -226,7 +228,7 @@ Prompt Pocket is a lightweight desktop prompt manager: summon it from any app wi
 | Global launcher | Open or hide with `Ctrl+Alt+P`; centers on the monitor under the cursor |
 | Full-text search | `Ctrl+F` matches titles and prompt bodies; body hits show a context excerpt |
 | Smart copy / paste | `Enter` copies to clipboard; auto-pastes back when launched from a text input (Windows only) |
-| Dual copy modes | `markdown` copies the source; `plain` strips Markdown syntax before copying |
+| Dual copy modes | `markdown` copies the source; `plain` strips Markdown syntax before copying; `Shift+Enter` copies with the other mode temporarily |
 | Markdown storage | One prompt per `.md` file; folders are categories; filenames follow titles |
 | Rich preview | GFM tables, task lists, code blocks; Mermaid / KaTeX / highlight.js bundled locally, lazy-loaded, no CDN |
 | Prompt ordering | Drag handles within one category; saved to `.order.json` |
@@ -266,9 +268,11 @@ On Windows the prompt is pasted back automatically when launched from a text inp
 | Open / hide globally | `Ctrl+Alt+P` |
 | Create prompt | `Ctrl+N` |
 | Focus search | `Ctrl+F` |
+| Save editing | `Ctrl+S` |
 | Move selection | `↑` / `↓` |
 | Copy selected prompt | `Enter` |
-| Hide window | `Esc` |
+| Copy with the other mode | `Shift+Enter` |
+| Clear search / hide | `Esc` (clears the search term first when present, hides on the next press) |
 
 ### Platform Notes
 
