@@ -747,10 +747,10 @@
           </h1>
           <p class="lead">
             <span class="zh">
-              按 <strong>Ctrl+Alt+P</strong> 从任意应用唤出，搜索、选中、按 <strong>Enter</strong> 复制；如果原焦点在输入框，还会自动粘贴回去。
+              按 <strong>Ctrl+Alt+P</strong> 从任意应用唤出，搜索、选中、按 <strong>Enter</strong> 复制；Windows 上还会自动粘贴回唤起前的窗口。
             </span>
             <span class="en">
-              Press <strong>Ctrl+Alt+P</strong> anywhere, search, select, and press <strong>Enter</strong> to copy. If the original focus was a text input, Prompt Pocket pastes it back automatically.
+              Press <strong>Ctrl+Alt+P</strong> anywhere, search, select, and press <strong>Enter</strong> to copy. On Windows, Prompt Pocket pastes it back to the window it was launched from.
             </span>
           </p>
           <div class="hero-actions">
@@ -815,8 +815,8 @@
               <span class="feature-kicker">01 / Hotkey</span>
               <h3><span class="zh">全局秒唤，Enter 即用</span><span class="en">Global launch, Enter to use</span></h3>
               <p>
-                <span class="zh">从任意应用唤出，复制完自动收起；如果从输入框唤出，就自动粘贴回原位置。</span>
-                <span class="en">Open from anywhere, copy, then hide. When launched from a text input, it pastes back automatically.</span>
+                <span class="zh">从任意应用唤出，复制完自动收起；Windows 上自动粘贴回唤起前的原窗口。</span>
+                <span class="en">Open from anywhere, copy, then hide. On Windows it pastes back to the original window.</span>
               </p>
             </article>
             <article class="feature">
@@ -1035,8 +1035,8 @@
             <pre><span class="cmd">git clone</span> https://github.com/techdou/prompt-pocket.git
 <span class="cmd">cd</span> prompt-pocket
 <span class="cmd">npm install</span>
-<span class="cmd">npm run</span> tauri:dev
-<span class="cmd">npm run</span> tauri:build</pre>
+<span class="cmd">npm run</span> tauri dev
+<span class="cmd">npm run</span> tauri build</pre>
           </div>
 
           <div class="tech-grid" aria-label="Tech stack" style="margin-top: 16px">

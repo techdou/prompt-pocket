@@ -183,8 +183,8 @@ updated: 2026-06-27T00:00:00Z
 
 ```bash
 npm install
-npm run tauri:dev    # 开发调试
-npm run tauri:build  # 打包安装包
+npm run tauri dev    # 开发调试
+npm run tauri build  # 打包安装包
 ```
 
 验证（提交前全绿）：
@@ -357,8 +357,8 @@ Prerequisites:
 
 ```bash
 npm install
-npm run tauri:dev    # dev session
-npm run tauri:build  # package installers
+npm run tauri dev    # dev session
+npm run tauri build  # package installers
 ```
 
 Verification (all green before committing):

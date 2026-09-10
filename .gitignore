@@ -1,6 +1,8 @@
 # ── 依赖与构建产物 ──
 node_modules/
 dist/
+coverage/
+.vite/
 *.log
 *.tmp
 .DS_Store
@@ -18,6 +20,7 @@ release-assets/
 *.pem
 *.key
 *.pfx
+*.p12
 secrets.*
 
 # ── 开发工具配置目录（不上传）──
@@ -30,9 +33,18 @@ secrets.*
 .omx/
 .claude/
 .agents/
+.cursor/
+.windsurf/
+.trae/
+.gemini/
+.continue/
+.history/
 
 # ── 内部文档（开发状态/审查记录不纳入版本控制）──
 REVIEW-*.md
+PLAN-*.md
+NOTES-*.md
+TODO-*.md
 
 # ── 本地数据（开发时若放仓库内）──
 PromptPocket-Data/
