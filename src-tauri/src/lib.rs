@@ -94,7 +94,8 @@ struct AppState {
     last_error: Mutex<Option<String>>,
     /// 本地写命令与同步命令的互斥闸（见 IoGate）
     io_gate: Mutex<IoGate>,
-    last_hotkey_had_text_input: Mutex<bool>,
+    /// 快捷键按下瞬间记住的前台窗口句柄；copy_or_paste 消费它判定"是否注入回原窗口"
+    last_hotkey_target_window: Mutex<Option<isize>>,
 }
 
 impl AppState {
@@ -103,21 +104,21 @@ impl AppState {
         self.cloud.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn set_last_hotkey_had_text_input(&self, had_text_input: bool) {
+    fn set_last_hotkey_target_window(&self, target: Option<isize>) {
         *self
-            .last_hotkey_had_text_input
+            .last_hotkey_target_window
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = had_text_input;
+            .unwrap_or_else(|e| e.into_inner()) = target;
     }
 
-    fn take_last_hotkey_had_text_input(&self) -> bool {
+    fn take_last_hotkey_target_window(&self) -> Option<isize> {
         let mut guard = self
-            .last_hotkey_had_text_input
+            .last_hotkey_target_window
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let had_text_input = *guard;
-        *guard = false;
-        had_text_input
+        let target = *guard;
+        *guard = None;
+        target
     }
 
     fn set_cloud_config(&self, cfg: CloudConfig) -> Result<(), String> {
@@ -674,9 +675,12 @@ async fn copy_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
-/// 智能复制/注入：写剪贴板 → 隐藏窗口 → 等焦点回归 → 按快捷键来源决定是否注入。
-/// - Ctrl+Alt+P 按下时外部前台有 caret：模拟 Ctrl+V 把内容注入原输入框
-/// - Ctrl+Alt+P 按下时不在输入框：纯复制到剪贴板，不误粘贴
+/// 智能复制/注入：写剪贴板 → 隐藏窗口 → 等焦点回到快捷键按下时的前台窗口 → 注入。
+/// - 快捷键唤起时记住外部前台窗口：隐藏后焦点一旦回到该窗口，模拟 Ctrl+V 注入回去。
+///   按窗口身份判定而非检测"是否文本输入"——UIA/caret 探测对 Chromium/WinUI3/
+///   Electron 应用恒 false，会把可注入场景误判为纯复制
+/// - 未记住目标（窗口可见时按快捷键 toggle 隐藏、托盘/单实例唤起、非 Windows）：
+///   纯复制到剪贴板，不注入
 /// - hide=false（主窗口内按钮触发）：只写剪贴板，窗口保持可见，也不注入——
 ///   焦点还在本窗口，注入会粘错地方
 ///
@@ -696,9 +700,9 @@ async fn copy_or_paste(
         .write_text(&text)
         .map_err(|e| e.to_string())?;
 
-    // 消费快捷键来源标志：不隐藏时复制即结束，标志不能留到下次（期间用户可能
-    // 切换过前台应用，过期标志会让下一次复制误注入）
-    let invoked_from_text_input = state.take_last_hotkey_had_text_input();
+    // 消费快捷键来源目标：不隐藏时复制即结束，目标不能留到下次（期间用户可能
+    // 切换过前台应用，过期目标会让下一次复制误注入）
+    let hotkey_target = state.take_last_hotkey_target_window();
 
     if !hide.unwrap_or(true) {
         return Ok(());
@@ -709,38 +713,39 @@ async fn copy_or_paste(
         let _ = win.hide();
     }
 
-    // 3. 不来自输入框时立即结束：剪贴板已写好，不做任何粘贴尝试。
-    if !invoked_from_text_input {
+    // 3. 无记住的目标窗口：剪贴板已写好，不做任何粘贴尝试
+    let Some(target) = hotkey_target else {
         return Ok(());
-    }
+    };
 
     // 4. hide() 后焦点回归是异步的。短轮询比固定等待更快：
-    //    输入框一恢复焦点就粘贴，最长只等一小段时间。
-    let returned_to_text_input = wait_for_text_input_focus(
+    //    前台一回到目标窗口就注入，最长只等一小段时间。
+    let returned_to_target = wait_for_foreground_window(
+        target,
         std::time::Duration::from_millis(FOCUS_RESTORE_TIMEOUT_MS),
         std::time::Duration::from_millis(FOCUS_RESTORE_POLL_MS),
     )
     .await;
-    if !should_inject_after_hotkey(invoked_from_text_input, returned_to_text_input) {
+
+    // 5. 焦点未回归（目标窗口已关闭/焦点被第三方抢走）：放弃注入，剪贴板兜底
+    if !returned_to_target {
         return Ok(());
     }
 
-    // 5. 模拟 Ctrl+V 注入
+    // 6. 模拟 Ctrl+V 注入
     simulate_paste().map_err(|e| format!("注入失败: {e}"))?;
     Ok(())
 }
 
-fn should_inject_after_hotkey(invoked_from_text_input: bool, returned_to_text_input: bool) -> bool {
-    invoked_from_text_input && returned_to_text_input
-}
-
-async fn wait_for_text_input_focus(
+/// 轮询等待系统前台窗口回到 target（或其子窗口）。
+async fn wait_for_foreground_window(
+    target: isize,
     timeout: std::time::Duration,
     poll: std::time::Duration,
 ) -> bool {
     let started = std::time::Instant::now();
     loop {
-        if foreground_has_text_input_focus() {
+        if foreground_is_target_window(target) {
             return true;
         }
         let elapsed = started.elapsed();
@@ -751,133 +756,40 @@ async fn wait_for_text_input_focus(
     }
 }
 
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TextFocusSignal {
-    None,
-    GuiCaret,
-    UiaTextInput,
-}
-
-#[cfg(any(windows, test))]
-fn is_text_input_signal(signal: TextFocusSignal) -> bool {
-    !matches!(signal, TextFocusSignal::None)
-}
-
-#[cfg(any(windows, test))]
-fn is_uia_text_input_candidate(
-    is_keyboard_focusable: bool,
-    is_edit_control: bool,
-    is_document_control: bool,
-    has_value_pattern: bool,
-    has_text_pattern: bool,
-    has_text_edit_pattern: bool,
-) -> bool {
-    if !is_keyboard_focusable {
-        return false;
-    }
-
-    is_edit_control
-        || has_text_edit_pattern
-        || (is_document_control && (has_value_pattern || has_text_pattern))
-        || (has_value_pattern && has_text_pattern)
-}
-
+/// 取当前系统前台窗口句柄；无有效前台窗口（罕见）返回 None。
 #[cfg(windows)]
-fn foreground_has_text_input_focus() -> bool {
-    is_text_input_signal(foreground_text_focus_signal())
+fn foreground_window_handle() -> Option<isize> {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    (!hwnd.is_invalid()).then_some(hwnd.0 as isize)
 }
 
 #[cfg(not(windows))]
-fn foreground_has_text_input_focus() -> bool {
+fn foreground_window_handle() -> Option<isize> {
+    None
+}
+
+/// 前台是否为目标窗口（或其子窗口——焦点回归时前台可能是目标应用的
+/// 弹出子窗口，如输入法候选窗、悬浮面板）。
+#[cfg(windows)]
+fn foreground_is_target_window(target: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsChild};
+
+    let target = HWND(target as *mut _);
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_invalid() || target.is_invalid() {
+        return false;
+    }
+    let is_same = fg == target;
+    let is_child = unsafe { IsChild(target, fg) }.as_bool();
+    foreground_matches_window(is_same, is_child)
+}
+
+#[cfg(not(windows))]
+fn foreground_is_target_window(_target: isize) -> bool {
     false
-}
-
-#[cfg(windows)]
-fn foreground_text_focus_signal() -> TextFocusSignal {
-    if uia_focused_element_is_text_input() == Some(true) {
-        return TextFocusSignal::UiaTextInput;
-    }
-    if foreground_has_caret() {
-        return TextFocusSignal::GuiCaret;
-    }
-    TextFocusSignal::None
-}
-
-#[cfg(windows)]
-fn uia_focused_element_is_text_input() -> Option<bool> {
-    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
-        COINIT_APARTMENTTHREADED,
-    };
-    use windows::Win32::UI::Accessibility::{
-        CUIAutomation, IUIAutomation, UIA_DocumentControlTypeId, UIA_EditControlTypeId,
-        UIA_TextEditPatternId, UIA_TextPatternId, UIA_ValuePatternId,
-    };
-
-    unsafe {
-        let coinit = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let should_uninitialize = coinit.is_ok();
-        if coinit.is_err() && coinit != RPC_E_CHANGED_MODE {
-            return None;
-        }
-
-        let result = (|| -> windows::core::Result<bool> {
-            let automation: IUIAutomation =
-                CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
-            let element = automation.GetFocusedElement()?;
-            let is_keyboard_focusable = element.CurrentIsKeyboardFocusable()?.as_bool();
-            let control_type = element.CurrentControlType()?;
-            let is_edit_control = control_type == UIA_EditControlTypeId;
-            let is_document_control = control_type == UIA_DocumentControlTypeId;
-            let has_value_pattern = element.GetCurrentPattern(UIA_ValuePatternId).is_ok();
-            let has_text_pattern = element.GetCurrentPattern(UIA_TextPatternId).is_ok();
-            let has_text_edit_pattern = element.GetCurrentPattern(UIA_TextEditPatternId).is_ok();
-
-            Ok(is_uia_text_input_candidate(
-                is_keyboard_focusable,
-                is_edit_control,
-                is_document_control,
-                has_value_pattern,
-                has_text_pattern,
-                has_text_edit_pattern,
-            ))
-        })();
-
-        if should_uninitialize {
-            CoUninitialize();
-        }
-
-        result.ok()
-    }
-}
-
-/// 检测前台窗口是否正聚焦在一个有文本光标(caret)的控件上。
-/// 用 GetGUIThreadInfo 查询前台窗口所属线程的 caret 信息。
-#[cfg(windows)]
-fn foreground_has_caret() -> bool {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
-    };
-
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        // hwnd 为 0/无效说明无前台窗口（罕见）
-        if hwnd.is_invalid() {
-            return false;
-        }
-        let thread_id = GetWindowThreadProcessId(hwnd, None);
-        let mut info = GUITHREADINFO {
-            cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-            ..Default::default()
-        };
-        if GetGUIThreadInfo(thread_id, &mut info).is_err() {
-            return false;
-        }
-        // hwndCaret 非空 → 前台窗口里有个正在编辑的文本控件
-        !info.hwndCaret.is_invalid()
-    }
 }
 
 /// 判断指定 Tauri 窗口当前是否为 Win32 前台窗口。
@@ -899,7 +811,7 @@ fn is_window_in_foreground(win: &tauri::Window) -> bool {
     }
     let is_same = foreground == our_hwnd;
     let is_child = unsafe { IsChild(our_hwnd, foreground).as_bool() };
-    foreground_matches_app_window(is_same, is_child)
+    foreground_matches_window(is_same, is_child)
 }
 
 #[cfg(not(windows))]
@@ -908,7 +820,7 @@ fn is_window_in_foreground(_win: &tauri::Window) -> bool {
 }
 
 #[cfg(any(windows, test))]
-fn foreground_matches_app_window(is_same_window: bool, is_child_window: bool) -> bool {
+fn foreground_matches_window(is_same_window: bool, is_child_window: bool) -> bool {
     is_same_window || is_child_window
 }
 
@@ -1509,7 +1421,7 @@ pub fn run() {
                 last_sync: Mutex::new(None),
                 last_error: Mutex::new(None),
                 io_gate: Mutex::new(IoGate::default()),
-                last_hotkey_had_text_input: Mutex::new(false),
+                last_hotkey_target_window: Mutex::new(None),
             });
 
             // v1.0.1：同步改为纯手动，启动时不再自动拉取
@@ -1526,11 +1438,16 @@ pub fn run() {
                                     .get_webview_window("main")
                                     .and_then(|win| win.is_visible().ok())
                                     .unwrap_or(false);
-                                let hotkey_had_text_input =
-                                    !window_is_visible && foreground_has_text_input_focus();
+                                // 记住当前前台窗口，注入判定用"焦点回到该窗口"（窗口身份），
+                                // 不做"前台是否文本输入"探测——UIA/caret 对现代应用恒 false
+                                let hotkey_target = if window_is_visible {
+                                    None
+                                } else {
+                                    foreground_window_handle()
+                                };
                                 app_handle
                                     .state::<AppState>()
-                                    .set_last_hotkey_had_text_input(hotkey_had_text_input);
+                                    .set_last_hotkey_target_window(hotkey_target);
                                 toggle_main_window(&app_handle);
                             }
                         },
@@ -1785,53 +1702,12 @@ mod tests {
     }
 
     #[test]
-    fn paste_injection_requires_hotkey_origin_and_returned_caret() {
-        assert!(should_inject_after_hotkey(true, true));
-        assert!(!should_inject_after_hotkey(false, true));
-        assert!(!should_inject_after_hotkey(true, false));
-        assert!(!should_inject_after_hotkey(false, false));
-    }
-
-    #[test]
     fn focus_restore_polling_is_short_and_bounded() {
         let poll_ms = FOCUS_RESTORE_POLL_MS;
         let timeout_ms = FOCUS_RESTORE_TIMEOUT_MS;
         assert!(poll_ms <= 10);
         assert!(timeout_ms <= 120);
         assert!(timeout_ms >= poll_ms);
-    }
-
-    #[test]
-    fn text_focus_signal_accepts_uia_and_legacy_caret() {
-        assert!(is_text_input_signal(TextFocusSignal::UiaTextInput));
-        assert!(is_text_input_signal(TextFocusSignal::GuiCaret));
-        assert!(!is_text_input_signal(TextFocusSignal::None));
-    }
-
-    #[test]
-    fn uia_candidate_detects_modern_text_inputs_without_legacy_caret() {
-        assert!(is_uia_text_input_candidate(
-            true, true, false, false, false, false,
-        ));
-        assert!(is_uia_text_input_candidate(
-            true, false, true, false, true, false,
-        ));
-        assert!(is_uia_text_input_candidate(
-            true, false, false, false, false, true,
-        ));
-    }
-
-    #[test]
-    fn uia_candidate_rejects_non_focusable_or_weak_value_controls() {
-        assert!(!is_uia_text_input_candidate(
-            false, true, false, true, true, true,
-        ));
-        assert!(!is_uia_text_input_candidate(
-            true, false, false, true, false, false,
-        ));
-        assert!(!is_uia_text_input_candidate(
-            true, false, false, false, true, false,
-        ));
     }
 
     #[test]
@@ -2042,9 +1918,9 @@ mod tests {
 
     #[test]
     fn foreground_match_accepts_webview_child_window() {
-        assert!(foreground_matches_app_window(true, false));
-        assert!(foreground_matches_app_window(false, true));
-        assert!(!foreground_matches_app_window(false, false));
+        assert!(foreground_matches_window(true, false));
+        assert!(foreground_matches_window(false, true));
+        assert!(!foreground_matches_window(false, false));
     }
 
     #[test]

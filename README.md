@@ -42,7 +42,7 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 | --- | --- |
 | 全局秒唤 | `Ctrl+Alt+P` 从任意应用唤出或隐藏，多屏下在鼠标所在屏居中 |
 | 全文搜索 | `Ctrl+F` 同时匹配标题与正文；正文命中时列表显示上下文摘录 |
-| 智能复制 / 粘贴 | `Enter` 写入剪贴板；唤出前焦点在输入框时自动粘贴（仅 Windows） |
+| 智能复制 / 粘贴 | `Enter` 写入剪贴板；快捷键唤起后自动粘贴回唤起前的窗口（仅 Windows） |
 | 双复制模式 | `markdown` 复制原文；`plain` 自动剥离 Markdown 标记后复制；`Shift+Enter` 临时用另一模式复制 |
 | 变量填空 | 正文含 `{{占位符}}` 时复制前弹窗填值替换，留空保留原文 |
 | Markdown 存储 | 一条提示词一个 `.md` 文件，文件夹就是分类，文件名跟随标题 |
@@ -75,7 +75,7 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 3. 搜索或用方向键选中提示词。
 4. 按 `Enter`。
 
-Windows 上唤出前焦点在输入框时，内容写入剪贴板后自动粘贴回原输入框；其他平台只写剪贴板，手动粘贴。
+Windows 上经快捷键唤起时，内容写入剪贴板后自动粘贴回唤起前的原窗口（不限输入框）；其他平台只写剪贴板，手动粘贴。
 
 ### 快捷键
 
@@ -92,7 +92,7 @@ Windows 上唤出前焦点在输入框时，内容写入剪贴板后自动粘贴
 
 ### 平台说明
 
-- **自动粘贴仅 Windows 生效**：当前版本的 macOS / Linux 前台焦点检测尚未实现，即使唤出前焦点在输入框，也只写入剪贴板，请手动 `Cmd+V` / `Ctrl+V` 粘贴。
+- **自动粘贴仅 Windows 生效**：macOS / Linux 的自动注入尚未实现，经快捷键唤起后也只写入剪贴板，请手动 `Cmd+V` / `Ctrl+V` 粘贴。
 - **快捷键冲突**：`Ctrl+Alt+P` 若被其它软件占用，全局唤出会失效（应用会弹窗提示），请先在占用方里改键。当前版本快捷键为固定值。
 
 ### 数据结构
@@ -228,7 +228,7 @@ Prompt Pocket is a lightweight desktop prompt manager: summon it from any app wi
 | --- | --- |
 | Global launcher | Open or hide with `Ctrl+Alt+P`; centers on the monitor under the cursor |
 | Full-text search | `Ctrl+F` matches titles and prompt bodies; body hits show a context excerpt |
-| Smart copy / paste | `Enter` copies to clipboard; auto-pastes back when launched from a text input (Windows only) |
+| Smart copy / paste | `Enter` copies to clipboard; auto-pastes back to the window it was launched from (Windows only) |
 | Dual copy modes | `markdown` copies the source; `plain` strips Markdown syntax before copying; `Shift+Enter` copies with the other mode temporarily |
 | Variable fill-in | Prompts with `{{placeholders}}` open a fill-in dialog before copying; empty fields keep the original text |
 | Markdown storage | One prompt per `.md` file; folders are categories; filenames follow titles |
@@ -261,7 +261,7 @@ The first launch shows the main window; afterwards the app stays in the backgrou
 3. Search or use arrow keys to select a prompt.
 4. Press `Enter`.
 
-On Windows the prompt is pasted back automatically when launched from a text input; on other platforms it is only copied — paste manually.
+On Windows the prompt is pasted back automatically to the window it was launched from; on other platforms it is only copied — paste manually.
 
 ### Keyboard Shortcuts
 
@@ -278,7 +278,7 @@ On Windows the prompt is pasted back automatically when launched from a text inp
 
 ### Platform Notes
 
-- **Auto-paste works on Windows only**: foreground focus detection is not yet implemented on macOS / Linux, so the prompt is only copied to the clipboard — paste manually with `Cmd+V` / `Ctrl+V`.
+- **Auto-paste works on Windows only**: auto-paste injection is not yet implemented on macOS / Linux, so the prompt is only copied to the clipboard — paste manually with `Cmd+V` / `Ctrl+V`.
 - **Hotkey conflicts**: if another app owns `Ctrl+Alt+P`, the global hotkey will not register (the app shows a warning dialog). The hotkey is fixed in this version.
 
 ### Data Layout
