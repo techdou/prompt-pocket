@@ -56,13 +56,13 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 
 ### 下载安装
 
-从 [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest) 下载最新版 `v2.2.0`，安装包由 GitHub Actions 三平台构建：
+从 [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest) 下载最新版 `v2.2.1`，安装包由 GitHub Actions 三平台构建：
 
 | 平台 | 文件 |
 | --- | --- |
-| macOS Apple Silicon | `Prompt.Pocket_2.2.0_aarch64.dmg` |
-| Windows x64 | `Prompt.Pocket_2.2.0_x64-setup.exe`（NSIS 安装器）或 `Prompt.Pocket_2.2.0_x64_en-US.msi` |
-| Linux x64 | `Prompt.Pocket_2.2.0_amd64.deb`、`Prompt.Pocket-2.2.0-1.x86_64.rpm` 或 `Prompt.Pocket_2.2.0_amd64.AppImage`（免安装） |
+| macOS Apple Silicon | `Prompt.Pocket_2.2.1_aarch64.dmg` |
+| Windows x64 | `Prompt.Pocket_2.2.1_x64-setup.exe`（NSIS 安装器）或 `Prompt.Pocket_2.2.1_x64_en-US.msi` |
+| Linux x64 | `Prompt.Pocket_2.2.1_amd64.deb`、`Prompt.Pocket-2.2.1-1.x86_64.rpm` 或 `Prompt.Pocket_2.2.1_amd64.AppImage`（免安装） |
 
 安装包未做代码签名：Windows 首次运行可能弹 SmartScreen 警告（选「仍要运行」）；macOS 首次打开需右键 →「打开」绕过 Gatekeeper。
 
@@ -242,13 +242,13 @@ Prompt Pocket is a lightweight desktop prompt manager: summon it from any app wi
 
 ### Download
 
-Grab the latest `v2.2.0` from [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest):
+Grab the latest `v2.2.1` from [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest):
 
 | Platform | File |
 | --- | --- |
-| macOS Apple Silicon | `Prompt.Pocket_2.2.0_aarch64.dmg` |
-| Windows x64 | `Prompt.Pocket_2.2.0_x64-setup.exe` (NSIS installer) or `Prompt.Pocket_2.2.0_x64_en-US.msi` |
-| Linux x64 | `Prompt.Pocket_2.2.0_amd64.deb`, `Prompt.Pocket-2.2.0-1.x86_64.rpm`, or `Prompt.Pocket_2.2.0_amd64.AppImage` (portable) |
+| macOS Apple Silicon | `Prompt.Pocket_2.2.1_aarch64.dmg` |
+| Windows x64 | `Prompt.Pocket_2.2.1_x64-setup.exe` (NSIS installer) or `Prompt.Pocket_2.2.1_x64_en-US.msi` |
+| Linux x64 | `Prompt.Pocket_2.2.1_amd64.deb`, `Prompt.Pocket-2.2.1-1.x86_64.rpm`, or `Prompt.Pocket_2.2.1_amd64.AppImage` (portable) |
 
 Installers are unsigned: Windows may show a SmartScreen warning (choose "Run anyway"); on macOS, right-click → Open to bypass Gatekeeper on first launch.
 
