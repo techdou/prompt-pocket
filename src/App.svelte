@@ -296,7 +296,19 @@
         // cleanup 已跑（dev HMR 卸载）：不再注册
         if (disposed) return;
         listen("sync-finished", () => {
-          void guardedRefresh().catch((e) => showError(String(e)));
+          void (async () => {
+            await guardedRefresh();
+            // 同步可能覆盖了当前选中项：view 态且无草稿时失效正文缓存重读磁盘，
+            // 否则预览/复制仍用旧内容、随后的编辑保存会反向覆盖刚下载的版本。
+            // 编辑态不打断（保存由用户主动触发；完整冲突提示留待后续）
+            if (editorMode === "view" && !isDirty && selectedPath) {
+              if (allPrompts.some((p) => p.path === selectedPath)) {
+                lastLoadedPath = null;
+                loadedPath = null;
+                void loadPromptContent(selectedPath);
+              }
+            }
+          })().catch((e) => showError(String(e)));
           void getSyncStatus()
             .then((s) => (syncStatus = s))
             .catch(() => {});
@@ -364,6 +376,8 @@
   $effect(() => {
     if (selectedPath && selectedPath !== lastLoadedPath) {
       lastLoadedPath = selectedPath;
+      // 选中切到已有项：内存草稿让位销毁（丢弃确认已由各切换入口把关）
+      draftNew = false;
       void loadPromptContent(selectedPath);
     }
   });
@@ -499,6 +513,35 @@
 
   // 问题5修复：保存用结构化字段，Rust 端规范序列化
   async function doSave() {
+    // 草稿首次保存：此刻才落盘。createPrompt 生成占位文件，savePrompt 按标题
+    // 规范重命名并写入内容——取消编辑的草稿从未落盘，不产生孤儿文件
+    if (draftNew) {
+      try {
+        const created = await createPrompt(editingCategory, editingTitle.trim());
+        const saved = await savePrompt(created.path, {
+          title: editingTitle.trim() || t("app.untitled"),
+          copy_mode: editingCopyMode,
+          body: editingBody,
+          category: editingCategory,
+        });
+        draftNew = false;
+        selectedPath = saved.path;
+        lastLoadedPath = saved.path;
+        loadedPath = saved.path;
+        loadedSnapshot = {
+          body: editingBody,
+          title: saved.title,
+          category: saved.category,
+          copyMode: editingCopyMode,
+        };
+        editingCategory = saved.category;
+        await guardedRefresh();
+        editorMode = "view";
+      } catch (e) {
+        showError(String(e));
+      }
+      return;
+    }
     if (!selectedPrompt) return;
     try {
       const saved = await savePrompt(selectedPrompt.path, {
@@ -531,30 +574,27 @@
     }
   }
 
+  // 内存草稿态：Ctrl+N 不再立即落盘（旧版取消编辑会留下时间戳命名的孤儿空文件），
+  // 首次 Ctrl+S 才真正建文件；取消/切换选中即销毁草稿
+  let draftNew = $state(false);
+
   async function doCreate() {
     // 当前编辑有未保存修改时先确认（新建会重置全部编辑字段）
     if (!(await confirmDiscardIfDirty())) return;
     const cat = selectedCategory === "__all__" ? "未分类" : selectedCategory;
-    try {
-      // 新建用占位标题（文件名是时间戳），进入编辑后用户填写真实标题
-      // 保存时若标题变化会自动重命名文件
-      const p = await createPrompt(cat, "");
-      await guardedRefresh();
-      selectedPath = p.path;
-      lastLoadedPath = p.path;
-      loadedPath = p.path; // 新建内容（空）已就绪
-      query = "";
-      // 进入编辑，标题留空引导用户输入
-      editingTitle = "";
-      editingCategory = cat;
-      editingCopyMode = "markdown";
-      editingBody = "";
-      // 新建即快照基准：用户开始输入才变脏
-      loadedSnapshot = { body: "", title: "", category: cat, copyMode: "markdown" };
-      editorMode = "edit";
-    } catch (e) {
-      showError(String(e));
-    }
+    selectedPath = null; // 草稿不选中任何已有项
+    lastLoadedPath = null;
+    loadedPath = null;
+    query = "";
+    // 进入编辑，标题留空引导用户输入
+    editingTitle = "";
+    editingCategory = cat;
+    editingCopyMode = "markdown";
+    editingBody = "";
+    // 新建即快照基准：用户开始输入才变脏
+    loadedSnapshot = { body: "", title: "", category: cat, copyMode: "markdown" };
+    draftNew = true;
+    editorMode = "edit";
   }
 
   async function doDelete() {
@@ -578,6 +618,12 @@
 
   // 取消编辑：丢弃修改，从磁盘重载当前选中项
   function cancelEdit() {
+    if (draftNew) {
+      // 草稿纯内存：直接销毁退回视图态，不落盘不留孤儿文件
+      draftNew = false;
+      editorMode = "view";
+      return;
+    }
     if (selectedPath) {
       lastLoadedPath = null;
       loadedPath = null;
@@ -732,7 +778,8 @@
   // 重命名对话框提交
   async function submitRename() {
     // 重命名当前正在编辑的项会强制重载内容，未保存修改先确认
-    if (renameDialog.path === selectedPath && !(await confirmDiscardIfDirty())) {
+    const renamingSelected = renameDialog.path === selectedPath;
+    if (renamingSelected && !(await confirmDiscardIfDirty())) {
       return;
     }
     try {
@@ -742,9 +789,13 @@
         renameDialog.category,
       );
       await guardedRefresh();
-      selectedPath = newPrompt.path;
-      lastLoadedPath = null;
-      loadedPath = null;
+      // 只跟随被重命名的当前项；重命名其他项不得劫持选中——
+      // 无确认切选中会静默丢弃正在编辑的草稿
+      if (renamingSelected) {
+        selectedPath = newPrompt.path;
+        lastLoadedPath = null;
+        loadedPath = null;
+      }
       renameDialog.open = false;
     } catch (e) {
       showError(String(e));
@@ -777,6 +828,8 @@
       catRenameDialog.open = false;
       return;
     }
+    // 分类重命名会刷新列表/切换分类视图：编辑中的草稿先确认（同其他选中切换入口）
+    if (!(await confirmDiscardIfDirty())) return;
     try {
       await renameCategory(catRenameDialog.oldName, newName);
       if (selectedCategory === catRenameDialog.oldName) {
@@ -852,9 +905,18 @@
       void hideWindow();
       return;
     }
-    // 变量填空弹窗打开：挂起其余全局快捷键（Ctrl+N/F、列表导航），
-    // 防止隔空操作背后的列表/编辑器（Esc 已在上方分支处理）
-    if (variableDialog.open) return;
+    // 任何弹窗/菜单打开时：Esc 已在上方分支逐个处理，其余全局快捷键全部挂起——
+    // 焦点在弹窗按钮上时 Enter 会穿透到主界面触发复制+隐藏+自动注入，
+    // Ctrl+N/↑↓ 也会隔空操作背后的列表
+    if (
+      variableDialog.open ||
+      renameDialog.open ||
+      catRenameDialog.open ||
+      contextMenu.open ||
+      catContextMenu.open ||
+      settingsOpen
+    )
+      return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
       e.preventDefault();
       void doCreate();
