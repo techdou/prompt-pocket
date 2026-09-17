@@ -310,15 +310,21 @@ pub async fn push_all_to_remote<S: RemoteStore>(
         }
     }
 
-    // 删除传播：tombstone 清单逐条发远程删除
+    // 删除传播：tombstone 清单逐条发远程删除。
+    // 按目标标记确认：一个目标删完不能消费整个记录——多目标场景下另一目标
+    // 的副本会因此永远残留；已确认过的目标跳过（幂等）
     let mut tombstones = crate::store::load_tombstones(local_dir);
     if !tombstones.is_empty() {
         let rels: Vec<String> = tombstones.keys().cloned().collect();
         for rel in rels {
+            if tombstones[&rel].done_targets.contains(target_key) {
+                continue; // 本目标已确认过，不重复发删除
+            }
             match store.delete(&rel).await {
                 Ok(()) => {
                     deleted_remote += 1;
-                    tombstones.remove(&rel);
+                    let _ = crate::store::mark_tombstone_done(local_dir, &rel, target_key);
+                    tombstones = crate::store::load_tombstones(local_dir);
                     sync_meta.remove(&rel);
                 }
                 Err(e) => {
@@ -327,7 +333,6 @@ pub async fn push_all_to_remote<S: RemoteStore>(
                 }
             }
         }
-        let _ = crate::store::save_tombstones(local_dir, &tombstones);
     }
 
     // 持久化更新后的记录（保留其他目标的账本切片一起写回）
@@ -405,16 +410,15 @@ fn save_sync_meta_targets(local_dir: &Path, targets: &SyncMetaTargets) {
     }
 }
 
-/// 取出目标自己的基线；目标无记录但存在旧格式数据时收编之
-/// （多后端用户首次切换会多传一轮，正确性优先于这一次冗余）
+/// 取出目标自己的基线。旧格式（≤v2.2.1 平铺）数据无法证明归属哪个目标——
+/// 收编给当前目标会把 A 的基线错配给 B，导致 B 漏传整批文件且错误基线被
+/// 持久化。直接丢弃：升级后首次 push 全量重传一次（一次性代价，绝对正确）
 fn take_target_baseline(
     targets: &mut SyncMetaTargets,
     target_key: &str,
 ) -> std::collections::HashMap<String, u64> {
-    if let Some(m) = targets.remove(target_key) {
-        return m;
-    }
-    targets.remove(LEGACY_TARGET).unwrap_or_default()
+    targets.remove(LEGACY_TARGET);
+    targets.remove(target_key).unwrap_or_default()
 }
 
 /// FNV-1a 64 位哈希（轻量内容指纹，无外部依赖，对内容任何变化敏感）
@@ -588,11 +592,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // 旧平铺格式（v≤2.2.1）
+        // 旧平铺格式（v≤2.2.1）：无法证明归属，直接丢弃——首个目标从零基线
+        // 全量上传，绝不能把旧基线错配给任意目标导致漏传
         std::fs::write(dir.join(".sync_meta.json"), r#"{"写作/a.md": 12345}"#).unwrap();
         let mut targets = load_sync_meta_targets(&dir);
         let baseline = take_target_baseline(&mut targets, "webdav:u@root");
-        assert_eq!(baseline.get("写作/a.md"), Some(&12345), "旧格式应收编进当前目标");
+        assert!(baseline.is_empty(), "旧格式账本必须丢弃，不得错配给任何目标");
 
         // 写入两个目标，各自隔离
         let mut b1 = baseline;
@@ -779,6 +784,40 @@ mod tests {
             "应有清理跳过警告: {:?}",
             report.errors
         );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 多目标删除传播互不吞：A 目标确认后 B 目标仍会删除自己的副本（#8）
+    #[test]
+    fn tombstone_deletion_propagates_per_target() {
+        let dir = std::env::temp_dir().join("pp_test_tomb_multi");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cat")).unwrap();
+        std::fs::write(dir.join("cat").join("x.md"), "hello").unwrap();
+
+        let store = MockStore::new();
+        // 上传到两个目标
+        block_on(push_all_to_remote(&store, &dir, "webdav:u@root")).unwrap();
+        block_on(push_all_to_remote(&store, &dir, "github:r@main")).unwrap();
+
+        // 本地删除（tombstone 带真实 size）
+        crate::store::delete_prompt(&dir, &dir.join("cat").join("x.md")).unwrap();
+        let tombs = crate::store::load_tombstones(&dir);
+        assert_eq!(tombs["cat/x.md"].size, 5, "tombstone 必须带删除时刻的真实大小");
+
+        // 目标 A 推送删除；目标 B 的副本仍在
+        block_on(push_all_to_remote(&store, &dir, "webdav:u@root")).unwrap();
+        {
+            let files = store.files.lock().unwrap();
+            assert!(!files.contains_key("cat/x.md"), "A 目标应已删除");
+        }
+        // 目标 B 推送：仍会执行自己的删除（A 的确认不得消费记录）
+        block_on(push_all_to_remote(&store, &dir, "github:r@main")).unwrap();
+        {
+            let files = store.files.lock().unwrap();
+            assert!(!files.contains_key("cat/x.md"), "B 目标也应完成删除传播");
+        }
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

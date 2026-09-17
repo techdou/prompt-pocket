@@ -134,8 +134,11 @@
   let debouncedQuery = $state("");
   let queryDebounceTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
+    // 同步读取 query 建立依赖——只在 setTimeout 回调里读的话 effect 不跟踪，
+    // 防抖值永远停在初值（搜索失效）
+    const q = query;
     clearTimeout(queryDebounceTimer);
-    queryDebounceTimer = setTimeout(() => (debouncedQuery = query), 50);
+    queryDebounceTimer = setTimeout(() => (debouncedQuery = q), 50);
     return () => clearTimeout(queryDebounceTimer);
   });
   let visiblePrompts = $derived(filterPrompts(categoryFiltered, debouncedQuery));
@@ -227,6 +230,9 @@
   // 这是 selectedPath 唯一真相原则的关键：任何重排都不能劫持选中。
   function reconcileSelection(prevIdx = 0) {
     if (!selectedPath) {
+      // 内存草稿编辑中：保持空选中——自动选第一项会触发选中加载，
+      // 把用户正在输入的草稿无确认清掉
+      if (draftNew) return;
       // 无选中（首启/删除后）：列表非空时默认选第一条，保证 Enter 始终可用
       if (visiblePrompts.length > 0) selectedPath = visiblePrompts[0].path;
       return;

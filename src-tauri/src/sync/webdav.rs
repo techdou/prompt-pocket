@@ -166,11 +166,20 @@ impl WebDavStore {
             } else {
                 format!("{acc}/{part}")
             };
-            let _ = self.client.mkcol(&remote_url(&self.root, &acc)).await;
-            self.ensured_dirs
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(acc.clone());
+            let mkcol_result = self.client.mkcol(&remote_url(&self.root, &acc)).await;
+            // 已存在（坚果云回 405）视为确认成功；网络等其他错误不缓存——
+            // 否则一次瞬时失败会让本轮后续同目录文件全部跳过建目录而上传失败
+            let confirmed = mkcol_result.is_ok()
+                || mkcol_result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| e.to_string().contains("405"));
+            if confirmed {
+                self.ensured_dirs
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(acc.clone());
+            }
         }
         Ok(())
     }

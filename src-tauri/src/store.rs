@@ -252,6 +252,11 @@ pub struct Tombstone {
     pub size: u64,
     #[serde(rename = "deletedAt")]
     pub deleted_at: String,
+    /// 已确认删除传播完成的远程目标（target_key 集合）。
+    /// 多目标场景下一个目标确认不能消费整个记录——否则切到另一个目标
+    /// 时它那份副本永远不会被删。旧格式缺省为空（兼容读取）
+    #[serde(default, rename = "doneTargets")]
+    pub done_targets: std::collections::HashSet<String>,
 }
 
 pub const TOMBSTONE_FILE: &str = ".sync_deleted.json";
@@ -268,12 +273,6 @@ pub fn save_tombstones(root: &Path, map: &HashMap<String, Tombstone>) -> io::Res
     write_atomic(&root.join(TOMBSTONE_FILE), json.as_bytes())
 }
 
-/// 记录一条删除（文件已不存在时 size 记 0）。失败不阻断主流程（调用方 let _）。
-pub fn record_tombstone(root: &Path, rel_unix: &str) -> io::Result<()> {
-    let size = fs::metadata(root.join(rel_unix)).map(|m| m.len()).unwrap_or(0);
-    record_tombstone_with_size(root, rel_unix, size)
-}
-
 /// 记录一条删除，size 由调用方提供。
 /// 用于文件即将被移动/重命名、事后取不到 size 的场景：
 /// pull 端靠"tombstone size == 远程大小"判定防复活，size 失真（记成 0）
@@ -285,9 +284,23 @@ pub fn record_tombstone_with_size(root: &Path, rel_unix: &str, size: u64) -> io:
         Tombstone {
             size,
             deleted_at: now_iso(),
+            done_targets: Default::default(),
         },
     );
     save_tombstones(root, &map)
+}
+
+/// 标记某远程目标已完成该文件的删除传播（不清除记录——其他目标还可能有待删副本）。
+/// 记录的清理仍由"文件被重建/远程新版本下载"路径负责
+pub fn mark_tombstone_done(root: &Path, rel_unix: &str, target_key: &str) -> io::Result<()> {
+    let mut map = load_tombstones(root);
+    if let Some(t) = map.get_mut(rel_unix) {
+        if !t.done_targets.insert(target_key.to_string()) {
+            return Ok(()); // 已标记过，无需写盘
+        }
+        save_tombstones(root, &map)?;
+    }
+    Ok(())
 }
 
 /// 清除一条 tombstone（文件被重建/下载回来时调用）
@@ -512,13 +525,28 @@ fn migrate_prompt_order_on_rename(root: &Path, mapping: &[(String, String)]) {
     if mapping.is_empty() {
         return;
     }
+    let lookup: std::collections::HashMap<&String, &String> =
+        mapping.iter().map(|(o, n)| (o, n)).collect();
     let mut map = load_order_map(root);
-    for (old_rel, new_rel) in mapping {
-        if let Some(old_cat) = old_rel.split('/').next() {
-            if let Some(list) = map.get_mut(old_cat) {
-                list.retain(|p| p != old_rel);
+    // 按旧 order 数组的顺序逐项映射：整体重命名保持原顺序
+    // （mapping 来自目录遍历，直接按它追加会把用户拖好的顺序改成磁盘序）；
+    // 同分类原位替换，跨分类移到目标列表尾部（合并语义）
+    let mut leftovers: Vec<&String> = lookup.values().copied().collect();
+    for (cat, list) in map.iter_mut() {
+        let mut rewritten: Vec<String> = Vec::with_capacity(list.len());
+        for p in list.iter() {
+            if let Some(&new_rel) = lookup.get(p) {
+                rewritten.push(new_rel.clone());
+            } else {
+                rewritten.push(p.clone());
             }
         }
+        leftovers.retain(|n| !rewritten.contains(n));
+        *list = rewritten;
+        let _ = cat; // 分类 key 不变（同分类改名场景）
+    }
+    // 不在旧 order 里的映射条目（新加入排序的）：按目标分类追加尾部
+    for new_rel in leftovers {
         let new_cat = new_rel.split('/').next().unwrap_or_default().to_string();
         map.entry(new_cat).or_default().push(new_rel.clone());
     }
@@ -632,9 +660,13 @@ pub fn save_prompt(root: &Path, abs: &Path, req: &SaveRequest) -> io::Result<Pat
 
     // 路径变了（重命名）：写成功后删旧文件；删除成功才记 tombstone（删除传播）。
     // 删除失败不记——旧文件暂与新文件共存由用户处理，好过云端旧路径被误删
-    if final_path != abs && abs.exists() && fs::remove_file(abs).is_ok() {
-        if let Ok(rel) = abs.strip_prefix(root) {
-            let _ = record_tombstone(root, &path_to_unix(rel));
+    if final_path != abs && abs.exists() {
+        // 同 delete_prompt：删除前取真实大小（删除后取只能得 0）
+        let size = fs::metadata(abs).map(|m| m.len()).unwrap_or(0);
+        if fs::remove_file(abs).is_ok() {
+            if let Ok(rel) = abs.strip_prefix(root) {
+                let _ = record_tombstone_with_size(root, &path_to_unix(rel), size);
+            }
         }
     }
     // 排序迁移：保存改标题导致路径变化时，.order.json 条目跟着改名
@@ -773,10 +805,12 @@ pub fn rename_prompt(
     // 删除失败（占用等）不记 tombstone——旧文件暂时与新文件共存由用户处理，
     // 好过界面看着删了、云端旧路径却在下次同步被误删
     if new_abs != old_abs {
+        // 同 delete_prompt：删除前取真实大小（删除后取只能得 0）
+        let size = fs::metadata(old_abs).map(|m| m.len()).unwrap_or(0);
         match fs::remove_file(old_abs) {
             Ok(()) => {
                 if let Ok(rel) = old_abs.strip_prefix(root) {
-                    let _ = record_tombstone(root, &path_to_unix(rel));
+                    let _ = record_tombstone_with_size(root, &path_to_unix(rel), size);
                 }
             }
             Err(e) => {
@@ -807,8 +841,19 @@ fn migrate_order_entry(root: &Path, old_rel: &str, new_rel: &str) {
         return;
     }
     let mut map = load_order_map(root);
+    // 同分类改名：原位替换保住排序位置；跨分类：旧位置移除 + 目标尾部追加
+    let same_cat = old_rel.split('/').next() == new_rel.split('/').next();
     if let Some(old_cat) = old_rel.split('/').next() {
         if let Some(list) = map.get_mut(old_cat) {
+            if same_cat {
+                if let Some(slot) = list.iter_mut().find(|p| p.as_str() == old_rel) {
+                    *slot = new_rel.to_string();
+                }
+                if let Ok(json) = serde_json::to_string_pretty(&map) {
+                    let _ = write_atomic(&root.join(ORDER_FILE), json.as_bytes());
+                }
+                return;
+            }
             list.retain(|p| p != old_rel);
         }
     }
@@ -864,13 +909,17 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
     // 移动前先收集旧目录里的 .md（相对路径, 大小）。
     // tombstone 必须带删除时刻的真实大小：rename 之后再取，旧路径已不存在只能得 0，
     // pull 端"大小相同才防复活"的比对会失真，云端旧文件会被当成新版本下载复活
+    // .gitkeep 一并纳入：空分类改名后远端旧目录的占位也要删除传播，
+    // 否则下次 pull 会按旧占位重建旧分类
     let old_mds: Vec<(String, u64)> = WalkDir::new(&old_dir)
         .min_depth(1)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| {
+            let name = e.file_name().to_string_lossy();
             e.file_type().is_file()
-                && e.path().extension().and_then(|x| x.to_str()) == Some("md")
+                && (e.path().extension().and_then(|x| x.to_str()) == Some("md")
+                    || name == ".gitkeep")
         })
         .filter_map(|e| {
             let rel = e
@@ -954,9 +1003,14 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
 /// 界面报错文件仍在，下次 push 却会把云端副本删掉（tombstone 已经在清单里）。
 /// 反过来"移动成功但记账失败"只是删除不传播（云端残留），残留比误删安全。
 pub fn delete_prompt(root: &Path, abs: &Path) -> io::Result<()> {
+    // tombstone 必须带删除时刻的真实大小：移动成功后旧路径已不存在，
+    // 事后只能记成 size=0——pull 端对 size=0 无条件防复活跳过，
+    // 远端的新版本会被当成"已删除"继续压制。先取大小再移动
+    let size = fs::metadata(abs).map(|m| m.len()).unwrap_or(0);
+    let rel = abs.strip_prefix(root).ok().map(path_to_unix);
     move_to_trash(root, abs)?;
-    if let Ok(rel) = abs.strip_prefix(root) {
-        let _ = record_tombstone(root, &path_to_unix(rel));
+    if let Some(rel) = rel {
+        let _ = record_tombstone_with_size(root, &rel, size);
     }
     Ok(())
 }
@@ -1593,10 +1647,10 @@ body";
         std::fs::create_dir_all(&dir).unwrap();
 
         std::fs::write(dir.join("a.md"), "内容").unwrap();
-        record_tombstone(&dir, "a.md").unwrap();
+        record_tombstone_with_size(&dir, "a.md", 42).unwrap();
         let map = load_tombstones(&dir);
         assert!(map.contains_key("a.md"));
-        assert_eq!(map["a.md"].size, 6); // "内容" = 6 字节 UTF-8
+        assert_eq!(map["a.md"].size, 42); // 显式传入的 size 原样落盘
 
         remove_tombstone(&dir, "a.md").unwrap();
         assert!(load_tombstones(&dir).is_empty());

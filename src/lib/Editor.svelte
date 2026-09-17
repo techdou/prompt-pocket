@@ -106,7 +106,7 @@
   });
 </script>
 
-{#if !prompt}
+{#if !prompt && mode !== "edit"}
   <section class="editor empty">
     <div class="placeholder">
       <div class="big" aria-hidden="true">
@@ -123,7 +123,7 @@
   <section class="editor">
     <header class="editor-head">
       <div class="title-block">
-        <h2 class="title">{title || prompt.title}</h2>
+        <h2 class="title">{title || prompt?.title}</h2>
       </div>
       <div class="actions">
         {#if mode === "view"}
