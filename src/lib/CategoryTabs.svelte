@@ -249,6 +249,8 @@
         onclick={(e) => onTabClick(e, cat.name)}
         oncontextmenu={(e) => {
           e.preventDefault();
+          // 未分类是根目录文件的虚拟统称、无实体目录，重命名入口必失败——不弹菜单
+          if (cat.name === "未分类") return;
           oncontextmenu(cat.name, e.clientX, e.clientY);
         }}
         title={categoryLabel(cat.name)}

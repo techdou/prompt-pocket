@@ -375,8 +375,12 @@ fn build_category_counts(cat_counts: BTreeMap<String, usize>, root: &Path) -> Ve
     let mut ordered: Vec<CategoryCount> = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
-    // 先按自定义顺序收集
+    // 先按自定义顺序收集（seen 拦截重复：合并分类后的顺序表可能出现同名条目，
+    // 重复键会让 Svelte keyed each 抛致命异常白屏）
     for name in &order {
+        if seen.contains(name.as_str()) {
+            continue;
+        }
         if let Some(&count) = cat_counts.get(name) {
             ordered.push(CategoryCount {
                 name: name.clone(),
@@ -452,6 +456,9 @@ pub fn rename_category_in_order(root: &Path, old_name: &str, new_name: &str) -> 
         }
     });
     if changed {
+        // 合并场景（目标分类已存在）：替换后顺序表会出现两个同名条目，
+        // 前端 keyed each 撞重复键直接白屏——写盘前保序去重
+        order.dedup();
         save_category_order(root, &order)?;
     }
     Ok(())
@@ -1271,6 +1278,47 @@ mod tests {
 
         let order = load_category_order(&dir);
         assert_eq!(order, vec!["新名", "其他"], "旧名应已替换为新名");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 合并分类（重命名为已存在分类）后顺序表不得出现重复条目——
+    /// 重复键会让前端 keyed each 抛致命异常白屏
+    #[test]
+    fn rename_category_merge_dedups_order_entries() {
+        let dir = std::env::temp_dir().join("pp_test_cat_merge_dedup");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        create_category(&dir, "a").unwrap();
+        create_category(&dir, "b").unwrap();
+        create_category(&dir, "c").unwrap();
+        save_category_order(&dir, &["a".into(), "b".into(), "c".into()]).unwrap();
+
+        // a 并入 b：顺序表变为 [b, b, c]，应去重为 [b, c]
+        rename_category(&dir, "a", "b").unwrap();
+
+        let order = load_category_order(&dir);
+        assert_eq!(order, vec!["b", "c"], "合并后顺序表应保序去重");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 顺序表即使意外存在重复条目（旧版遗留/手改），分类列表也不得输出重复项
+    #[test]
+    fn category_counts_tolerate_duplicate_order_entries() {
+        let dir = std::env::temp_dir().join("pp_test_cat_dup_order");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        create_category(&dir, "a").unwrap();
+        create_category(&dir, "b").unwrap();
+        // 手改出重复条目
+        save_category_order(&dir, &["a".into(), "b".into(), "a".into()]).unwrap();
+
+        let res = scan_prompts(&dir).unwrap();
+        let names: Vec<_> = res.categories.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"], "重复顺序条目不应产生重复分类项");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -124,7 +124,7 @@ impl AppState {
     fn set_cloud_config(&self, cfg: CloudConfig) -> Result<(), String> {
         let warning = persist_cloud_config(&self.config_file, &cfg, &SystemCloudSecretStore::new(CLOUD_PASSWORD_SERVICE))?;
         {
-            *self.cloud.lock().map_err(|e| e.to_string())? = cfg.clone();
+            *self.cloud.lock().unwrap_or_else(|e| e.into_inner()) = cfg.clone();
         }
         // 降级（密码未持久化）时让前端能通过 sync_status 看到提示
         if let Some(w) = warning {
@@ -147,7 +147,7 @@ impl AppState {
             &SystemCloudSecretStore::new(GITHUB_TOKEN_SERVICE),
         )?;
         {
-            *self.github.lock().map_err(|e| e.to_string())? = cfg;
+            *self.github.lock().unwrap_or_else(|e| e.into_inner()) = cfg;
         }
         if let Some(w) = warning {
             *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(w);
@@ -164,7 +164,7 @@ impl AppState {
         update_persisted_config(&self.config_file, |cfg| {
             cfg.provider = Some(p.as_str().to_string());
         })?;
-        *self.provider.lock().map_err(|e| e.to_string())? = p;
+        *self.provider.lock().unwrap_or_else(|e| e.into_inner()) = p;
         Ok(())
     }
 
@@ -824,15 +824,34 @@ fn foreground_matches_window(is_same_window: bool, is_child_window: bool) -> boo
     is_same_window || is_child_window
 }
 
-/// 用 enigo 模拟一次 Ctrl+V 粘贴（跨平台，macOS 需改 Meta，此处先支持 Windows/Linux）
+/// 用 enigo 模拟一次 Ctrl+V 粘贴（跨平台，macOS 需改 Meta，此处先支持 Windows/Linux）。
+/// 修饰键用 RAII guard 持有：V 敲击失败或 panic 时 Drop 无条件释放修饰键——
+/// 否则系统级 VK_CONTROL 卡在按下态，鼠标点选变多选、滚轮变缩放，只能手动敲物理键解救。
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
-    let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(Key::Control, Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Click)?;
-    enigo.key(Key::Control, Direction::Release)?;
+    struct ModifierGuard(Enigo);
+    impl ModifierGuard {
+        fn press(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            self.0.key(Key::Control, Direction::Press)?;
+            Ok(())
+        }
+        fn tap(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            self.0.key(Key::Unicode('v'), Direction::Click)?;
+            Ok(())
+        }
+    }
+    impl Drop for ModifierGuard {
+        fn drop(&mut self) {
+            let _ = self.0.key(Key::Control, Direction::Release);
+        }
+    }
+
+    // Enigo::new 失败时修饰键尚未按下，无需 guard
+    let mut guard = ModifierGuard(Enigo::new(&Settings::default())?);
+    guard.press()?;
+    guard.tap()?;
     Ok(())
 }
 
@@ -840,10 +859,26 @@ fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
 fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
-    let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(Key::Meta, Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Click)?;
-    enigo.key(Key::Meta, Direction::Release)?;
+    struct ModifierGuard(Enigo);
+    impl ModifierGuard {
+        fn press(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            self.0.key(Key::Meta, Direction::Press)?;
+            Ok(())
+        }
+        fn tap(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+            self.0.key(Key::Meta, Direction::Click)?;
+            Ok(())
+        }
+    }
+    impl Drop for ModifierGuard {
+        fn drop(&mut self) {
+            let _ = self.0.key(Key::Meta, Direction::Release);
+        }
+    }
+
+    let mut guard = ModifierGuard(Enigo::new(&Settings::default())?);
+    guard.press()?;
+    guard.tap()?;
     Ok(())
 }
 
@@ -1076,17 +1111,17 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
             }
             if !report.errors.is_empty() {
                 msg.push_str(&format!("，{} 个失败", report.errors.len()));
-                *state.last_error.lock().map_err(|e| e.to_string())? =
+                *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(report.errors.join("; "));
             } else {
-                *state.last_error.lock().map_err(|e| e.to_string())? = None;
+                *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
-            *state.last_sync.lock().map_err(|e| e.to_string())? = Some(msg.clone());
+            *state.last_sync.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
             let _ = app.emit("sync-finished", ());
             Ok(msg)
         }
         Err(e) => {
-            *state.last_error.lock().map_err(|e| e.to_string())? = Some(e.clone());
+            *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.clone());
             Err(e)
         }
     }
@@ -1126,17 +1161,17 @@ async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
             );
             if !report.errors.is_empty() {
                 msg.push_str(&format!("，{} 个失败", report.errors.len()));
-                *state.last_error.lock().map_err(|e| e.to_string())? =
+                *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(report.errors.join("; "));
             } else {
-                *state.last_error.lock().map_err(|e| e.to_string())? = None;
+                *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
-            *state.last_sync.lock().map_err(|e| e.to_string())? = Some(msg.clone());
+            *state.last_sync.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
             let _ = app.emit("sync-finished", ());
             Ok(msg)
         }
         Err(e) => {
-            *state.last_error.lock().map_err(|e| e.to_string())? = Some(e.clone());
+            *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.clone());
             Err(e)
         }
     }
