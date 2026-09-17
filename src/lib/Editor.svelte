@@ -182,7 +182,7 @@
           {copyMode === "plain" ? t("editor.modePlain") : t("editor.modeMarkdown")}
         </span>
         <span class="meta-info">
-          {categoryLabel(prompt.category)}
+          {categoryLabel(prompt?.category ?? "")}
         </span>
       </footer>
     {:else}
