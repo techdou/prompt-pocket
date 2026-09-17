@@ -333,6 +333,15 @@ pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
 
     // 读取 .order.json：{ 分类名: [相对路径, ...] }
     let order_map = load_order_map(root);
+    // 位置索引：把每个分类的顺序数组预展平成 (分类, 路径) -> 序号 的哈希表，
+    // 避免每个文件在线性数组里 position() 扫描（同分类 N 条全量排序是平方级）
+    let mut order_index: std::collections::HashMap<(String, String), i32> =
+        std::collections::HashMap::new();
+    for (cat, paths) in &order_map {
+        for (i, p) in paths.iter().enumerate() {
+            order_index.insert((cat.clone(), p.clone()), i as i32);
+        }
+    }
 
     // 扫描所有 .md 文件
     // 关键修复：用 filter_entry 剪掉 .trash 及所有隐藏目录，避免备份文件泄漏进列表
@@ -368,10 +377,7 @@ pub fn scan_prompts(root: &Path) -> io::Result<ScanResult> {
         } else {
             "未分类".to_string()
         };
-        let order = order_map
-            .get(&category_name)
-            .and_then(|paths| paths.iter().position(|p| p == &rel_str))
-            .map(|idx| idx as i32);
+        let order = order_index.get(&(category_name, rel_str)).copied();
 
         if let Some(prompt) = build_prompt(root, path, order) {
             *cat_counts.entry(prompt.category.clone()).or_insert(0) += 1;
@@ -521,7 +527,7 @@ fn migrate_prompt_order_on_rename(root: &Path, mapping: &[(String, String)]) {
     }
 }
 
-fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
+pub fn build_prompt(root: &Path, abs: &Path, order: Option<i32>) -> Option<Prompt> {
     // 全文读取：列表要携带正文供前端内容搜索。prompt 文件普遍只有几 KB，
     // 相比旧的"只读头部窗口"方案多出的 IO 可忽略，换来的是搜索不遗漏正文后半段
     let content = fs::read_to_string(abs).ok()?;

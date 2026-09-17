@@ -128,7 +128,17 @@
       : allPrompts.filter((p) => p.category === selectedCategory),
   );
 
-  let visiblePrompts = $derived(filterPrompts(categoryFiltered, query));
+  // 搜索防抖：输入即时反馈在输入框本身，过滤落盘滞后 50ms——
+  // 消除连续击键间的全量过滤+列表重绘（大量提示词时的掉帧来源）。
+  // 其余 query 消费方（Esc 清词、拖拽禁用判定、过滤调和）仍用即时值
+  let debouncedQuery = $state("");
+  let queryDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    clearTimeout(queryDebounceTimer);
+    queryDebounceTimer = setTimeout(() => (debouncedQuery = query), 50);
+    return () => clearTimeout(queryDebounceTimer);
+  });
+  let visiblePrompts = $derived(filterPrompts(categoryFiltered, debouncedQuery));
   let canReorderPrompts = $derived(
     canReorderPromptList(query, selectedCategory, visiblePrompts),
   );
@@ -1115,7 +1125,7 @@
         prompts={visiblePrompts}
         {selectedPath}
         {selectedIndex}
-        {query}
+        query={debouncedQuery}
         draggable={canReorderPrompts}
         disabledReason={reorderDisabledLabel}
         subMode={selectedCategory === "__all__" ? "category" : "time"}

@@ -15,6 +15,22 @@ import type { Prompt } from "./types";
 /** 搜索文本归一化：小写 + 折叠空白（让跨行的多词查询也能子串命中） */
 const norm = (s: string): string => s.toLowerCase().replace(/\s+/g, " ");
 
+/**
+ * 归一化缓存：以 Prompt 对象身份为键。每次列表刷新产生新对象 → 各自
+ * 归一化一次；同一批对象在连续击键间复用，正则折叠不再逐键重跑
+ * （旧版每次击键对全部正文重归一化，500 条 ≈ 200ms+ 的主线程热点）
+ */
+const normCache = new WeakMap<Prompt, Row>();
+
+const rowOf = (p: Prompt): Row => {
+  let row = normCache.get(p);
+  if (!row) {
+    row = { p, meta: norm(p.title + " " + p.category), body: norm(p.body) };
+    normCache.set(p, row);
+  }
+  return row;
+};
+
 interface Row {
   p: Prompt;
   /** 归一化后的元信息搜索串：标题 + 分类 */
@@ -57,12 +73,8 @@ export function filterPrompts(
     return [...prompts];
   }
 
-  // 每条 prompt 的搜索串只归一化一次（而非每个关键词算一遍）
-  const rows: Row[] = prompts.map((p) => ({
-    p,
-    meta: norm(p.title + " " + p.category),
-    body: norm(p.body),
-  }));
+  // 归一化结果走缓存：同一批 Prompt 对象在连续击键间零重算
+  const rows: Row[] = prompts.map(rowOf);
 
   // 多关键词 AND
   const terms = norm(trimmed).split(" ").filter(Boolean);
@@ -87,14 +99,22 @@ export function filterPrompts(
  * 返回命中词上下文的一行摘录（供列表展示，帮用户认出目标）。
  * 元信息能解释或正文没命中 → 返回 null（列表保持原样）。
  */
+/** 摘录用折叠文本缓存：同一对象在连续渲染间零重算 */
+const flatCache = new WeakMap<Prompt, { flat: string; flatLower: string }>();
+
 export function bodyMatchSnippet(prompt: Prompt, query: string): string | null {
   const terms = norm(query.trim()).split(" ").filter(Boolean);
   if (terms.length === 0) return null;
 
-  const meta = norm(prompt.title + " " + prompt.category);
-  // 摘录展示用折叠空白后的原文（保留大小写），索引用其小写副本定位
-  const flat = prompt.body.replace(/\s+/g, " ").trim();
-  const flatLower = flat.toLowerCase();
+  const meta = rowOf(prompt).meta;
+  let cached = flatCache.get(prompt);
+  if (!cached) {
+    // 摘录展示用折叠空白后的原文（保留大小写），索引用其小写副本定位
+    const flat = prompt.body.replace(/\s+/g, " ").trim();
+    cached = { flat, flatLower: flat.toLowerCase() };
+    flatCache.set(prompt, cached);
+  }
+  const { flat, flatLower } = cached;
 
   for (const t of terms) {
     if (meta.includes(t)) continue; // 标题/分类能解释这条结果，无需摘录

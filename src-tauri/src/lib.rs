@@ -576,14 +576,10 @@ fn save_prompt(
             e.to_string()
         }
     })?;
-    // 用新路径查找返回的 prompt（路径可能变了，必须用 new_abs）
-    let result = scan_disk(&state.local_dir)
-        .map_err(|e| e.to_string())?
-        .prompts
-        .into_iter()
-        .find(|p| p.abs_path.as_str() == new_abs.to_string_lossy().as_ref())
-        .ok_or_else(|| "保存后未能重新定位该提示词".to_string())?;
-    Ok(result)
+    // 单文件组装返回值（旧版全量 scan_disk 找单条：一次保存放大成 O(N)
+    // 递归遍历+全量解析，且全程持 IoGate 阻塞同步）
+    store::build_prompt(&state.local_dir, &new_abs, None)
+        .ok_or_else(|| "保存后未能重新定位该提示词".to_string())
 }
 
 #[tauri::command]
@@ -604,11 +600,8 @@ fn rename_prompt(
             }
         })?;
 
-    scan_disk(&state.local_dir)
-        .map_err(|e| e.to_string())?
-        .prompts
-        .into_iter()
-        .find(|p| p.abs_path.as_str() == new_abs.to_string_lossy().as_ref())
+    // 单文件组装返回值（同 save_prompt：不做全量扫描）
+    store::build_prompt(&state.local_dir, &new_abs, None)
         .ok_or_else(|| "重命名后未能定位该提示词".to_string())
 }
 
@@ -638,13 +631,8 @@ fn create_prompt(
 ) -> Result<Prompt, String> {
     let _io = begin_local_io(&state)?;
     let abs = create_prompt_disk(&state.local_dir, &category, &title).map_err(|e| e.to_string())?;
-    let rel = abs.strip_prefix(&state.local_dir).unwrap_or(&abs);
-    let rel_unix = store::path_to_unix(rel);
-    scan_disk(&state.local_dir)
-        .map_err(|e| e.to_string())?
-        .prompts
-        .into_iter()
-        .find(|p| p.path == rel_unix)
+    // 单文件组装返回值（同 save_prompt：不做全量扫描）
+    store::build_prompt(&state.local_dir, &abs, None)
         .ok_or_else(|| "新建后未能定位该提示词".to_string())
 }
 

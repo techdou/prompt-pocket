@@ -30,6 +30,9 @@ impl CloudConfig {
 pub struct WebDavStore {
     client: Client,
     root: String,
+    /// 本轮会话已确认存在的远程目录：同目录多文件上传不再逐文件重复 mkcol
+    /// （100 个同分类文件从 ~200 次请求降到 ~101 次）
+    ensured_dirs: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl WebDavStore {
@@ -49,6 +52,7 @@ impl WebDavStore {
         Ok(Self {
             client,
             root: sanitize_remote_path(&cfg.remote_root),
+            ensured_dirs: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -139,7 +143,18 @@ impl WebDavStore {
             None => return Ok(()), // 文件在根目录，无需建目录
         };
 
-        // 逐级 mkcol（忽略"已存在"错误）
+        // 整条父链已确认：直接跳过（批量上传同目录的最常见场景）
+        if self
+            .ensured_dirs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(parent)
+        {
+            return Ok(());
+        }
+
+        // 逐级 mkcol（忽略"已存在"错误）；每级确认后入缓存，
+        // 后续同目录文件零 mkcol
         let mut acc = String::new();
         for part in parent.split('/') {
             if part.is_empty() {
@@ -152,6 +167,10 @@ impl WebDavStore {
                 format!("{acc}/{part}")
             };
             let _ = self.client.mkcol(&remote_url(&self.root, &acc)).await;
+            self.ensured_dirs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(acc.clone());
         }
         Ok(())
     }
