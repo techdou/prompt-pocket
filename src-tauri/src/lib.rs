@@ -33,7 +33,10 @@ use crate::sync::{
 };
 
 const GLOBAL_HOTKEY: &str = "Ctrl+Alt+P";
-const FOCUS_RESTORE_TIMEOUT_MS: u64 = 120;
+/// 焦点回归轮询总预算：快路径（实测回归 30-50ms）就绪即返回零延迟；
+/// 慢机器/重负载应用（Chromium 系激活 100ms+）需要更宽的兜底窗口——
+/// 超时过窄会把可注入场景静默退化成纯复制
+const FOCUS_RESTORE_TIMEOUT_MS: u64 = 400;
 const FOCUS_RESTORE_POLL_MS: u64 = 10;
 const CLOUD_PASSWORD_SERVICE: &str = "com.promptpocket.webdav";
 const GITHUB_TOKEN_SERVICE: &str = "com.promptpocket.github";
@@ -1738,7 +1741,7 @@ mod tests {
         let poll_ms = FOCUS_RESTORE_POLL_MS;
         let timeout_ms = FOCUS_RESTORE_TIMEOUT_MS;
         assert!(poll_ms <= 10);
-        assert!(timeout_ms <= 120);
+        assert!(timeout_ms <= 500);
         assert!(timeout_ms >= poll_ms);
     }
 
