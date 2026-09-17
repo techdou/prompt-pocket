@@ -201,9 +201,9 @@ pub fn move_to_trash(root: &Path, abs: &Path) -> io::Result<()> {
         n += 1;
     }
     let backup_path = trash_dir.join(backup_name);
-    if fs::rename(abs, &backup_path).is_err() {
-        fs::remove_file(abs)?;
-    }
+    // 备份挪不进去（权限/占用）必须报错，绝不降级为物理删除——
+    // 否则违背"删除可从 .trash 恢复"的承诺，用户唯一副本直接丢失
+    fs::rename(abs, &backup_path)?;
     Ok(())
 }
 
@@ -585,12 +585,12 @@ pub fn save_prompt(root: &Path, abs: &Path, req: &SaveRequest) -> io::Result<Pat
     // 先写新文件（原子）。写失败时旧文件还在，用户内容不丢
     write_atomic(&final_path, content.as_bytes())?;
 
-    // 路径变了（重命名）：写成功后才删旧文件 + 记 tombstone（删除传播给同步层）
-    if final_path != abs && abs.exists() {
+    // 路径变了（重命名）：写成功后删旧文件；删除成功才记 tombstone（删除传播）。
+    // 删除失败不记——旧文件暂与新文件共存由用户处理，好过云端旧路径被误删
+    if final_path != abs && abs.exists() && fs::remove_file(abs).is_ok() {
         if let Ok(rel) = abs.strip_prefix(root) {
             let _ = record_tombstone(root, &path_to_unix(rel));
         }
-        let _ = fs::remove_file(abs);
     }
     // 重建/覆盖了该路径：清除可能存在的 tombstone
     if let Ok(rel) = final_path.strip_prefix(root) {
@@ -718,12 +718,20 @@ pub fn rename_prompt(
 
     write_atomic(&new_abs, content.as_bytes())?;
 
-    // 路径变了：写成功后才删旧文件 + 记 tombstone（让同步层把云端旧路径也删掉）
+    // 路径变了：写成功后才删旧文件；删除成功才记 tombstone（让同步层删云端旧路径）。
+    // 删除失败（占用等）不记 tombstone——旧文件暂时与新文件共存由用户处理，
+    // 好过界面看着删了、云端旧路径却在下次同步被误删
     if new_abs != old_abs {
-        if let Ok(rel) = old_abs.strip_prefix(root) {
-            let _ = record_tombstone(root, &path_to_unix(rel));
+        match fs::remove_file(old_abs) {
+            Ok(()) => {
+                if let Ok(rel) = old_abs.strip_prefix(root) {
+                    let _ = record_tombstone(root, &path_to_unix(rel));
+                }
+            }
+            Err(e) => {
+                eprintln!("[重命名] 旧文件删除失败（将与新文件共存）: {old_abs:?} {e}");
+            }
         }
-        let _ = fs::remove_file(old_abs);
     }
     // 新路径曾被删除过：清除 tombstone
     if let Ok(rel) = new_abs.strip_prefix(root) {
@@ -852,11 +860,15 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
 
 /// 删除 prompt：移入 .trash/（可恢复），并记 tombstone 让同步层传播删除。
 /// 旧版直接物理删除，用户无法找回。
+/// 顺序必须是"先移动、成功后才记账"：先记 tombstone 再移动、移动失败时
+/// 界面报错文件仍在，下次 push 却会把云端副本删掉（tombstone 已经在清单里）。
+/// 反过来"移动成功但记账失败"只是删除不传播（云端残留），残留比误删安全。
 pub fn delete_prompt(root: &Path, abs: &Path) -> io::Result<()> {
+    move_to_trash(root, abs)?;
     if let Ok(rel) = abs.strip_prefix(root) {
         let _ = record_tombstone(root, &path_to_unix(rel));
     }
-    move_to_trash(root, abs)
+    Ok(())
 }
 
 /// 把路径分隔符统一为正斜杠（用于前端跨平台一致 id）

@@ -75,11 +75,15 @@ pub trait RemoteStore {
 /// 全量拉取：把远程的文件同步到本地缓存
 /// 策略：远程为准，但尊重本地删除（tombstone）。
 /// - 远程有、本地无 → 下载；但 tombstone 命中且远程大小未变 → 跳过（防复活）
-/// - 本地有、大小不同 → 下载覆盖，覆盖前把本地旧文件备份到 .trash/
-/// - 远程没有、本地有 → 备份到 .trash 后删除（clean_local_extra）
+/// - 本地有、大小不同 → 先下临时文件，新内容完整到手才备份旧文件并替换
+/// - 远程没有、本地有 → 备份到 .trash 后删除（clean_local_extra）；
+///   列举不完整（部分目录失败）时跳过清理，避免误删未列出的文件
+/// - 下载成功后把内容指纹回写账本：随后的 push 增量判定知道"这就是远端内容"，
+///   不再整批重传刚下载的文件
 pub async fn pull_from_remote<S: RemoteStore>(
     store: &S,
     local_dir: &Path,
+    target_key: &str,
 ) -> Result<SyncReport, String> {
     // 确保远程根目录存在（GitHub 为空操作）
     let _ = store.ensure_root().await;
@@ -94,7 +98,14 @@ pub async fn pull_from_remote<S: RemoteStore>(
 
     // 远程全树：文件列表 + 非致命错误（单目录列举失败等）
     let (files, walk_errors) = store.list_all().await?;
+    // 列举完整性单独保留：errors 里还会混入下载失败等与完整性无关的条目
+    let list_incomplete = !walk_errors.is_empty();
     errors.extend(walk_errors);
+
+    // 账本按目标隔离；pull 回写下载内容的指纹
+    let mut targets = load_sync_meta_targets(local_dir);
+    let mut baseline = take_target_baseline(&mut targets, target_key);
+    let mut meta_dirty = false;
 
     for file in files {
         remote_files.insert(file.rel.clone());
@@ -127,29 +138,69 @@ pub async fn pull_from_remote<S: RemoteStore>(
         };
 
         if need_download {
-            // 覆盖前先备份本地旧文件（本地可能有未上传的修改）
-            if local_path.exists() {
-                let _ = crate::store::move_to_trash(local_dir, &local_path);
+            // 先下到临时文件：新内容完整到手才动旧文件。旧流程先备份再下载，
+            // 下载失败时原文件已被挪进 .trash，列表"消失"要靠用户翻回收目录
+            let file_name = local_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let tmp_path = local_path.with_file_name(format!("{file_name}.syncdl"));
+            if let Some(parent) = local_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
-            if let Err(e) = store.download(&file.rel, &local_path).await {
-                errors.push(format!("{}: {e}", file.rel));
-                continue;
+            match store.download(&file.rel, &tmp_path).await {
+                Ok(()) => {
+                    if local_path.exists() {
+                        if let Err(e) = crate::store::move_to_trash(local_dir, &local_path) {
+                            errors.push(format!("{}（备份旧文件失败，保持原文件不动）: {e}", file.rel));
+                            let _ = std::fs::remove_file(&tmp_path);
+                            continue;
+                        }
+                    }
+                    if let Err(e) = std::fs::rename(&tmp_path, &local_path) {
+                        errors.push(format!("{}（落盘）: {e}", file.rel));
+                        continue;
+                    }
+                    downloaded += 1;
+                    // 回写指纹：push 增量判定据此跳过未变更的刚下载文件
+                    if let Ok(content) = std::fs::read(&local_path) {
+                        baseline.insert(file.rel.clone(), fnv1a_hash(&content));
+                        meta_dirty = true;
+                    }
+                }
+                Err(e) => {
+                    errors.push(format!("{}: {e}", file.rel));
+                    let _ = std::fs::remove_file(&tmp_path);
+                }
             }
-            downloaded += 1;
         } else {
             skipped += 1;
         }
     }
 
     // 清理本地多余文件（远程已删）—— 排除 .trash
-    // 防御：如果 remote_files 为空（可能列表请求/解析失败），不执行清理，
+    // 防御 1：remote_files 为空（可能列表请求/解析失败），不执行清理，
     // 避免把本地真实文件全部误移到 .trash
+    // 防御 2：列举不完整（部分目录失败）同样不清理——未列出的文件会被误当
+    // "远程已删"整批移走，一次局部网络失败等于丢一个分类
     let mut deleted = 0u32;
-    if !remote_files.is_empty() {
-        clean_local_extra(local_dir, &remote_files, Path::new(""), &mut deleted)?;
-    } else {
-        // 远程列表为空：记录警告，让用户知道可能有连接/解析问题
+    let mut deleted_rels: Vec<String> = Vec::new();
+    if remote_files.is_empty() {
         errors.push("警告：未获取到远程文件列表，跳过本地清理（可能网络或解析问题）".to_string());
+    } else if list_incomplete {
+        errors.push("警告：远程目录部分列举失败，跳过本地清理（避免误删未列出的文件）".to_string());
+    } else {
+        clean_local_extra(local_dir, &remote_files, Path::new(""), &mut deleted, &mut deleted_rels)?;
+        for rel in &deleted_rels {
+            if baseline.remove(rel).is_some() {
+                meta_dirty = true;
+            }
+        }
+    }
+
+    if meta_dirty {
+        targets.insert(target_key.to_string(), baseline);
+        save_sync_meta_targets(local_dir, &targets);
     }
 
     Ok(SyncReport {
@@ -174,12 +225,14 @@ pub async fn pull_from_remote<S: RemoteStore>(
 pub async fn push_all_to_remote<S: RemoteStore>(
     store: &S,
     local_dir: &Path,
+    target_key: &str,
 ) -> Result<SyncReport, String> {
     // 确保远程根目录存在（GitHub 为空操作）
     let _ = store.ensure_root().await;
 
-    // 读取上次上传记录 { 路径: 哈希 }
-    let mut sync_meta: std::collections::HashMap<String, u64> = load_sync_meta(local_dir);
+    // 读取上次上传记录（按远程目标隔离的账本）
+    let mut targets = load_sync_meta_targets(local_dir);
+    let mut sync_meta = take_target_baseline(&mut targets, target_key);
 
     let mut uploaded = 0u32;
     let mut skipped = 0u32;
@@ -269,8 +322,9 @@ pub async fn push_all_to_remote<S: RemoteStore>(
         let _ = crate::store::save_tombstones(local_dir, &tombstones);
     }
 
-    // 持久化更新后的记录
-    save_sync_meta(local_dir, &sync_meta);
+    // 持久化更新后的记录（保留其他目标的账本切片一起写回）
+    targets.insert(target_key.to_string(), sync_meta);
+    save_sync_meta_targets(local_dir, &targets);
 
     Ok(SyncReport {
         uploaded,
@@ -281,21 +335,78 @@ pub async fn push_all_to_remote<S: RemoteStore>(
     })
 }
 
-/// 读取 .sync_meta.json（记录每个文件上次上传时的内容哈希）
-fn load_sync_meta(local_dir: &Path) -> std::collections::HashMap<String, u64> {
-    let path = local_dir.join(".sync_meta.json");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+/// 远程目标标识：账本按目标隔离——切后端 / 换仓库 / 换远程目录各自独立基线，
+/// 否则 A 目标的上传记录会让 B 目标误跳过未上传的文件（切换后显示"完成"实则缺文件），
+/// 删除记录也会被第一个消费的目标顺手带走
+pub fn target_key_webdav(cfg: &CloudConfig) -> String {
+    format!(
+        "webdav:{}@{}",
+        cfg.username,
+        cfg.remote_root.trim_matches('/')
+    )
 }
 
-/// 写入 .sync_meta.json（原子写，防同步中断留下半截 JSON）
-fn save_sync_meta(local_dir: &Path, meta: &std::collections::HashMap<String, u64>) {
-    let path = local_dir.join(".sync_meta.json");
-    if let Ok(json) = serde_json::to_string_pretty(meta) {
+pub fn target_key_github(cfg: &GitHubConfig) -> String {
+    format!(
+        "github:{}@{}:{}",
+        cfg.repo,
+        cfg.branch,
+        cfg.prefix.trim_matches('/')
+    )
+}
+
+/// 账本文件名（v2.3 起结构升级：按远程目标分命名空间）
+const SYNC_META_FILE: &str = ".sync_meta.json";
+/// 旧版（≤v2.2.1）平铺账本的收编标记
+const LEGACY_TARGET: &str = "__legacy__";
+
+type SyncMetaTargets = std::collections::HashMap<String, std::collections::HashMap<String, u64>>;
+
+/// 读取账本全量目标表。
+/// 兼容旧平铺格式 `{rel: hash}`（无法归属目标）：整体标记为 __legacy__，
+/// 由 take_target_baseline 收编进首个发起同步的目标（单后端用户无缝迁移）
+fn load_sync_meta_targets(local_dir: &Path) -> SyncMetaTargets {
+    let path = local_dir.join(SYNC_META_FILE);
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return Default::default();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) else {
+        return Default::default();
+    };
+    let Some(obj) = v.as_object() else {
+        return Default::default();
+    };
+    if !obj.is_empty() && obj.values().all(|x| x.is_number()) {
+        // 旧平铺格式
+        let legacy = obj
+            .iter()
+            .filter_map(|(k, v)| v.as_u64().map(|h| (k.clone(), h)))
+            .collect();
+        let mut m = SyncMetaTargets::new();
+        m.insert(LEGACY_TARGET.to_string(), legacy);
+        return m;
+    }
+    serde_json::from_value(v).unwrap_or_default()
+}
+
+/// 写入账本（原子写，防同步中断留下半截 JSON）
+fn save_sync_meta_targets(local_dir: &Path, targets: &SyncMetaTargets) {
+    let path = local_dir.join(SYNC_META_FILE);
+    if let Ok(json) = serde_json::to_string_pretty(targets) {
         let _ = crate::store::write_atomic(&path, json.as_bytes());
     }
+}
+
+/// 取出目标自己的基线；目标无记录但存在旧格式数据时收编之
+/// （多后端用户首次切换会多传一轮，正确性优先于这一次冗余）
+fn take_target_baseline(
+    targets: &mut SyncMetaTargets,
+    target_key: &str,
+) -> std::collections::HashMap<String, u64> {
+    if let Some(m) = targets.remove(target_key) {
+        return m;
+    }
+    targets.remove(LEGACY_TARGET).unwrap_or_default()
 }
 
 /// FNV-1a 64 位哈希（轻量内容指纹，无外部依赖，对内容任何变化敏感）
@@ -329,6 +440,7 @@ fn clean_local_extra(
     remote_files: &HashSet<String>,
     current_rel: &Path,
     deleted: &mut u32,
+    deleted_rels: &mut Vec<String>,
 ) -> Result<(), String> {
     let scan_dir = if current_rel.as_os_str().is_empty() {
         local_dir.to_path_buf()
@@ -352,7 +464,7 @@ fn clean_local_extra(
 
         if path.is_dir() {
             let sub_rel = current_rel.join(&name);
-            clean_local_extra(local_dir, remote_files, &sub_rel, deleted)?;
+            clean_local_extra(local_dir, remote_files, &sub_rel, deleted, deleted_rels)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
             let rel_unix = path
                 .strip_prefix(local_dir)
@@ -363,6 +475,8 @@ fn clean_local_extra(
                 // 共用同一实现（含同秒同名备份的防覆盖序号）
                 let _ = crate::store::move_to_trash(local_dir, &path);
                 *deleted += 1;
+                // 上报删除清单：调用方据此同步清理账本记录
+                deleted_rels.push(rel_unix);
             }
         }
     }
@@ -390,7 +504,8 @@ mod tests {
         // remote_files 为空（远程没有任何文件），clean 应该只清理真实文件，不动 .trash
         let mut deleted = 0u32;
         let remote_files: HashSet<String> = HashSet::new();
-        clean_local_extra(&dir, &remote_files, std::path::Path::new(""), &mut deleted).unwrap();
+        let mut deleted_rels: Vec<String> = Vec::new();
+        clean_local_extra(&dir, &remote_files, std::path::Path::new(""), &mut deleted, &mut deleted_rels).unwrap();
 
         // 真实文件被移到 .trash（删除计数 +1）
         assert_eq!(deleted, 1, "应只删除 1 个真实文件");
@@ -416,7 +531,8 @@ mod tests {
         remote_files.insert("写作/保留.md".to_string());
 
         let mut deleted = 0u32;
-        clean_local_extra(&dir, &remote_files, std::path::Path::new(""), &mut deleted).unwrap();
+        let mut deleted_rels: Vec<String> = Vec::new();
+        clean_local_extra(&dir, &remote_files, std::path::Path::new(""), &mut deleted, &mut deleted_rels).unwrap();
 
         assert_eq!(deleted, 0, "远程存在的文件不应被删除");
         assert!(dir.join("写作").join("保留.md").exists(), "文件应保留");
@@ -434,22 +550,34 @@ mod tests {
         assert_ne!(h1, h3, "不同内容应有不同哈希");
     }
 
-    /// 验证 .sync_meta.json 的读写
+    /// 账本按目标隔离读写；旧平铺格式迁移收编进首个同步目标
     #[test]
-    fn sync_meta_roundtrip() {
-        let dir = std::env::temp_dir().join("pp_test_sync_meta");
+    fn sync_meta_targets_isolation_and_legacy_migration() {
+        let dir = std::env::temp_dir().join("pp_test_sync_meta_v2");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let mut meta: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        meta.insert("写作/a.md".to_string(), 12345);
-        meta.insert("编程/b.md".to_string(), 67890);
-        save_sync_meta(&dir, &meta);
+        // 旧平铺格式（v≤2.2.1）
+        std::fs::write(dir.join(".sync_meta.json"), r#"{"写作/a.md": 12345}"#).unwrap();
+        let mut targets = load_sync_meta_targets(&dir);
+        let baseline = take_target_baseline(&mut targets, "webdav:u@root");
+        assert_eq!(baseline.get("写作/a.md"), Some(&12345), "旧格式应收编进当前目标");
 
-        let loaded = load_sync_meta(&dir);
-        assert_eq!(loaded.get("写作/a.md"), Some(&12345));
-        assert_eq!(loaded.get("编程/b.md"), Some(&67890));
-        assert!(dir.join(".sync_meta.json").exists());
+        // 写入两个目标，各自隔离
+        let mut b1 = baseline;
+        b1.insert("x.md".to_string(), 1);
+        targets.insert("webdav:u@root".to_string(), b1);
+        let mut b2 = std::collections::HashMap::new();
+        b2.insert("y.md".to_string(), 2);
+        targets.insert("github:r@main".to_string(), b2);
+        save_sync_meta_targets(&dir, &targets);
+
+        let re = load_sync_meta_targets(&dir);
+        assert!(re.contains_key("webdav:u@root") && re.contains_key("github:r@main"));
+        // 第二个目标取不到第一个目标的基线
+        let mut re2 = re.clone();
+        let b = take_target_baseline(&mut re2, "github:r@main");
+        assert!(!b.contains_key("x.md"));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -476,5 +604,183 @@ mod tests {
         // 排序白名单：要双向同步，不能当隐藏文件过滤掉
         assert!(!is_trash_or_hidden_rel(".order.json"));
         assert!(!is_trash_or_hidden_rel(".category-order.json"));
+    }
+
+    /// 内存版 RemoteStore：验证同步算法（pull 回写 / 目标隔离 / 清理门 / 下载失败）
+    struct MockStore {
+        files: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+        list_errors: Vec<String>,
+        /// 匹配该 rel 的下载直接失败（模拟网络中断）
+        fail_download: Option<String>,
+        uploads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockStore {
+        fn new() -> Self {
+            Self {
+                files: std::sync::Mutex::new(Default::default()),
+                list_errors: Vec::new(),
+                fail_download: None,
+                uploads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl RemoteStore for MockStore {
+        async fn list_all(&self) -> Result<(Vec<RemoteFile>, Vec<String>), String> {
+            let files = self.files.lock().unwrap();
+            Ok((
+                files
+                    .iter()
+                    .map(|(rel, c)| RemoteFile {
+                        rel: rel.clone(),
+                        content_length: c.len() as i64,
+                    })
+                    .collect(),
+                self.list_errors.clone(),
+            ))
+        }
+        async fn download(&self, rel: &str, local_path: &Path) -> Result<(), String> {
+            if self.fail_download.as_deref() == Some(rel) {
+                return Err("mock download failure".to_string());
+            }
+            let files = self.files.lock().unwrap();
+            match files.get(rel) {
+                Some(c) => std::fs::write(local_path, c).map_err(|e| e.to_string()),
+                None => Err("404".to_string()),
+            }
+        }
+        async fn upload(&self, rel: &str, content: Vec<u8>) -> Result<(), String> {
+            self.uploads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.files.lock().unwrap().insert(rel.to_string(), content);
+            Ok(())
+        }
+        async fn delete(&self, rel: &str) -> Result<(), String> {
+            self.files.lock().unwrap().remove(rel);
+            Ok(())
+        }
+        async fn test(&self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(f)
+    }
+
+    /// pull 下载的内容回写账本：pull 完立即 push 不应整批重传（#7）
+    #[test]
+    fn pull_then_push_skips_unchanged() {
+        let a = std::env::temp_dir().join("pp_test_pull_push_a");
+        let b = std::env::temp_dir().join("pp_test_pull_push_b");
+        for d in [&a, &b] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::create_dir_all(a.join("cat")).unwrap();
+        std::fs::write(a.join("cat").join("x.md"), "hello").unwrap();
+
+        let store = MockStore::new();
+        let key = "webdav:u@root";
+        block_on(push_all_to_remote(&store, &a, key)).unwrap();
+        let n1 = store.uploads.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(n1, 1, "首轮 push 应上传 1 个文件");
+
+        // 设备 B 拉取，然后立即回推——账本已回写，不应重传
+        block_on(pull_from_remote(&store, &b, key)).unwrap();
+        block_on(push_all_to_remote(&store, &b, key)).unwrap();
+        let n2 = store.uploads.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(n2, n1, "pull 回写账本后，未变更文件不应重复上传");
+
+        for d in [&a, &b] {
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    /// 账本按远程目标隔离：换目标后同批文件重新全量上传（#8）
+    #[test]
+    fn push_targets_are_isolated() {
+        let dir = std::env::temp_dir().join("pp_test_push_isolated");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cat")).unwrap();
+        std::fs::write(dir.join("cat").join("x.md"), "hello").unwrap();
+
+        let store = MockStore::new();
+        block_on(push_all_to_remote(&store, &dir, "webdav:u@root")).unwrap();
+        let n1 = store.uploads.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(n1, 1);
+
+        // 换目标（GitHub）：新基线为空，同批文件应重新上传
+        block_on(push_all_to_remote(&store, &dir, "github:r@main")).unwrap();
+        let n2 = store.uploads.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(n2, 2, "目标隔离：新目标应有自己独立的基线");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 列举不完整（部分目录失败）时禁止本地清理（#2）
+    #[test]
+    fn pull_with_partial_listing_keeps_local() {
+        let dir = std::env::temp_dir().join("pp_test_pull_partial");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cat")).unwrap();
+        std::fs::write(dir.join("cat").join("keep.md"), "old").unwrap();
+
+        let mut store = MockStore::new();
+        store
+            .files
+            .lock()
+            .unwrap()
+            .insert("cat/remote.md".to_string(), b"remote".to_vec());
+        store.list_errors = vec!["some-dir 列举失败".to_string()];
+
+        let report = block_on(pull_from_remote(&store, &dir, "webdav:u@root")).unwrap();
+        assert!(
+            dir.join("cat").join("keep.md").exists(),
+            "列举不完整时本地文件不得被清理"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("跳过本地清理")),
+            "应有清理跳过警告: {:?}",
+            report.errors
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 下载失败时本地原文件原位不动、无临时文件残留（#1 临时文件流程）
+    #[test]
+    fn pull_download_failure_keeps_original() {
+        let dir = std::env::temp_dir().join("pp_test_pull_dlfail");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("cat")).unwrap();
+        std::fs::write(dir.join("cat").join("x.md"), "old-content").unwrap();
+
+        let mut store = MockStore::new();
+        // 远端同路径放不同长度的内容，触发 need_download
+        store
+            .files
+            .lock()
+            .unwrap()
+            .insert("cat/x.md".to_string(), b"new-remote-content".to_vec());
+        store.fail_download = Some("cat/x.md".to_string());
+
+        block_on(pull_from_remote(&store, &dir, "webdav:u@root")).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cat").join("x.md")).unwrap(),
+            "old-content",
+            "下载失败时原文件必须原位未动"
+        );
+        assert!(
+            !dir.join("cat").join("x.md.syncdl").exists(),
+            "临时文件应被清理"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

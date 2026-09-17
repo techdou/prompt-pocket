@@ -1095,12 +1095,16 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     let _guard = SyncGuard::acquire(&state.io_gate)?;
     let result = match provider {
         SyncProvider::WebDav => {
-            let store = WebDavStore::new(&state.cloud_config())?;
-            push_all_to_remote(&store, &state.local_dir).await
+            let cfg = state.cloud_config();
+            let store = WebDavStore::new(&cfg)?;
+            let target = sync::target_key_webdav(&cfg);
+            push_all_to_remote(&store, &state.local_dir, &target).await
         }
         SyncProvider::GitHub => {
-            let store = GitHubStore::new(&state.github_config())?;
-            push_all_to_remote(&store, &state.local_dir).await
+            let cfg = state.github_config();
+            let store = GitHubStore::new(&cfg)?;
+            let target = sync::target_key_github(&cfg);
+            push_all_to_remote(&store, &state.local_dir, &target).await
         }
     };
     match result {
@@ -1145,12 +1149,16 @@ async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     let _guard = SyncGuard::acquire(&state.io_gate)?;
     let result = match provider {
         SyncProvider::WebDav => {
-            let store = WebDavStore::new(&state.cloud_config())?;
-            sync::pull_from_remote(&store, &state.local_dir).await
+            let cfg = state.cloud_config();
+            let store = WebDavStore::new(&cfg)?;
+            let target = sync::target_key_webdav(&cfg);
+            sync::pull_from_remote(&store, &state.local_dir, &target).await
         }
         SyncProvider::GitHub => {
-            let store = GitHubStore::new(&state.github_config())?;
-            sync::pull_from_remote(&store, &state.local_dir).await
+            let cfg = state.github_config();
+            let store = GitHubStore::new(&cfg)?;
+            let target = sync::target_key_github(&cfg);
+            sync::pull_from_remote(&store, &state.local_dir, &target).await
         }
     };
     match result {
