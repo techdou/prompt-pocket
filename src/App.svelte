@@ -42,6 +42,7 @@
   import {
     createTranslator,
     getStoredLanguage,
+    mapBackendMessage,
     nextLanguage,
     setStoredLanguage,
     type Language,
@@ -95,6 +96,7 @@
 
   // 统一错误提示：显示后 5 秒自动消失，不阻塞 UI
   function showError(msg: string) {
+    msg = mapBackendMessage(msg, t);
     error = msg;
     setTimeout(() => {
       if (error === msg) error = null;
@@ -1061,7 +1063,13 @@
             class="sync-indicator"
             class:syncing={syncStatus.syncing}
             class:error={!!syncStatus.lastError}
-            title={syncStatus.lastError || syncStatus.lastSync || t("app.syncConnected")}
+            title={
+              syncStatus.lastError ||
+              (syncStatus.lastSync
+                ? mapBackendMessage(syncStatus.lastSync, t)
+                : "") ||
+              t("app.syncConnected")
+            }
             aria-label={t("app.syncStatusAria")}
             onclick={() => (settingsOpen = true)}
           ><span class="sync-dot" aria-hidden="true"></span></button>

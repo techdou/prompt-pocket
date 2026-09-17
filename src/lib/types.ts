@@ -89,3 +89,13 @@ export interface SaveRequest {
   /** 目标分类：与当前目录不同则保存时移动文件（serde camelCase → category） */
   category?: string;
 }
+
+/** 同步一次执行的统计（Rust SyncReport 结构化返回，文案由前端 i18n 拼装） */
+export interface SyncReport {
+  downloaded: number;
+  skipped: number;
+  deleted: number;
+  uploaded: number;
+  deletedRemote: number;
+  errors: string[];
+}

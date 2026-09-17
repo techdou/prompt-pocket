@@ -27,6 +27,11 @@ const zh = {
   "app.renameCategoryAction": "重命名分类",
   "app.resizeWindow": "调整窗口大小：{edge}",
 
+  "app.syncInProgress": "正在同步中，请稍候再编辑",
+  "app.syncNotConfigured": "同步未配置：请在设置页填写账号 / 仓库信息",
+  "app.lastUploaded": "上次上传：{n} 个文件",
+  "app.lastDownloaded": "上次下载：更新 {u}，跳过 {s}，清理 {d}",
+
   "common.cancel": "取消",
   "common.close": "关闭",
   "common.confirm": "确定",
@@ -121,6 +126,11 @@ const zh = {
   "settings.manualSync": "手动同步",
   "settings.uploading": "上传中...",
   "settings.upload": "↑ 上传到{target}",
+
+  "settings.syncUploaded": "上传完成：{n} 个文件",
+  "settings.syncDeletedRemote": "云端删除 {n} 个",
+  "settings.syncFailedCount": "{n} 个失败",
+  "settings.syncDownloaded": "下载完成：更新 {u}，跳过 {s}，清理 {d}",
   "settings.downloading": "下载中...",
   "settings.download": "↓ 下载到本地",
   "settings.syncHint": "上传：本地文件推送到远端并传播删除。下载：远端覆盖本地（覆盖前备份到 .trash）。",
@@ -161,6 +171,11 @@ const en: Record<keyof typeof zh, string> = {
   "app.newCategoryName": "New category name",
   "app.renameCategoryAction": "Rename category",
   "app.resizeWindow": "Resize window: {edge}",
+
+  "app.syncInProgress": "A sync is in progress — try again in a moment",
+  "app.syncNotConfigured": "Sync is not configured (see Settings)",
+  "app.lastUploaded": "Last upload: {n} file(s)",
+  "app.lastDownloaded": "Last download: {u} updated, {s} skipped, {d} cleaned",
 
   "common.cancel": "Cancel",
   "common.close": "Close",
@@ -256,6 +271,11 @@ const en: Record<keyof typeof zh, string> = {
   "settings.manualSync": "Manual sync",
   "settings.uploading": "Uploading...",
   "settings.upload": "↑ Upload to {target}",
+
+  "settings.syncUploaded": "Uploaded {n} file(s)",
+  "settings.syncDeletedRemote": "{n} deleted remotely",
+  "settings.syncFailedCount": "{n} failed",
+  "settings.syncDownloaded": "Download: {u} updated, {s} skipped, {d} cleaned",
   "settings.downloading": "Downloading...",
   "settings.download": "↓ Download to local",
   "settings.syncHint": "Upload pushes local files to the remote and propagates deletions. Download lets the remote overwrite local files (overwritten files are backed up to .trash first).",
@@ -358,4 +378,19 @@ export function translate(
 
 export function createTranslator(language: Language): Translator {
   return (key, values) => translate(language, key, values);
+}
+
+
+/**
+ * 后端错误/状态码 → 本地化文案。后端只回码（SYNC_IN_PROGRESS 等），
+ * 展示文案由前端按当前语言拼装；未匹配的原文返回（文件级错误详情等）
+ */
+export function mapBackendMessage(raw: string, t: Translator): string {
+  if (raw === "SYNC_IN_PROGRESS") return t("app.syncInProgress");
+  if (raw === "SYNC_NOT_CONFIGURED") return t("app.syncNotConfigured");
+  const up = raw.match(/^SYNC_UPLOADED:(\d+)$/);
+  if (up) return t("app.lastUploaded", { n: up[1] });
+  const dl = raw.match(/^SYNC_DOWNLOADED:(\d+)\/(\d+)\/(\d+)$/);
+  if (dl) return t("app.lastDownloaded", { u: dl[1], s: dl[2], d: dl[3] });
+  return raw;
 }

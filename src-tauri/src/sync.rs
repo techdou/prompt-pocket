@@ -33,7 +33,8 @@ pub struct SyncStatus {
     pub syncing: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncReport {
     pub downloaded: u32,
     pub skipped: u32,
@@ -53,7 +54,9 @@ pub struct RemoteFile {
 /// 远程存储传输层：同步算法（pull/push 对账）只面向这个 trait 编程。
 /// WebDAV 与 GitHub 各自实现；后端差异（建目录、路径编码、404 语义）
 /// 全部收敛在实现内部，算法层无感知。
-pub trait RemoteStore {
+// Send + Sync：tauri 命令层把 store 跨 await 持有，泛型 future 必须
+// 可证跨线程安全，否则命令宏以「unsatisfied trait bounds」拒绝编译
+pub trait RemoteStore: Send + Sync {
     /// 列出远程全部文件，返回 (文件列表, 非致命错误列表)。
     /// WebDAV 逐层列举，允许单个目录失败（记入错误列表继续）；
     /// GitHub Trees 一次请求拿全树，失败只能整体 Err。
@@ -110,7 +113,10 @@ pub async fn pull_from_remote<S: RemoteStore>(
     for file in files {
         remote_files.insert(file.rel.clone());
 
-        let local_path = local_dir.join(&file.rel);
+        let Some(local_path) = safe_join(local_dir, &file.rel) else {
+            errors.push(format!("{}（非法远程路径，跳过）", file.rel));
+            continue;
+        };
         let local_size = std::fs::metadata(&local_path).ok().map(|m| m.len() as i64);
 
         // tombstone 判定：本地曾主动删除该文件
@@ -264,7 +270,9 @@ pub async fn push_all_to_remote<S: RemoteStore>(
 
         let is_md = ext == Some("md");
         let is_order = name == crate::store::ORDER_FILE || name == crate::store::CATEGORY_ORDER_FILE;
-        if !is_md && !is_order {
+        // 空分类占位文件随同步传输（跨设备保留分类骨架）
+        let is_keep = name == ".gitkeep";
+        if !is_md && !is_order && !is_keep {
             continue;
         }
         if name.starts_with('~') {
@@ -419,12 +427,35 @@ fn fnv1a_hash(data: &[u8]) -> u64 {
     hash
 }
 
+/// 同步层的受限路径拼接：远程相对路径先做词法校验——拒绝反斜杠、盘符
+/// 冒号和 `..` 越界段，杜绝异常/被投毒的远端路径把写盘目标逃逸出数据目录
+/// （命令层有 resolve_abs，同步层此前直接 join，是校验缺口）
+pub(crate) fn safe_join(local_dir: &Path, rel: &str) -> Option<std::path::PathBuf> {
+    const BS: char = '\\';
+    if rel.contains(BS) || rel.contains(':') {
+        return None;
+    }
+    let mut out = local_dir.to_path_buf();
+    for seg in rel.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => return None,
+            s => out.push(s),
+        }
+    }
+    Some(out)
+}
+
 /// 判断相对路径是否落在 .trash 或任意隐藏目录下（不参与同步）。
 /// 例外放行：排序文件 .order.json / .category-order.json 要双向同步——
 /// 旧版把 `.` 开头全部过滤，导致排序文件上传后任何设备都拉不回来。
 pub(crate) fn is_trash_or_hidden_rel(rel: &str) -> bool {
     // 根目录下的排序白名单文件：放行
     if rel == crate::store::ORDER_FILE || rel == crate::store::CATEGORY_ORDER_FILE {
+        return false;
+    }
+    // 空分类占位文件：放行（分类目录下的 .gitkeep 要随同步传输）
+    if rel.split('/').next_back() == Some(".gitkeep") {
         return false;
     }
     rel.split('/')

@@ -8,6 +8,7 @@ import type {
   SaveRequest,
   ScanResult,
   SyncStatus,
+  SyncReport,
 } from "./types";
 
 // 后端实际形状：Rust 结构体全部 serde(rename_all = "camelCase")，
@@ -215,13 +216,13 @@ export async function setSyncProvider(provider: string): Promise<void> {
 }
 
 /** 全量上传到当前后端（坚果云 / GitHub，按 provider 分派） */
-export async function uploadAll(): Promise<string> {
-  return invoke<string>("upload_all");
+export async function uploadAll(): Promise<SyncReport> {
+  return invoke<SyncReport>("upload_all");
 }
 
 /** 从当前后端全量下载并覆盖本地（覆盖前备份 .trash） */
-export async function downloadAll(): Promise<string> {
-  return invoke<string>("download_all");
+export async function downloadAll(): Promise<SyncReport> {
+  return invoke<SyncReport>("download_all");
 }
 
 export async function openUrl(url: string): Promise<void> {

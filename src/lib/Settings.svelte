@@ -3,6 +3,7 @@
   import type { CloudConfigView, SyncStatus } from "./types";
   import {
     createTranslator,
+    mapBackendMessage,
     type Language,
     type Translator,
   } from "./i18n";
@@ -304,8 +305,13 @@
     transferring = "upload";
     message = null;
     try {
-      const result = await uploadAll();
-      message = { type: "ok", text: "↑ " + result };
+      const r = await uploadAll();
+      const parts = [t("settings.syncUploaded", { n: String(r.uploaded) })];
+      if (r.deletedRemote > 0)
+        parts.push(t("settings.syncDeletedRemote", { n: String(r.deletedRemote) }));
+      if (r.errors.length > 0)
+        parts.push(t("settings.syncFailedCount", { n: String(r.errors.length) }));
+      message = { type: "ok", text: "↑ " + parts.join("，") };
       await refreshStatus();
       onsynced();
     } catch (e) {
@@ -320,8 +326,20 @@
     transferring = "download";
     message = null;
     try {
-      const result = await downloadAll();
-      message = { type: "ok", text: "↓ " + result };
+      const r = await downloadAll();
+      message = {
+        type: "ok",
+        text:
+          "↓ " +
+          t("settings.syncDownloaded", {
+            u: String(r.downloaded),
+            s: String(r.skipped),
+            d: String(r.deleted),
+          }) +
+          (r.errors.length > 0
+            ? "，" + t("settings.syncFailedCount", { n: String(r.errors.length) })
+            : ""),
+      };
       await refreshStatus();
       onsynced();
     } catch (e) {
@@ -434,7 +452,7 @@
             {:else if status.lastError}
               <span class="dot err-dot"></span> {t("settings.statusError")}
             {:else if status.lastSync}
-              <span class="dot ok-dot"></span> {status.lastSync}
+              <span class="dot ok-dot"></span> {mapBackendMessage(status.lastSync, t)}
             {:else}
               <span class="dot off-dot"></span> {t("settings.statusWaiting")}
             {/if}

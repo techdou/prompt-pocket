@@ -45,7 +45,11 @@ const GITHUB_TOKEN_SERVICE: &str = "com.promptpocket.github";
 #[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
 struct PersistedConfig {
     username: Option<String>,
-    #[serde(default, skip_serializing)]
+    /// 仅作手改配置文件的兜底通道；正常由系统凭据库接管后清出 JSON（不落明文）。
+    /// 用 skip_serializing_if 而非 skip_serializing：迁移期间另一后端的明文
+    /// 仍处于未迁移状态时，配置重写必须把它带回磁盘——skip_serializing 会
+    /// 静默剥掉字段，让后迁移的一侧永远读不到自己的明文（凭据丢失）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     password: Option<String>,
     remote_root: Option<String>,
     enabled: Option<bool>,
@@ -58,7 +62,8 @@ struct PersistedConfig {
     gh_branch: Option<String>,
     gh_prefix: Option<String>,
     /// 仅作手改配置文件的兜底通道；正常由系统凭据库接管后清出 JSON（不落明文）
-    #[serde(default, skip_serializing)]
+    /// 仅作手改配置文件的兜底通道；正常由系统凭据库接管后清出 JSON（不落明文）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     gh_token: Option<String>,
 }
 
@@ -226,7 +231,7 @@ fn begin_local_io(state: &AppState) -> Result<LocalIoPermit<'_>, String> {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     if guard.syncing {
-        return Err("正在同步中，请稍候再编辑".to_string());
+        return Err("SYNC_IN_PROGRESS".to_string());
     }
     Ok(LocalIoPermit { _guard: guard })
 }
@@ -244,7 +249,7 @@ impl<'a> SyncGuard<'a> {
         // 毒锁恢复（into_inner）：写命令 panic 中断同步不应让后续同步永久失灵
         let mut guard = gate.lock().unwrap_or_else(|e| e.into_inner());
         if guard.syncing {
-            return Err("正在同步中，请稍候".to_string());
+            return Err("SYNC_IN_PROGRESS".to_string());
         }
         guard.syncing = true;
         drop(guard);
@@ -1078,15 +1083,15 @@ fn set_sync_provider(provider: String, state: tauri::State<'_, AppState>) -> Res
 
 /// 全量上传：本地所有文件推送到当前后端（坚果云 / GitHub）+ 删除传播（tombstone）
 #[tauri::command]
-async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
+async fn upload_all(app: tauri::AppHandle) -> Result<sync::SyncReport, String> {
     let state = app.state::<AppState>();
     let provider = state.provider();
     match provider {
         SyncProvider::WebDav if !state.cloud_config().is_configured() => {
-            return Err("未配置坚果云同步".to_string());
+            return Err("SYNC_NOT_CONFIGURED".to_string());
         }
         SyncProvider::GitHub if !state.github_config().is_configured() => {
-            return Err("未配置 GitHub 存档（需仓库和 PAT）".to_string());
+            return Err("SYNC_NOT_CONFIGURED".to_string());
         }
         _ => {}
     }
@@ -1109,20 +1114,17 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     };
     match result {
         Ok(report) => {
-            let mut msg = format!("上传完成：共 {} 个文件", report.uploaded);
-            if report.deleted_remote > 0 {
-                msg.push_str(&format!("，云端删除 {}", report.deleted_remote));
-            }
+            // 文案拼装在前端 i18n（英文界面不得穿帮中文）；last_sync 同理存码
             if !report.errors.is_empty() {
-                msg.push_str(&format!("，{} 个失败", report.errors.len()));
                 *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(report.errors.join("; "));
             } else {
                 *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
-            *state.last_sync.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
+            *state.last_sync.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(format!("SYNC_UPLOADED:{}", report.uploaded));
             let _ = app.emit("sync-finished", ());
-            Ok(msg)
+            Ok(report)
         }
         Err(e) => {
             *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.clone());
@@ -1133,15 +1135,15 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
 
 /// 全量下载：从当前后端拉取并覆盖本地（覆盖前备份 .trash，tombstone 防复活）
 #[tauri::command]
-async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
+async fn download_all(app: tauri::AppHandle) -> Result<sync::SyncReport, String> {
     let state = app.state::<AppState>();
     let provider = state.provider();
     match provider {
         SyncProvider::WebDav if !state.cloud_config().is_configured() => {
-            return Err("未配置坚果云同步".to_string());
+            return Err("SYNC_NOT_CONFIGURED".to_string());
         }
         SyncProvider::GitHub if !state.github_config().is_configured() => {
-            return Err("未配置 GitHub 存档（需仓库和 PAT）".to_string());
+            return Err("SYNC_NOT_CONFIGURED".to_string());
         }
         _ => {}
     }
@@ -1163,20 +1165,19 @@ async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     };
     match result {
         Ok(report) => {
-            let mut msg = format!(
-                "下载完成：更新 {}，跳过 {}，清理 {}",
-                report.downloaded, report.skipped, report.deleted
-            );
+            // 文案拼装在前端 i18n；last_sync 存码由前端翻译展示
             if !report.errors.is_empty() {
-                msg.push_str(&format!("，{} 个失败", report.errors.len()));
                 *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
                     Some(report.errors.join("; "));
             } else {
                 *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
-            *state.last_sync.lock().unwrap_or_else(|e| e.into_inner()) = Some(msg.clone());
+            *state.last_sync.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!(
+                "SYNC_DOWNLOADED:{}/{}/{}",
+                report.downloaded, report.skipped, report.deleted
+            ));
             let _ = app.emit("sync-finished", ());
-            Ok(msg)
+            Ok(report)
         }
         Err(e) => {
             *state.last_error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e.clone());
@@ -1516,8 +1517,8 @@ pub fn run() {
             }
 
             // 系统托盘：左键单击 toggle 窗口；右键菜单提供「显示 / 退出」
-            let show_item = MenuItem::with_id(app, "show", "显示主界面", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let show_item = MenuItem::with_id(app, "show", "显示主界面 · Show", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出 · Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
             let mut tray_builder = TrayIconBuilder::with_id("tray-main").tooltip("Prompt Pocket");
             if let Some(icon) = app.default_window_icon().cloned() {
@@ -1759,8 +1760,11 @@ mod tests {
     }
 
     #[test]
-    fn persisted_cloud_config_never_serializes_password() {
-        let persisted = PersistedConfig {
+    fn persisted_config_migration_keeps_pending_secret_and_omits_cleared() {
+        // 迁移期间（password/gh_token 仍为 Some）：配置重写必须把未迁移一侧的
+        // 明文带回磁盘——skip_serializing 会静默剥字段，让后迁移的一侧丢凭据。
+        // 迁移完成（清成 None）后字段自然省略，最终态不落明文
+        let pending = PersistedConfig {
             username: Some("user@example.com".into()),
             password: Some("secret-app-password".into()),
             gh_token: Some("ghp_secret-token".into()),
@@ -1768,9 +1772,17 @@ mod tests {
             enabled: Some(true),
             ..Default::default()
         };
+        let json = serde_json::to_string(&pending).unwrap();
+        assert!(json.contains("secret-app-password"), "未迁移明文必须保留写回");
+        assert!(json.contains("ghp_secret-token"), "另一后端未迁移的 token 不得被剥掉");
 
-        let json = serde_json::to_string(&persisted).unwrap();
-
+        // 清理完成后的最终态：两个字段都不出现
+        let cleared = PersistedConfig {
+            password: None,
+            gh_token: None,
+            ..pending
+        };
+        let json = serde_json::to_string(&cleared).unwrap();
         assert!(!json.contains("secret-app-password"));
         assert!(!json.contains("\"password\""));
         assert!(!json.contains("ghp_secret-token"));

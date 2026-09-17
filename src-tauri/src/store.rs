@@ -110,13 +110,14 @@ pub fn parse_markdown(content: &str) -> (PromptMeta, String) {
     if let Some(rest) = body_start {
         if let Some(end) = find_frontmatter_end(rest) {
             let fm_raw = &rest[..end];
-            // 精确剥离闭合的 `---` 分隔符一次。不能用 trim_start_matches：
-            // 它会贪婪吞掉正文开头多余的前导短横线（"---- 数据" 丢 3 个字符，
-            // 手写文件里闭合符后紧跟水平线 `---` 会整行丢失）
+            // 精确剥离闭合的 `---` 分隔符一次 + 序列化写入的固定分隔换行。
+            // 不能贪婪 trim：会吞掉正文首行的缩进（四空格代码块）和作者
+            // 保留的前导空行。serialize 端格式恒为 "---\n\n{body}"，
+            // 这里至多剥两个换行（\r\n 算一个），正文自身空白原样保留
             let after_fence = rest[end..]
                 .strip_prefix("---")
-                .unwrap_or(&rest[end..])
-                .trim_start_matches(['\n', '\r', ' ']);
+                .unwrap_or(&rest[end..]);
+            let after_fence = strip_one_newline(strip_one_newline(after_fence));
             let body = after_fence.to_string();
             let mut meta = parse_yaml_frontmatter(fm_raw);
             // 保留原始 created（解析到的），updated 留待保存时刷新
@@ -131,13 +132,45 @@ pub fn parse_markdown(content: &str) -> (PromptMeta, String) {
     (PromptMeta::default(), trimmed.to_string())
 }
 
+/// 剥掉行首的一个换行（\n / \r / \r\n 任一形态）
+fn strip_one_newline(s: &str) -> &str {
+    s.strip_prefix("\r\n")
+        .or_else(|| s.strip_prefix('\n'))
+        .or_else(|| s.strip_prefix('\r'))
+        .unwrap_or(s)
+}
+
 /// 在 frontmatter 内容中寻找闭合分隔符 `---` 所在的字符偏移。
+/// YAML 块标量（`key: |` / `key: >`，含 |- |+ >- 等修饰）内的行不参与
+/// 结束判定——缩进的 `---` 在块内是数据不是分隔符，否则元数据被截断、
+/// 后半段漏进正文
 fn find_frontmatter_end(s: &str) -> Option<usize> {
     let mut pos = 0;
+    let mut in_block_scalar = false;
+    let mut block_indent = 0usize;
     for line in s.split_inclusive('\n') {
         let line_trim = line.trim_end_matches(['\n', '\r']);
-        if line_trim == "---" {
-            return Some(pos);
+        if in_block_scalar {
+            let trimmed = line_trim.trim();
+            if !trimmed.is_empty() {
+                let indent = line_trim.len() - line_trim.trim_start_matches(' ').len();
+                if indent <= block_indent {
+                    in_block_scalar = false; // 缩进回退：块结束，本行重新参与判定
+                }
+            }
+        }
+        if !in_block_scalar {
+            let content = line_trim.trim_start_matches(' ');
+            if let Some(colon) = content.find(':') {
+                let value = content[colon + 1..].trim();
+                if value.starts_with('|') || value.starts_with('>') {
+                    in_block_scalar = true;
+                    block_indent = line_trim.len() - line_trim.trim_start_matches(' ').len();
+                }
+            }
+            if line_trim == "---" {
+                return Some(pos);
+            }
         }
         pos += line.len();
     }
@@ -464,19 +497,25 @@ pub fn rename_category_in_order(root: &Path, old_name: &str, new_name: &str) -> 
     Ok(())
 }
 
-/// 重命名分类时同步迁移 .order.json：key 换新名，value 路径换目录前缀。
-/// 不迁移的话，重命名后 order 的 key 与路径全部失配，
-/// 该分类内用户拖好的顺序静默失效、回退到按修改时间排序。
-fn migrate_prompt_order_on_category_rename(root: &Path, old_name: &str, new_name: &str) {
-    let mut map = load_order_map(root);
-    let Some(paths) = map.remove(old_name) else {
+/// 分类重命名/合并时按实际路径映射迁移 .order.json。
+/// 旧分类条目逐个改名；合并进已存在的目标分类时**追加**到目标列表尾部——
+/// 直接前缀替换整个数组会覆盖目标分类已有的排序。
+/// 不迁移的话，重命名后 order 的条目全部失配，
+/// 分类内用户拖好的顺序静默失效、回退到按修改时间排序。
+fn migrate_prompt_order_on_rename(root: &Path, mapping: &[(String, String)]) {
+    if mapping.is_empty() {
         return;
-    };
-    let new_paths: Vec<String> = paths
-        .iter()
-        .map(|p| p.replacen(&format!("{old_name}/"), &format!("{new_name}/"), 1))
-        .collect();
-    map.insert(new_name.to_string(), new_paths);
+    }
+    let mut map = load_order_map(root);
+    for (old_rel, new_rel) in mapping {
+        if let Some(old_cat) = old_rel.split('/').next() {
+            if let Some(list) = map.get_mut(old_cat) {
+                list.retain(|p| p != old_rel);
+            }
+        }
+        let new_cat = new_rel.split('/').next().unwrap_or_default().to_string();
+        map.entry(new_cat).or_default().push(new_rel.clone());
+    }
     if let Ok(json) = serde_json::to_string_pretty(&map) {
         let _ = write_atomic(&root.join(ORDER_FILE), json.as_bytes());
     }
@@ -590,6 +629,12 @@ pub fn save_prompt(root: &Path, abs: &Path, req: &SaveRequest) -> io::Result<Pat
     if final_path != abs && abs.exists() && fs::remove_file(abs).is_ok() {
         if let Ok(rel) = abs.strip_prefix(root) {
             let _ = record_tombstone(root, &path_to_unix(rel));
+        }
+    }
+    // 排序迁移：保存改标题导致路径变化时，.order.json 条目跟着改名
+    if final_path != abs {
+        if let (Ok(old_rel), Ok(new_rel)) = (abs.strip_prefix(root), final_path.strip_prefix(root)) {
+            migrate_order_entry(root, &path_to_unix(old_rel), &path_to_unix(new_rel));
         }
     }
     // 重建/覆盖了该路径：清除可能存在的 tombstone
@@ -738,7 +783,34 @@ pub fn rename_prompt(
         let _ = remove_tombstone(root, &path_to_unix(rel));
     }
 
+    // 排序迁移：文件挪了位置，.order.json 的旧条目跟着改名，
+    // 否则改一次标题/分类就丢排序位置
+    if new_abs != old_abs {
+        if let (Ok(old_rel), Ok(new_rel)) = (old_abs.strip_prefix(root), new_abs.strip_prefix(root)) {
+            migrate_order_entry(root, &path_to_unix(old_rel), &path_to_unix(new_rel));
+        }
+    }
+
     Ok(new_abs)
+}
+
+/// 把 .order.json 里的条目从 old_rel 迁到 new_rel（跨分类则移到目标分类列表尾部）。
+/// 未分类（根目录文件，rel 不含 /）不参与排序，直接跳过
+fn migrate_order_entry(root: &Path, old_rel: &str, new_rel: &str) {
+    if !old_rel.contains('/') || !new_rel.contains('/') {
+        return;
+    }
+    let mut map = load_order_map(root);
+    if let Some(old_cat) = old_rel.split('/').next() {
+        if let Some(list) = map.get_mut(old_cat) {
+            list.retain(|p| p != old_rel);
+        }
+    }
+    let new_cat = new_rel.split('/').next().unwrap_or_default().to_string();
+    map.entry(new_cat).or_default().push(new_rel.to_string());
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        let _ = write_atomic(&root.join(ORDER_FILE), json.as_bytes());
+    }
 }
 
 /// 新建分类（即创建文件夹）（问题3）
@@ -749,6 +821,10 @@ pub fn create_category(root: &Path, name: &str) -> io::Result<PathBuf> {
     }
     let dir = root.join(&safe);
     fs::create_dir_all(&dir)?;
+    // 空分类占位文件：Git 不跟踪空目录、WebDAV push 只搬文件——没有占位，
+    // 设备 A 建的空分类骨架到设备 B 就消失了。占位随同步传输，
+    // scan_prompts 对含 .gitkeep 的目录照样登记分类（空目录本就登记）
+    let _ = fs::write(dir.join(".gitkeep"), b"");
     Ok(dir)
 }
 
@@ -802,7 +878,10 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
         .collect();
 
     // 目标已存在：合并（移动所有文件过去），否则整体重命名
+    // move_mapping：旧 rel → 实际新 rel（合并分支同名文件会加 -n 序号，
+    // 新路径不能靠前缀替换推导）
     let mut new_rels: Vec<String> = Vec::new();
+    let mut move_mapping: Vec<(String, String)> = Vec::new();
     if new_dir.exists() {
         for entry in fs::read_dir(&old_dir)? {
             let entry = entry?;
@@ -827,8 +906,11 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
                     n += 1;
                 }
                 fs::rename(&from, &to)?;
-                if let Ok(rel) = to.strip_prefix(root) {
-                    new_rels.push(path_to_unix(rel));
+                if let (Ok(old_rel), Ok(new_rel)) = (from.strip_prefix(root), to.strip_prefix(root)) {
+                    let old_rel = path_to_unix(old_rel);
+                    let new_rel = path_to_unix(new_rel);
+                    move_mapping.push((old_rel.clone(), new_rel.clone()));
+                    new_rels.push(new_rel);
                 }
             }
         }
@@ -838,7 +920,9 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
         fs::rename(&old_dir, &new_dir)?;
         // 整体重命名：新路径 = 旧路径换目录前缀
         for (rel, _) in &old_mds {
-            new_rels.push(rel.replacen(&format!("{safe_old}/"), &format!("{safe_new}/"), 1));
+            let new_rel = rel.replacen(&format!("{safe_old}/"), &format!("{safe_new}/"), 1);
+            move_mapping.push((rel.clone(), new_rel.clone()));
+            new_rels.push(new_rel);
         }
     }
 
@@ -851,10 +935,10 @@ pub fn rename_category(root: &Path, old_name: &str, new_name: &str) -> io::Resul
     }
 
     // 同步更新排序文件（若存在）：.category-order.json 的分类名换新名，
-    // .order.json 的 key 和路径前缀一并迁移。两个文件的 key 都是磁盘目录名
+    // .order.json 的条目按实际映射迁移。两个文件的 key 都是磁盘目录名
     // （sanitize 后的），传 safe 名而非用户原始输入，否则含特殊字符时失配
     let _ = rename_category_in_order(root, &safe_old, &safe_new);
-    migrate_prompt_order_on_category_rename(root, &safe_old, &safe_new);
+    migrate_prompt_order_on_rename(root, &move_mapping);
     Ok(())
 }
 
@@ -928,6 +1012,49 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    /// 正文首行缩进与块标量内的水平线往返保持（#16/#17）
+    #[test]
+    fn body_leading_indent_and_block_scalar_fence_roundtrip() {
+        // 首行四空格缩进的代码块：保存再读不得丢缩进
+        let dir = std::env::temp_dir().join("pp_test_indent_rt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let abs = create_prompt(&dir, "t", "缩进测试").unwrap();
+        let body = "    indented code line
+second line";
+        let final_abs = save_prompt(
+            &dir,
+            &abs,
+            &SaveRequest {
+                title: "缩进测试".into(),
+                copy_mode: "markdown".into(),
+                body: body.into(),
+                category: Some("t".into()),
+            },
+        )
+        .unwrap();
+        let reloaded = read_prompt(&final_abs).unwrap().body;
+        assert_eq!(reloaded, body, "正文首行缩进必须原样保留");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// YAML 块标量内独立 --- 行不截断 frontmatter（#17）
+    #[test]
+    fn frontmatter_block_scalar_with_fence_survives() {
+        let content = "---
+title: t
+description: |
+  line1
+  ---
+  line3
+---
+
+body";
+        let (meta, body) = parse_markdown(content);
+        assert_eq!(meta.title, "t", "块标量内的 --- 不得截断元数据");
+        assert_eq!(body, "body");
+    }
+
     use super::*;
 
     /// 问题5核心验证：save → read round-trip，body 必须完整保留
