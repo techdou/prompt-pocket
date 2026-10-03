@@ -15,6 +15,8 @@ export interface PromptMeta {
 }
 
 export interface Prompt {
+  /** 正文随扫描返回，供离线全文检索。 */
+  body?: string;
   /** 相对于仓库根的稳定 id（无扩展名路径，正斜杠分隔） */
   id: string;
   /** 显示标题 */
@@ -68,6 +70,15 @@ export interface PromptContent {
 /** save_prompt 接收的结构化保存请求（前端表单直接构造） */
 export interface SaveRequest {
   title: string;
+  category?: string;
   copy_mode: CopyMode;
   body: string;
 }
+
+export interface RecoveryEntry {
+  id: string;
+  originalPath: string;
+  createdAt: string;
+  kind: string;
+}
+export interface CopyResult { status: "copied" | "pasted" | "paste_failed" }

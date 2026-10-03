@@ -8,6 +8,8 @@ import type {
   SaveRequest,
   ScanResult,
   SyncStatus,
+  CopyResult,
+  RecoveryEntry,
 } from "./types";
 
 type BackendPromptMeta = Partial<Omit<PromptMeta, "copy_mode">> & {
@@ -143,9 +145,17 @@ export async function copyText(text: string): Promise<void> {
 export async function copyOrPaste(
   text: string,
   mode: CopyMode,
-): Promise<void> {
-  return invoke<void>("copy_or_paste", { text, mode: normalizeCopyMode(mode) });
+): Promise<CopyResult> {
+  return invoke<CopyResult>("copy_or_paste", { text, mode: normalizeCopyMode(mode) });
 }
+
+export const getHotkey = () => invoke<string>("get_hotkey");
+export const setHotkey = (shortcut: string) => invoke<void>("set_hotkey", { shortcut });
+export const listRecovery = () => invoke<RecoveryEntry[]>("list_recovery");
+export const restoreRecovery = (id: string) => invoke<string>("restore_recovery", { id });
+export const readRecovery = (id: string) => invoke<string>("read_recovery", { id });
+export const setWindowMode = (mode: "quick" | "manage") => invoke<void>("set_window_mode", { mode });
+export const setInteractionLock = (locked: boolean) => invoke<void>("set_interaction_lock", { locked });
 
 export async function hideWindow(): Promise<void> {
   return invoke<void>("hide_window");

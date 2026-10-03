@@ -1,12 +1,14 @@
 <script lang="ts">
   import { fade, scale } from "svelte/transition";
-  import type { CloudConfigView, SyncStatus } from "./types";
+  import type { CloudConfigView, RecoveryEntry, SyncStatus } from "./types";
+  import { dialogFocus } from "./dialog";
   import {
     createTranslator,
     type Language,
     type Translator,
   } from "./i18n";
   import {
+    getHotkey, setHotkey, listRecovery, restoreRecovery, readRecovery,
     downloadAll,
     getCloudConfig,
     getSyncStatus,
@@ -23,10 +25,12 @@
     onsynced,
     language = "zh",
     onlanguagechange = (_language: Language) => {},
+    onrestored = (_path: string) => {},
     t = fallbackT,
   }: {
     open: boolean;
     onsynced: () => void;
+    onrestored?: (path: string) => void;
     language?: Language;
     onlanguagechange?: (language: Language) => void;
     t?: Translator;
@@ -45,6 +49,12 @@
   let saving = $state(false);
   let transferring = $state<"upload" | "download" | null>(null);
   let message = $state<{ type: "ok" | "err"; text: string } | null>(null);
+  let hotkey = $state("");
+  let savingHotkey = $state(false);
+  let recoveryEntries = $state<RecoveryEntry[]>([]);
+  let recoveryLoading = $state(false);
+  let recoveryPreview = $state<{ entry: RecoveryEntry; text: string } | null>(null);
+  let recoveryBusyId = $state<string | null>(null);
 
   // 坚果云帮助页：如何获取应用密码
   const HELP_URL = "https://help.jianguoyun.com/?p=2064";
@@ -62,35 +72,69 @@
   });
 
   async function load() {
+    recoveryLoading = true;
+    recoveryPreview = null;
     try {
-      [config, status] = await Promise.all([getCloudConfig(), getSyncStatus()]);
-      username = config.username;
-      remoteRoot = config.remoteRoot || "PromptPocket";
-      // 密码不回显（安全）；已配置则锁定编辑模式，点"修改"才解锁
-      password = "";
-      editingPassword = !config.hasPassword;
+      const [loadedConfig, loadedStatus, loadedHotkey, loadedRecovery] = await Promise.allSettled([
+        getCloudConfig(),
+        getSyncStatus(),
+        getHotkey(),
+        listRecovery(),
+      ]);
+      if (loadedConfig.status === "fulfilled") {
+        config = loadedConfig.value;
+        username = config.username;
+        remoteRoot = config.remoteRoot || "PromptPocket";
+        password = "";
+        editingPassword = !config.hasPassword;
+      }
+      if (loadedStatus.status === "fulfilled") status = loadedStatus.value;
+      if (loadedHotkey.status === "fulfilled") hotkey = loadedHotkey.value;
+      if (loadedRecovery.status === "fulfilled") recoveryEntries = loadedRecovery.value.slice(0, 50);
+      const errors = [loadedConfig, loadedStatus, loadedHotkey, loadedRecovery]
+        .filter((result) => result.status === "rejected")
+        .map((result) => String(result.reason));
+      if (errors.length) message = { type: "err", text: errors.join("\n") };
     } catch (e) {
       message = { type: "err", text: String(e) };
+    } finally {
+      recoveryLoading = false;
     }
   }
 
-  async function refreshStatus() {
+  async function refreshStatus(): Promise<SyncStatus | null> {
     try {
       status = await getSyncStatus();
+      return status;
     } catch {
       /* 忽略 */
+      return null;
+    }
+  }
+
+  async function refreshRecovery() {
+    recoveryLoading = true;
+    try {
+      recoveryEntries = (await listRecovery()).slice(0, 50);
+    } catch (e) {
+      message = { type: "err", text: String(e) };
+    } finally {
+      recoveryLoading = false;
     }
   }
 
   async function doTest() {
-    if (!username.trim() || !password.trim()) {
+    const unchangedUser = username.trim() === (config?.username ?? "").trim();
+    const canKeepPassword = hasPassword && !editingPassword && unchangedUser;
+    const pwd = canKeepPassword ? "__KEEP__" : password.trim();
+    if (!username.trim() || !pwd) {
       message = { type: "err", text: t("settings.fillCredentials") };
       return;
     }
     testing = true;
     message = null;
     try {
-      await testCloudConnection(username.trim(), password.trim(), remoteRoot.trim() || "PromptPocket");
+      await testCloudConnection(username.trim(), pwd, remoteRoot.trim() || "PromptPocket");
       message = { type: "ok", text: t("settings.testOk") };
     } catch (e) {
       message = {
@@ -132,14 +176,17 @@
     }
   }
 
-  // 上传到坚果云：本地覆盖云端（只增不删云端）
+  // 定向上传，冲突由后端保留并报告。
   async function doUpload() {
     transferring = "upload";
     message = null;
     try {
       const result = await uploadAll();
-      message = { type: "ok", text: "↑ " + result };
-      await refreshStatus();
+      const current = await refreshStatus();
+      message = current?.lastError
+        ? { type: "err", text: current.lastError }
+        : { type: "ok", text: "↑ " + result };
+      await refreshRecovery();
       onsynced();
     } catch (e) {
       message = { type: "err", text: String(e) };
@@ -148,20 +195,75 @@
     }
   }
 
-  // 下载到本地：云端覆盖本地
+  // 定向下载，覆盖前备份，本地改动保留。
   async function doDownload() {
+    if (!confirm(t("settings.transferConfirm"))) return;
     transferring = "download";
     message = null;
     try {
       const result = await downloadAll();
-      message = { type: "ok", text: "↓ " + result };
-      await refreshStatus();
+      const current = await refreshStatus();
+      message = current?.lastError
+        ? { type: "err", text: current.lastError }
+        : { type: "ok", text: "↓ " + result };
+      await refreshRecovery();
       onsynced();
     } catch (e) {
       message = { type: "err", text: String(e) };
     } finally {
       transferring = null;
     }
+  }
+
+  async function doSaveHotkey() {
+    if (!hotkey.trim()) return;
+    savingHotkey = true;
+    message = null;
+    try {
+      await setHotkey(hotkey.trim());
+      hotkey = await getHotkey();
+      message = { type: "ok", text: t("settings.hotkeySaved") };
+    } catch (e) {
+      message = { type: "err", text: String(e) };
+    } finally {
+      savingHotkey = false;
+    }
+  }
+
+  async function viewRecovery(entry: RecoveryEntry) {
+    if (recoveryBusyId !== null) return;
+    recoveryBusyId = entry.id;
+    message = null;
+    try {
+      recoveryPreview = { entry, text: await readRecovery(entry.id) };
+    } catch (e) {
+      message = { type: "err", text: String(e) };
+    } finally {
+      recoveryBusyId = null;
+    }
+  }
+
+  async function doRestore(entry: RecoveryEntry) {
+    if (recoveryBusyId !== null) return;
+    recoveryBusyId = entry.id;
+    message = null;
+    try {
+      const path = await restoreRecovery(entry.id);
+      message = { type: "ok", text: t("settings.restored", { path }) };
+      recoveryPreview = null;
+      await refreshRecovery();
+      onrestored(path);
+    } catch (e) {
+      message = { type: "err", text: String(e) };
+    } finally {
+      recoveryBusyId = null;
+    }
+  }
+
+  function recoveryKindLabel(kind: string): string {
+    if (kind === "deleted") return t("settings.recoveryDeleted");
+    if (kind === "sync") return t("settings.recoverySync");
+    return t("settings.recoveryHistory");
   }
 
   function close() {
@@ -172,6 +274,8 @@
   function onBackdrop(e: MouseEvent) {
     if (e.target === e.currentTarget) close();
   }
+
+
 </script>
 
 {#if open}
@@ -182,9 +286,17 @@
     onkeydown={(e) => e.key === "Escape" && close()}
     role="presentation"
   >
-    <div class="modal" transition:scale={{ duration: 150, start: 0.96 }}>
+    <div
+      class="modal"
+      transition:scale={{ duration: 150, start: 0.96 }}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-title"
+      tabindex="-1"
+      use:dialogFocus
+    >
       <header class="modal-head">
-        <h2>{t("settings.title")}</h2>
+        <h2 id="settings-title">{t("settings.title")}</h2>
         <button class="close" onclick={close} aria-label={t("common.close")}>×</button>
       </header>
 
@@ -210,6 +322,24 @@
           <p class="hint">{t("settings.languageHint")}</p>
         </section>
 
+        <section class="field">
+          <label class="field-label" for="settings-hotkey">{t("settings.hotkey")}</label>
+          <div class="inline-controls">
+            <input
+              class="form-input"
+              id="settings-hotkey"
+              type="text"
+              bind:value={hotkey}
+              placeholder="Ctrl+Alt+P"
+              spellcheck="false"
+            />
+            <button class="ghost" onclick={doSaveHotkey} disabled={savingHotkey || !hotkey.trim()}>
+              {savingHotkey ? t("settings.saving") : t("settings.saveHotkey")}
+            </button>
+          </div>
+          <p class="hint">{t("settings.hotkeyHint")}</p>
+        </section>
+
         <!-- 同步状态 -->
         {#if status}
           <div class="status-box" class:syncing={status.syncing} class:error={status.lastError}>
@@ -232,9 +362,10 @@
 
         <!-- 配置表单 -->
         <section class="field">
-          <span class="field-label">{t("settings.account")}</span>
+          <label class="field-label" for="settings-account">{t("settings.account")}</label>
           <input
             class="form-input"
+            id="settings-account"
             type="text"
             bind:value={username}
             placeholder={t("settings.accountPlaceholder")}
@@ -267,6 +398,7 @@
             <!-- 未配置或编辑模式：输入框 -->
             <input
               class="form-input"
+              aria-label={t("settings.appPassword")}
               type="password"
               bind:value={password}
               placeholder={t("settings.passwordPlaceholder")}
@@ -284,9 +416,10 @@
         </section>
 
         <section class="field">
-          <span class="field-label">{t("settings.remoteRoot")}</span>
+          <label class="field-label" for="settings-remote-root">{t("settings.remoteRoot")}</label>
           <input
             class="form-input"
+            id="settings-remote-root"
             type="text"
             bind:value={remoteRoot}
             placeholder="PromptPocket"
@@ -318,6 +451,52 @@
             <p class="hint">{t("settings.syncHint")}</p>
           </section>
         {/if}
+
+        <section class="field recovery-section">
+          <span class="field-label">{t("settings.recovery")}</span>
+          <p class="hint">{t("settings.recoveryHint")}</p>
+          <div class="recovery-list">
+            {#if recoveryLoading}
+              <div class="recovery-empty">{t("editor.loading")}</div>
+            {:else if recoveryEntries.length === 0}
+              <div class="recovery-empty">{t("settings.recoveryEmpty")}</div>
+            {:else}
+              {#each recoveryEntries as entry (entry.id)}
+                <article class="recovery-item">
+                  <div class="recovery-main">
+                    <strong>{entry.originalPath}</strong>
+                    <span>{recoveryKindLabel(entry.kind)} · {entry.createdAt}</span>
+                  </div>
+                  <div class="recovery-actions">
+                    <button
+                      class="ghost small"
+                      onclick={() => viewRecovery(entry)}
+                      disabled={recoveryBusyId !== null}
+                    >
+                      {t("settings.viewRecovery")}
+                    </button>
+                    <button
+                      class="ghost small"
+                      onclick={() => doRestore(entry)}
+                      disabled={recoveryBusyId !== null}
+                    >
+                      {t("settings.restore")}
+                    </button>
+                  </div>
+                </article>
+              {/each}
+            {/if}
+          </div>
+          {#if recoveryPreview}
+            <div class="recovery-preview">
+              <div class="recovery-preview-head">
+                <strong>{recoveryPreview.entry.originalPath}</strong>
+                <button class="close-preview" onclick={() => (recoveryPreview = null)} aria-label={t("common.close")}>×</button>
+              </div>
+              <pre>{recoveryPreview.text}</pre>
+            </div>
+          {/if}
+        </section>
 
         {#if message}
           <div class="msg" class:ok={message.type === "ok"} class:err={message.type === "err"}>
@@ -353,10 +532,10 @@
   }
 
   .modal {
-    width: 500px;
+    width: 560px;
     max-width: 92vw;
     max-height: 90vh;
-    overflow-y: auto;
+    overflow: hidden;
     background: var(--bg-elevated);
     border: 1px solid var(--border);
     border-radius: 12px;
@@ -395,6 +574,8 @@
 
   .modal-body {
     padding: 18px;
+    overflow-y: auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -513,6 +694,12 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-soft);
   }
+  .inline-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
+  }
   .hint {
     font-size: 11.5px;
     color: var(--muted);
@@ -534,6 +721,97 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+  .recovery-section {
+    min-height: 0;
+  }
+  .recovery-list {
+    max-height: 220px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+  }
+  .recovery-empty {
+    padding: 18px 12px;
+    color: var(--muted);
+    font-size: 12.5px;
+    text-align: center;
+  }
+  .recovery-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    padding: 9px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .recovery-item:last-child {
+    border-bottom: 0;
+  }
+  .recovery-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .recovery-main strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .recovery-main span {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .recovery-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .small {
+    padding: 4px 8px;
+    font-size: 11.5px;
+  }
+  .recovery-preview {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    overflow: hidden;
+  }
+  .recovery-preview-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .recovery-preview-head strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .close-preview {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 18px;
+    line-height: 1;
+  }
+  .recovery-preview pre {
+    max-height: 180px;
+    overflow: auto;
+    margin: 0;
+    padding: 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
   .sync-btns {
     display: grid;

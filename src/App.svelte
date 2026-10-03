@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import { fly } from "svelte/transition";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import type { CategoryCount, Prompt, PromptMeta, SyncStatus } from "./lib/types";
@@ -20,6 +21,13 @@
     savePrompt,
     scanPrompts,
   } from "./lib/api";
+  import { createRequestGate, draftChanged, type Draft } from "./lib/editor-session";
+  import { readLibrary, writeLibrary, toggleFavorite, recordUse, moveLibraryEntry, type Library } from "./lib/library";
+  import { templateFields, renderTemplate } from "./lib/templates";
+  import { markdownToPlain } from "./lib/plain-text";
+  import { dialogFocus } from "./lib/dialog";
+  import TemplateDialog from "./lib/TemplateDialog.svelte";
+  import { setWindowMode, setInteractionLock } from "./lib/api";
   import { filterPrompts } from "./lib/search";
   import CategoryTabs from "./lib/CategoryTabs.svelte";
   import PromptList from "./lib/PromptList.svelte";
@@ -56,6 +64,19 @@
   let editingCategory = $state("");
   let editingCopyMode = $state<"markdown" | "plain">("markdown");
 
+  let library = $state<Library>({});
+  let scope = $state<"all" | "favorites" | "recent">("all");
+  let windowMode = $state<"quick" | "manage">("quick");
+  let loadedPath = $state<string | null>(null);
+  let contentLoading = $state(false);
+  let saving = $state(false);
+  let copying = $state(false);
+  let baseline = $state<Draft>({ title: "", body: "", category: "", copy_mode: "markdown" });
+  let currentDraft = $derived({ title: editingTitle, body: editingBody, category: editingCategory, copy_mode: editingCopyMode });
+  let dirty = $derived(editorMode === "edit" && draftChanged(currentDraft, baseline));
+  let ready = $derived(!!selectedPath && loadedPath === selectedPath && !contentLoading && !saving);
+  let templateSession = $state<{ body: string; title: string; path: string; mode: "markdown" | "plain" } | null>(null);
+  const requestGate = createRequestGate();
   let loading = $state(true);
   let error = $state<string | null>(null);
   let language = $state<Language>("zh");
@@ -69,6 +90,7 @@
     }, 5000);
   }
   let copiedFlash = $state(false);
+  let copyMessage = $state("");
   let settingsOpen = $state(false);
 
   // 右键菜单 + 重命名对话框
@@ -94,9 +116,11 @@
       : allPrompts.filter((p) => p.category === selectedCategory),
   );
 
-  let visiblePrompts = $derived(filterPrompts(categoryFiltered, query));
+  let scopedPrompts = $derived(scope === "favorites" ? categoryFiltered.filter((p) => library[p.path]?.favorite) :
+    scope === "recent" ? categoryFiltered.filter((p) => library[p.path]?.lastUsed).sort((a, b) => library[b.path].lastUsed - library[a.path].lastUsed) : categoryFiltered);
+  let visiblePrompts = $derived(filterPrompts(scopedPrompts, query, library));
   let canReorderPrompts = $derived(
-    canReorderPromptList(query, selectedCategory, visiblePrompts),
+    scope === "all" && windowMode === "manage" && canReorderPromptList(query, selectedCategory, visiblePrompts),
   );
   let reorderDisabledReason = $derived(
     getReorderDisabledReason(query, selectedCategory, visiblePrompts),
@@ -123,6 +147,7 @@
       showError(String(e));
     } finally {
       loading = false;
+      void tick().then(focusSearch);
     }
   }
 
@@ -163,6 +188,7 @@
   // 同步完成后：重新加载列表 + 刷新同步状态
   async function onSynced() {
     await refresh();
+    if (editorMode !== "edit" && selectedPath) void loadPromptContent(selectedPath);
     try {
       syncStatus = await getSyncStatus();
     } catch {
@@ -182,45 +208,73 @@
       return;
     }
     await refresh();
+    if (editorMode !== "edit" && selectedPath) void loadPromptContent(selectedPath);
   }
 
-  // 监听后端 sync-finished 事件，自动刷新
-  let unlisten: (() => void) | null = null;
-  $effect(() => {
-    import("@tauri-apps/api/event").then(({ listen }) => {
-      listen("sync-finished", () => {
-        void guardedRefresh();
-        void getSyncStatus().then((s) => (syncStatus = s));
-      }).then((fn) => (unlisten = fn));
-    });
-    return () => unlisten?.();
-  });
-
-  // 选中变化时加载内容
+  // Selection loads have identity tokens; stale responses never replace another prompt.
   let lastLoadedPath: string | null = null;
   $effect(() => {
-    if (selectedPath && selectedPath !== lastLoadedPath) {
-      lastLoadedPath = selectedPath;
-      void loadPromptContent(selectedPath);
-    }
+    const path = selectedPath;
+    untrack(() => {
+      if (path && path !== lastLoadedPath) { lastLoadedPath = path; void loadPromptContent(path); }
+      if (!path) { requestGate.invalidate(); lastLoadedPath = null; loadedPath = null; contentLoading = false; }
+    });
   });
-
+  $effect(() => {
+    const locked = windowMode === "manage" || settingsOpen || !!templateSession || dirty || renameDialog.open || catRenameDialog.open;
+    void setInteractionLock(locked).catch(() => {});
+  });
   async function loadPromptContent(path: string) {
+    const token = requestGate.begin(path);
+    contentLoading = true;
+    loadedPath = null;
     try {
       const { meta, body } = await readPrompt(path);
+      if (!requestGate.accepts(token, path) || selectedPath !== path) return;
       applyMetaToEditFields(meta);
       editingBody = body;
+      baseline = { ...currentDraft };
+      loadedPath = path;
       editorMode = "view";
     } catch (e) {
-      const msg = String(e);
-      if (msg.includes("FILE_NOT_FOUND")) {
-        // 问题1：文件被外部删除 → 从列表移除，不报错卡死
-        removePromptFromList(path);
-      } else {
-        error = msg;
-      }
+      if (!requestGate.accepts(token, path) || selectedPath !== path) return;
+      lastLoadedPath = null;
+      if (String(e).includes("FILE_NOT_FOUND")) removePromptFromList(path);
+      else showError(String(e));
+    } finally {
+      if (requestGate.accepts(token, path)) contentLoading = false;
     }
   }
+  function permitLeave(): boolean {
+    if (saving || copying) return false;
+    if (dirty && !confirm(t("editor.leaveConfirm"))) return false;
+    if (editorMode === "edit") {
+      editingTitle = baseline.title;
+      editingBody = baseline.body;
+      editingCategory = baseline.category;
+      editingCopyMode = baseline.copy_mode === "plain" ? "plain" : "markdown";
+    }
+    editorMode = "view";
+    return true;
+  }
+  function selectPath(path: string) {
+    if (path === selectedPath) { if (!contentLoading && loadedPath !== path) void loadPromptContent(path); return; }
+    if (!permitLeave()) return;
+    selectedPath = path;
+    selectedIndex = Math.max(0, visiblePrompts.findIndex((p) => p.path === path));
+  }
+  function persistLibrary(next: Library) {
+    library = next;
+    writeLibrary(getLanguageStorage(), library);
+  }
+  function favorite(path: string) { if (editorMode === "edit" || saving) return; persistLibrary(toggleFavorite(library, path)); }
+  async function changeWindowMode(mode: "quick" | "manage") {
+    if (mode === "quick" && !permitLeave()) return;
+    windowMode = mode;
+    try { await setWindowMode(mode); } catch (e) { showError(String(e)); }
+  }
+  function startEditing() { if (ready) { void changeWindowMode("manage"); baseline = { ...currentDraft }; editorMode = "edit"; } }
+  function cancelEdit() { if (permitLeave() && selectedPath) void loadPromptContent(selectedPath); }
 
   function applyMetaToEditFields(meta: PromptMeta) {
     editingTitle = meta.title;
@@ -247,43 +301,70 @@
     void refresh();
   }
 
-  async function doCopy(mode: "markdown" | "plain") {
-    if (!selectedPrompt) return;
+  async function completeCopy(text: string, mode: "markdown" | "plain", path: string) {
+    if (copying) return;
+    copying = true;
     try {
-      // copyOrPaste 内部：写剪贴板 → 隐藏窗口 → 按快捷键来源决定是否注入 Ctrl+V
-      await copyOrPaste(editingBody, mode);
+      const result = await copyOrPaste(mode === "plain" ? markdownToPlain(text) : text, mode);
+      persistLibrary(recordUse(library, path));
+      copyMessage = t(result.status === "pasted" ? "app.pastedToast" : result.status === "paste_failed" ? "app.pasteFailedToast" : "app.copiedToast");
       copiedFlash = true;
-      setTimeout(() => (copiedFlash = false), 800);
-    } catch (e) {
-      showError(String(e));
-    }
+      setTimeout(() => (copiedFlash = false), 2200);
+    } finally { copying = false; }
   }
-
-  // 问题5修复：保存用结构化字段，Rust 端规范序列化
-  async function doSave() {
-    if (!selectedPrompt) return;
-    try {
-      const saved = await savePrompt(selectedPrompt.path, {
-        title: editingTitle.trim() || t("app.untitled"),
-        copy_mode: editingCopyMode,
-        body: editingBody,
-      });
-      // 保存可能因标题变化而重命名了文件，用新路径更新选中
-      selectedPath = saved.path;
-      lastLoadedPath = saved.path; // 避免立即重载覆盖编辑内容
-      await refresh();
-      editorMode = "view";
-    } catch (e) {
-      const msg = String(e);
-      if (msg.includes("FILE_NOT_FOUND")) {
-        removePromptFromList(selectedPrompt.path);
-      } else {
-        error = msg;
-      }
+  async function doCopy(mode: "markdown" | "plain") {
+    if (!selectedPrompt || !ready || copying || editorMode === "edit") return;
+    const path = selectedPrompt.path;
+    if (templateFields(editingBody).length) {
+      templateSession = { body: editingBody, title: selectedPrompt.title, path, mode };
+      return;
     }
+    try { await completeCopy(renderTemplate(editingBody, {}), mode, path); } catch (e) { showError(String(e)); }
+  }
+  async function doSave() {
+    if (!selectedPrompt || !ready || saving) return;
+    const path = selectedPrompt.path;
+    const draft = { ...currentDraft };
+    saving = true;
+    try {
+      const saved = await savePrompt(path, { ...draft, title: draft.title.trim() || t("app.untitled") });
+      requestGate.invalidate();
+      persistLibrary(moveLibraryEntry(library, path, saved.path));
+      selectedPath = saved.path;
+      lastLoadedPath = saved.path;
+      loadedPath = saved.path;
+      baseline = { ...draft, title: saved.title };
+      editingTitle = saved.title;
+      editorMode = "view";
+      selectedCategory = "__all__";
+      query = "";
+      scope = "all";
+      await refresh();
+    } catch (e) { showError(String(e)); }
+    finally { saving = false; }
+  }
+  async function duplicatePrompt() {
+    if (!selectedPrompt || !ready || !permitLeave()) return;
+    const source = selectedPrompt;
+    const content = editingBody;
+    try {
+      const created = await createPrompt(source.category, source.title + (language === "zh" ? " 副本" : " copy"));
+      const saved = await savePrompt(created.path, { title: created.title, category: source.category, body: content, copy_mode: editingCopyMode });
+      query = ""; scope = "all"; selectedCategory = "__all__";
+      await refresh();
+      selectPath(saved.path);
+      void changeWindowMode("manage");
+    } catch (e) { showError(String(e)); }
+  }
+  async function insertSnippet(path: string) {
+    const source = allPrompts.find((prompt) => prompt.path === path);
+    if (source) editingBody += (editingBody.trim() ? "\n\n" : "") + (source.body ?? "");
   }
 
   async function doCreate() {
+    if (!permitLeave()) return;
+    requestGate.invalidate();
+    void changeWindowMode("manage");
     const cat = selectedCategory === "__all__" ? "未分类" : selectedCategory;
     try {
       // 新建用占位标题（文件名是时间戳），进入编辑后用户填写真实标题
@@ -293,11 +374,15 @@
       selectedPath = p.path;
       lastLoadedPath = p.path;
       query = "";
+      scope = "all";
+      loadedPath = p.path;
+      contentLoading = false;
       // 进入编辑，标题留空引导用户输入
       editingTitle = "";
       editingCategory = cat;
       editingCopyMode = "markdown";
       editingBody = "";
+      baseline = { ...currentDraft };
       editorMode = "edit";
     } catch (e) {
       showError(String(e));
@@ -305,7 +390,7 @@
   }
 
   async function doDelete() {
-    if (!selectedPrompt) return;
+    if (!selectedPrompt || !permitLeave()) return;
     if (!confirm(t("app.deleteConfirm", { title: selectedPrompt.title }))) return;
     try {
       await deletePrompt(selectedPrompt.path);
@@ -323,7 +408,7 @@
   }
 
   function onCtxRename() {
-    if (!contextMenu.prompt) return;
+    if (!contextMenu.prompt || !permitLeave()) return;
     renameDialog = {
       open: true,
       path: contextMenu.prompt.path,
@@ -333,13 +418,16 @@
   }
 
   async function onCtxMove(category: string) {
-    if (!contextMenu.prompt) return;
+    if (!contextMenu.prompt || !permitLeave()) return;
+    const oldPath = contextMenu.prompt.path;
     try {
-      await renamePrompt(
+      const moved = await renamePrompt(
         contextMenu.prompt.path,
         contextMenu.prompt.title,
         category,
       );
+      persistLibrary(moveLibraryEntry(library, oldPath, moved.path));
+      if (selectedPath === oldPath) { selectedPath = moved.path; lastLoadedPath = null; }
       await refresh();
     } catch (e) {
       showError(String(e));
@@ -415,7 +503,7 @@
   }
 
   function onCtxDelete() {
-    if (!contextMenu.prompt) return;
+    if (!contextMenu.prompt || !permitLeave()) return;
     const p = contextMenu.prompt;
     if (!confirm(t("app.deleteConfirm", { title: p.title }))) return;
     deletePrompt(p.path)
@@ -437,6 +525,7 @@
         renameDialog.title.trim() || t("app.untitled"),
         renameDialog.category,
       );
+      persistLibrary(moveLibraryEntry(library, renameDialog.path, newPrompt.path));
       await refresh();
       selectedPath = newPrompt.path;
       lastLoadedPath = null;
@@ -463,6 +552,7 @@
 
   // 优化3：重命名分类
   async function onRenameCategory(oldName: string) {
+    if (!permitLeave()) return;
     catRenameDialog = { open: true, oldName, newName: oldName };
   }
 
@@ -473,7 +563,12 @@
       return;
     }
     try {
+      const prefix = catRenameDialog.oldName + "/";
       await renameCategory(catRenameDialog.oldName, newName);
+      let nextLibrary = library;
+      for (const p of allPrompts) if (p.path.startsWith(prefix)) nextLibrary = moveLibraryEntry(nextLibrary, p.path, newName + p.path.slice(prefix.length - 1));
+      persistLibrary(nextLibrary);
+      if (selectedPath?.startsWith(prefix)) { selectedPath = newName + selectedPath.slice(prefix.length - 1); lastLoadedPath = null; }
       if (selectedCategory === catRenameDialog.oldName) {
         selectedCategory = newName;
       }
@@ -484,79 +579,51 @@
     }
   }
 
-  // 键盘导航
+  // Reset result focus on query/filter changes; edits keep their selected draft until explicitly left.
   $effect(() => {
-    if (visiblePrompts.length === 0) {
-      if (selectedIndex !== 0) selectedIndex = 0;
-      return;
-    }
-    if (selectedIndex >= visiblePrompts.length) {
-      selectedIndex = visiblePrompts.length - 1;
-    }
-    const cur = visiblePrompts[selectedIndex];
-    if (cur && cur.path !== selectedPath) {
-      selectedPath = cur.path;
-    }
+    query; selectedCategory; scope;
+    untrack(() => { if (editorMode !== "edit") { selectedIndex = 0; selectedPath = visiblePrompts[0]?.path ?? null; } });
   });
-
+  $effect(() => {
+    const prompts = visiblePrompts;
+    untrack(() => {
+      if (editorMode === "edit" || saving) return;
+      const current = prompts.findIndex((p) => p.path === selectedPath);
+      selectedIndex = current >= 0 ? current : 0;
+      selectedPath = prompts[selectedIndex]?.path ?? null;
+    });
+  });
+  $effect(() => {
+    const index = selectedIndex;
+    void tick().then(() => scrollToIndexFn?.(index));
+  });
   function handleKeydown(e: KeyboardEvent) {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (templateSession) return;
     if (e.key === "Escape") {
-      if (contextMenu.open) {
-        contextMenu.open = false;
-        return;
-      }
-      if (renameDialog.open) {
-        renameDialog.open = false;
-        return;
-      }
-      if (settingsOpen) {
-        settingsOpen = false;
-        return;
-      }
       e.preventDefault();
+      if (contextMenu.open) { contextMenu.open = false; return; }
+      if (catContextMenu.open) { catContextMenu.open = false; return; }
+      if (renameDialog.open) { renameDialog.open = false; return; }
+      if (catRenameDialog.open) { catRenameDialog.open = false; return; }
+      if (settingsOpen) { settingsOpen = false; return; }
+      if (editorMode === "edit") { cancelEdit(); return; }
       void hideWindow();
       return;
     }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+    if (settingsOpen || renameDialog.open || catRenameDialog.open || contextMenu.open) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" && editorMode === "edit") { e.preventDefault(); void doSave(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") { e.preventDefault(); void doCreate(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") { e.preventDefault(); document.querySelector<HTMLInputElement>("#search-input")?.focus(); return; }
+    const target = e.target as HTMLElement;
+    const isSearchInput = target?.id === "search-input";
+    if (["TEXTAREA", "INPUT", "SELECT", "BUTTON"].includes(target?.tagName) && !isSearchInput) return;
+    if (editorMode === "edit") return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      void doCreate();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
-      e.preventDefault();
-      document.querySelector<HTMLInputElement>("#search-input")?.focus();
-      return;
-    }
-
-    const tag = (e.target as HTMLElement)?.tagName;
-    const inEditor = tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT";
-    // 搜索框聚焦时放行 ↑↓ / Enter 做列表导航（单行 input 不需要这些键编辑文本），
-    // 实现「Ctrl+F 搜索 → ↑↓ 选中 → Enter 复制」全程不离开搜索框、不碰鼠标。
-    // 其余编辑态（正文 textarea、重命名 input、select）照旧早退，不干扰编辑。
-    const isSearchInput =
-      (e.target as HTMLElement)?.id === "search-input";
-    if (inEditor && !isSearchInput) return;
-
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      selectedIndex = Math.min(selectedIndex + 1, visiblePrompts.length - 1);
-      scrollIntoView();
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      selectedIndex = Math.max(selectedIndex - 1, 0);
-      scrollIntoView();
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      if (visiblePrompts[selectedIndex]) {
-        void doCopy(visiblePrompts[selectedIndex].meta.copy_mode as "markdown" | "plain");
-      }
-    }
-  }
-
-  function scrollIntoView() {
-    queueMicrotask(() => {
-      scrollToIndexFn?.(selectedIndex);
-    });
+      const next = Math.max(0, Math.min(selectedIndex + (e.key === "ArrowDown" ? 1 : -1), visiblePrompts.length - 1));
+      if (visiblePrompts[next]) { selectedIndex = next; selectPath(visiblePrompts[next].path); }
+    } else if (e.key === "Enter") { e.preventDefault(); void doCopy(editingCopyMode); }
   }
 
   // 无边框窗口自定义 resize：8 个边缘热区，mousedown 触发系统缩放手柄。
@@ -594,15 +661,27 @@
     void getCurrentWindow().startResizeDragging(EDGE_TO_DIRECTION[edge]);
   }
 
+  function focusSearch() {
+    if (editorMode !== "edit" && !settingsOpen && !templateSession && !renameDialog.open && !catRenameDialog.open) {
+      document.querySelector<HTMLInputElement>("#search-input")?.focus();
+    }
+  }
+
   onMount(() => {
     language = getStoredLanguage(getLanguageStorage());
+    library = readLibrary(getLanguageStorage());
     void bootstrap();
+    let disposed = false;
+    const cleanups: (() => void)[] = [];
+    void listen("sync-finished", () => { void guardedRefresh(); void getSyncStatus().then((status) => (syncStatus = status)).catch(() => {}); }).then((stop) => { if (disposed) stop(); else cleanups.push(stop); }).catch(() => {});
+    void listen("window-shown", focusSearch).then((stop) => { if (disposed) stop(); else cleanups.push(stop); }).catch(() => {});
+    return () => { disposed = true; cleanups.forEach((stop) => stop()); requestGate.invalidate(); };
   });
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="app" role="application" aria-label="Prompt Pocket">
+<div class="app" class:quick={windowMode === "quick"} role="application" aria-label="Prompt Pocket">
   <!-- 无边框窗口的 resize 热区：8 个透明按钮贴在窗口边缘 -->
   {#each RESIZE_EDGES as edge}
     <button
@@ -633,6 +712,7 @@
           type="text"
           placeholder={t("app.searchPlaceholder")}
           bind:value={query}
+          disabled={editorMode === "edit" || saving}
           autocomplete="off"
           spellcheck="false"
         />
@@ -664,7 +744,17 @@
       </div>
     </header>
 
-    <nav class="tabs">
+    <div class="library-bar">
+      <div class="library-scopes" role="group" aria-label={t("view.all")}>
+        {#each ["all", "favorites", "recent"] as tab}
+          <button class:active={scope === tab} disabled={editorMode === "edit" || saving} onclick={() => { scope = tab as typeof scope; }}>
+            {t(tab === "all" ? "view.all" : tab === "favorites" ? "view.favorites" : "view.recent")}
+          </button>
+        {/each}
+      </div>
+      <button class="mode-toggle" onclick={() => void changeWindowMode(windowMode === "quick" ? "manage" : "quick")}>{t(windowMode === "quick" ? "view.manage" : "view.quick")} ↗</button>
+    </div>
+    <nav class="tabs" class:locked={editorMode === "edit" || saving} inert={editorMode === "edit" || saving}>
       <CategoryTabs
         {categories}
         total={allPrompts.length}
@@ -682,18 +772,21 @@
         prompts={visiblePrompts}
         {selectedPath}
         {selectedIndex}
+        {query}
+        {library}
+        compact={windowMode === "quick"}
+        preferencesDisabled={editorMode === "edit" || saving}
+        onfavorite={favorite}
         draggable={canReorderPrompts}
         disabledReason={reorderDisabledLabel}
         onmounted={(fn) => (scrollToIndexFn = fn)}
-        onselect={(path) => {
-          selectedPath = path;
-          selectedIndex = visiblePrompts.findIndex((p) => p.path === path);
-        }}
+        onselect={selectPath}
         oncontextmenu={openContextMenu}
         onreorder={doReorder}
         {t}
       />
 
+      {#if windowMode === "manage"}
       <Editor
         prompt={selectedPrompt}
         mode={editorMode}
@@ -705,31 +798,32 @@
         {t}
         oncopy={(m) => doCopy(m)}
         onsave={doSave}
-        oncancel={() => {
-          if (selectedPath) {
-            lastLoadedPath = null;
-            void loadPromptContent(selectedPath);
-          }
-        }}
-        onedit={() => {
-          // 进入编辑前，把当前 prompt 的分类同步到编辑字段
-          if (selectedPrompt) editingCategory = selectedPrompt.category;
-          editorMode = "edit";
-        }}
+        busy={!ready || copying}
+        {saving}
+        {dirty}
+        snippets={allPrompts.filter((p) => p.path !== selectedPath)}
+        onduplicate={duplicatePrompt}
+        oninsertsnippet={insertSnippet}
+        oncancel={cancelEdit}
+        onedit={startEditing}
         onreveal={() => selectedPrompt && void revealInFinder(selectedPrompt.path)}
         ondelete={doDelete}
         oncreatecategory={onCreateCategory}
       />
+      {/if}
     </main>
+    {#if windowMode === "quick"}
+      <footer class="quick-footer"><span>{t("view.keyboard")}</span><button class="ghost" disabled={!ready} onclick={startEditing}>{t("editor.edit")}</button><button class="primary" disabled={!ready || copying} onclick={() => doCopy(editingCopyMode)}>{contentLoading ? t("editor.loading") : templateFields(editingBody).length ? t("template.title") : t("editor.copyLabel")} ↵</button></footer>
+    {/if}
 
     {#if copiedFlash}
-      <div class="toast" transition:fly={{ y: 20 }}>
-        {t("app.copiedToast")}
+      <div class="toast" role="status" transition:fly={{ y: 20 }}>
+        {copyMessage}
       </div>
     {/if}
 
     {#if error}
-      <div class="toast error-toast" transition:fly={{ y: 20 }}>
+      <div class="toast error-toast" role="alert" transition:fly={{ y: 20 }}>
         <span class="error-text">{error}</span>
         <button class="error-close" onclick={() => (error = null)}>×</button>
       </div>
@@ -738,11 +832,15 @@
     <Settings
       bind:open={settingsOpen}
       onsynced={onSynced}
+      onrestored={async (path) => { await refresh(); selectPath(path); }}
       {language}
       {t}
       onlanguagechange={changeLanguage}
     />
 
+    {#if templateSession}
+      <TemplateDialog body={templateSession.body} title={templateSession.title} {t} onclose={() => (templateSession = null)} onapply={async (text) => { const session = templateSession; if (!session) return; await completeCopy(text, session.mode, session.path); templateSession = null; }} />
+    {/if}
     <ContextMenu
       bind:open={contextMenu.open}
       prompt={contextMenu.prompt}
@@ -766,7 +864,7 @@
         onkeydown={(e) => e.key === "Escape" && (renameDialog.open = false)}
         role="presentation"
       >
-        <div class="dialog" transition:fly={{ y: -10, duration: 120 }}>
+        <div class="dialog" role="dialog" aria-modal="true" aria-label={t("app.renameMoveTitle")} tabindex="-1" use:dialogFocus transition:fly={{ y: -10, duration: 120 }}>
           <h3>{t("app.renameMoveTitle")}</h3>
           <div class="dialog-row">
             <label for="rn-title">{t("app.titleLabel")}</label>
@@ -830,7 +928,7 @@
         onkeydown={(e) => e.key === "Escape" && (catRenameDialog.open = false)}
         role="presentation"
       >
-        <div class="dialog" transition:fly={{ y: -10, duration: 120 }}>
+        <div class="dialog" role="dialog" aria-modal="true" aria-label={t("app.categoryRenameTitle")} tabindex="-1" use:dialogFocus transition:fly={{ y: -10, duration: 120 }}>
           <h3>{t("app.categoryRenameTitle")}</h3>
           <div class="dialog-row">
             <label for="cat-rn">{t("app.newCategoryName")}</label>
@@ -854,6 +952,10 @@
 </div>
 
 <style>
+  .library-bar { display: flex; align-items: center; justify-content: space-between; padding: 0 18px 8px; gap: 12px; }
+  .library-scopes { display: flex; gap: 5px; } .library-scopes button, .mode-toggle { border: 0; border-radius: 6px; padding: 6px 10px; font-size: 12px; color: var(--muted); background: transparent; cursor: pointer; } .library-scopes button.active { color: var(--accent); background: var(--accent-soft); } .mode-toggle { color: var(--accent); }
+  .quick .body { grid-template-columns: 1fr; } .quick-footer { display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--bg-elevated); } .quick-footer > span { flex: 1; color: var(--muted); font-size: 11px; } .locked { opacity: .65; }
+
   .app {
     display: flex;
     flex-direction: column;

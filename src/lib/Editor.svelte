@@ -25,6 +25,12 @@
     onreveal,
     ondelete,
     oncreatecategory,
+    busy = false,
+    saving = false,
+    dirty = false,
+    snippets = [],
+    onduplicate = () => {},
+    oninsertsnippet = (_path: string) => {},
     t = fallbackT,
   }: {
     prompt: Prompt | null;
@@ -41,6 +47,12 @@
     onreveal: () => void;
     ondelete: () => void;
     oncreatecategory: (name: string) => void;
+    busy?: boolean;
+    saving?: boolean;
+    dirty?: boolean;
+    snippets?: Prompt[];
+    onduplicate?: () => void;
+    oninsertsnippet?: (path: string) => void;
     t?: Translator;
   } = $props();
 
@@ -54,14 +66,22 @@
   // 新建分类输入态
   let newCategoryName = $state("");
   let addingCategory = $state(false);
+  let snippetPath = $state("");
 
   function addCategory() {
+    if (saving) return;
     const name = newCategoryName.trim();
     if (!name) return;
     oncreatecategory(name);
     category = name;
     addingCategory = false;
     newCategoryName = "";
+  }
+
+  function insertSnippet() {
+    if (!snippetPath) return;
+    oninsertsnippet(snippetPath);
+    snippetPath = "";
   }
 
   // preview 容器引用，供 renderRich 扫描 DOM
@@ -98,44 +118,65 @@
     <header class="editor-head">
       <div class="title-block">
         <h2 class="title">{title || prompt.title}</h2>
+        {#if dirty}
+          <span class="dirty-badge">{t("editor.unsaved")}</span>
+        {/if}
       </div>
       <div class="actions">
         {#if mode === "view"}
-          <button class="text-btn" onclick={onedit} title={t("editor.edit")}>{t("editor.edit")}</button>
+          <button class="text-btn" onclick={onedit} title={t("editor.edit")} disabled={busy || saving}>{t("editor.edit")}</button>
+          <button class="text-btn" onclick={onduplicate} title={t("editor.duplicate")} disabled={busy || saving}>
+            {t("editor.duplicate")}
+          </button>
           <button
             class="text-btn"
             onclick={onreveal}
             title={t("editor.reveal")}
+            disabled={busy}
           >
             {t("editor.reveal")}
           </button>
-          <button class="text-btn danger" onclick={ondelete} title={t("editor.delete")}>
+          <button class="text-btn danger" onclick={ondelete} title={t("editor.delete")} disabled={busy || saving}>
             {t("editor.delete")}
           </button>
         {:else}
-          <button class="primary" onclick={onsave}>{t("editor.save")}</button>
-          <button class="ghost" onclick={oncancel}>{t("common.cancel")}</button>
+          <button class="primary" onclick={onsave} disabled={saving || busy}>
+            {saving ? t("editor.saving") : t("editor.save")}
+          </button>
+          <button class="ghost" onclick={oncancel} disabled={saving}>{t("common.cancel")}</button>
         {/if}
       </div>
     </header>
 
     {#if mode === "view"}
       <!-- 预览 + 复制 -->
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="preview prose"
-        bind:this={previewEl}
-        onclick={onPreviewClick}
-      >
-        {@html renderMarkdown(body)}
-      </div>
+      {#if busy}
+        <div class="preview loading-state">{t("editor.loading")}</div>
+      {:else}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="preview prose"
+          bind:this={previewEl}
+          onclick={onPreviewClick}
+        >
+          {@html renderMarkdown(body)}
+        </div>
+      {/if}
       <footer class="editor-foot">
+        <label class="copy-mode">
+          <span>{t("editor.copyMode")}</span>
+          <select bind:value={copyMode} disabled={busy || saving}>
+            <option value="markdown">{t("editor.markdown")}</option>
+            <option value="plain">{t("editor.plain")}</option>
+          </select>
+        </label>
         <button
           class="copy-action"
-          onclick={() => oncopy("markdown")}
+          onclick={() => oncopy(copyMode)}
           title={t("editor.copyTitle")}
           aria-label={t("editor.copyAria")}
+          disabled={busy || saving}
         >
           <span class="copy-icon" aria-hidden="true">⧉</span>
           <span class="copy-label">{t("editor.copyLabel")}</span>
@@ -156,6 +197,7 @@
             type="text"
             bind:value={title}
             placeholder={t("editor.titlePlaceholder")}
+            disabled={saving}
           />
         </div>
 
@@ -165,6 +207,7 @@
             id="f-category"
             class="form-input"
             bind:value={category}
+            disabled={saving}
           >
             {#each categoryOptions as c}
               <option value={c}>{categoryLabel(c)}</option>
@@ -179,11 +222,13 @@
               type="text"
               bind:value={newCategoryName}
               placeholder={t("editor.newCategoryName")}
+              disabled={saving}
               onkeydown={(e) => e.key === "Enter" && addCategory()}
             />
-            <button class="ghost" onclick={addCategory}>{t("editor.add")}</button>
+            <button class="ghost" onclick={addCategory} disabled={saving}>{t("editor.add")}</button>
             <button
               class="ghost"
+              disabled={saving}
               onclick={() => {
                 addingCategory = false;
                 newCategoryName = "";
@@ -193,10 +238,33 @@
             </button>
           </div>
         {:else}
-          <button class="link-btn" onclick={() => (addingCategory = true)}>
+          <button class="link-btn" onclick={() => (addingCategory = true)} disabled={saving}>
             {t("editor.addCategory")}
           </button>
         {/if}
+
+        <div class="form-row">
+          <label class="form-label" for="f-copy-mode">{t("editor.copyMode")}</label>
+          <select id="f-copy-mode" class="form-input" bind:value={copyMode} disabled={saving}>
+            <option value="markdown">{t("editor.markdown")}</option>
+            <option value="plain">{t("editor.plain")}</option>
+          </select>
+        </div>
+
+        <div class="form-row snippet-row">
+          <label class="form-label" for="f-snippet">{t("editor.insertSnippet")}</label>
+          <div class="snippet-controls">
+            <select id="f-snippet" class="form-input" bind:value={snippetPath} disabled={saving || snippets.length === 0}>
+              <option value="">{t("editor.chooseSnippet")}</option>
+              {#each snippets as item}
+                <option value={item.path}>{item.title}</option>
+              {/each}
+            </select>
+            <button class="ghost" onclick={insertSnippet} disabled={saving || !snippetPath}>
+              {t("editor.add")}
+            </button>
+          </div>
+        </div>
 
         <div class="form-row form-row-body">
           <label class="form-label" for="f-body">{t("editor.bodyLabel")}</label>
@@ -204,9 +272,11 @@
             id="f-body"
             class="body-input"
             bind:value={body}
+            disabled={saving}
             spellcheck="false"
             placeholder={t("editor.bodyPlaceholder")}
           ></textarea>
+          <p class="template-hint">{t("editor.templateHint")}</p>
         </div>
       </div>
     {/if}
@@ -268,6 +338,10 @@
       border-color 0.12s,
       color 0.12s;
   }
+  .text-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
   .text-btn:hover {
     color: var(--accent);
     background: var(--bg-hover);
@@ -280,6 +354,21 @@
     display: flex;
     gap: 6px;
     flex-shrink: 0;
+  }
+
+  .dirty-badge {
+    flex-shrink: 0;
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 2px 6px;
+    border: 1px solid rgba(214, 163, 0, 0.25);
+    border-radius: 999px;
+    background: #fff8d8;
+    color: #8a6500;
+    font-size: 11px;
+    font-weight: 600;
   }
 
   .preview {
@@ -336,6 +425,11 @@
     border-color: var(--accent-hover);
     box-shadow: 0 8px 22px rgba(37, 99, 235, 0.22);
   }
+  .copy-action:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
   .copy-action:active {
     transform: translateY(1px);
     box-shadow: none;
@@ -383,6 +477,30 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .copy-mode {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .copy-mode select {
+    height: 30px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-elevated);
+    color: var(--fg);
+    font-size: 12px;
+  }
+
+  .loading-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 13px;
   }
 
   /* ── 填空式表单 ── */
@@ -441,6 +559,16 @@
     padding: 2px 0;
     cursor: pointer;
   }
+  .link-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .snippet-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+  }
   .link-btn:hover {
     color: var(--accent);
   }
@@ -466,6 +594,18 @@
   .body-input:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .body-input:disabled,
+  .form-input:disabled {
+    opacity: 0.65;
+    cursor: not-allowed;
+  }
+
+  .template-hint {
+    margin: 0;
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.45;
   }
 
   .placeholder {

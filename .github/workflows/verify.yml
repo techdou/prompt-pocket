@@ -1,0 +1,49 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install stable Rust checks
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Build dist before native checks: Tauri embeds these frontend assets.
+      - name: Test, typecheck, and build frontend
+        run: npm run verify
+
+      - name: Check Rust formatting
+        run: cargo +stable fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Test native code
+        run: cargo +stable test --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Lint native code
+        run: cargo +stable clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings

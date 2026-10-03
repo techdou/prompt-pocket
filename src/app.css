@@ -14,7 +14,7 @@
   --danger: #dc2626;
   --shadow-soft: 0 10px 32px rgba(31, 42, 68, 0.08);
   --font-en: "Segoe UI Variable Text", "Aptos", "Avenir Next", "Segoe UI";
-  --font-zh: "Noto Serif SC", "Noto Sans SC", "Microsoft YaHei UI",
+  --font-zh: "Noto Sans SC", "Microsoft YaHei UI",
     "PingFang SC";
   --font-ui: var(--font-en), var(--font-zh), sans-serif;
   --font-mono: "Cascadia Code", "JetBrains Mono", ui-monospace, Consolas,
@@ -120,3 +120,7 @@ button {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+button:disabled { opacity: .5; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }

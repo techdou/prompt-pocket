@@ -37,7 +37,7 @@ marked.use(
     langPrefix: "hljs language-",
     highlight(code, lang) {
       if ((lang || "").trim() === "mermaid") return code;
-      return false; // 不在解析阶段着色
+      return code; // Unchanged source is escaped by marked-highlight.
     },
   }),
 );
@@ -88,7 +88,7 @@ marked.use({
         return undefined;
       },
       renderer(token) {
-        const t = token as { text: string; displayMode: boolean };
+        const t = token as unknown as { text: string; displayMode: boolean };
         return katexPlaceholder(t.text, t.displayMode);
       },
     },
@@ -108,7 +108,7 @@ marked.use({
         return undefined;
       },
       renderer(token) {
-        const t = token as { text: string; displayMode: boolean };
+        const t = token as unknown as { text: string; displayMode: boolean };
         return katexPlaceholder(t.text, t.displayMode) + "\n";
       },
     },

@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "test": "node --experimental-strip-types --test src/lib/*.test.mjs",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "verify": "npm test && npm run check && npm run build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -19,11 +22,15 @@
     "marked-highlight": "^2.2.4"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@sveltejs/vite-plugin-svelte": "^5.1.1",
     "@tauri-apps/cli": "^2",
     "svelte": "^5.0.0",
+    "svelte-check": "^4.7.6",
     "tslib": "^2.7.0",
     "typescript": "^5.6.0",
-    "vite": "^5.4.0"
+    "vite": "^6.4.3"
+  },
+  "engines": {
+    "node": ">=22.6"
   }
 }

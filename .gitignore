@@ -1,17 +1,59 @@
+# 依赖、构建与测试产物（保留 package-lock.json / Cargo.lock）
 node_modules/
 dist/
-.DS_Store
+coverage/
+.vite/
 *.log
+*.tmp
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
 
 # Tauri / Rust
 src-tauri/target/
 src-tauri/gen/
 release-assets/
 
+# 私密配置与签名密钥；可提交不含真实凭据的示例配置
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.pfx
+*.p12
+secrets.*
+
 # 编辑器
 .vscode/
 .idea/
+.vs/
 *.iml
+.history/
 
-# 本地数据（开发时若放仓库内）
+# 本地开发工具状态
+.omx/
+.codex-run/
+.zcode/
+.claude/
+.agents/
+.cursor/
+.windsurf/
+.trae/
+.gemini/
+.continue/
+
+# 本地提示词库与恢复记录（开发时若放仓库内）
 PromptPocket-Data/
+PromptPocket/
+.recovery/
+.trash/
+.sync_meta.json
+.first_run_done
+
+# 仅根目录的运行时配置；不屏蔽源码中的配置文件
+/config.json
+/preferences.json

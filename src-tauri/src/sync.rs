@@ -4,10 +4,8 @@
 // - 所有 UI 读写仍走本地缓存（store.rs），保证瞬间响应
 // - 本模块负责本地缓存 ↔ 坚果云的双向同步
 //
-// 同步策略（规避坚果云每30分钟600次的速率限制）：
-// - 启动时：PROPFIND 远程目录树 → 拉取变更/新增 → 删除远程已删的本地文件
-// - 保存/新建/删除后：异步推送单个文件（PUT/DELETE）
-// - 重命名/移动：远程 MOVE
+// 同步策略：手动定向上传/下载，精确内容共同基线，冲突保留双方版本。
+// 本地独有文件默认保留；远程覆盖通过条件请求保护。
 
 use reqwest_dav::types::list_cmd::ListEntity;
 use reqwest_dav::{Auth, Client, ClientBuilder, Depth, Error as DavError};
@@ -61,72 +59,18 @@ pub fn build_client(cfg: &CloudConfig) -> Result<Client, DavError> {
 pub async fn test_connection(cfg: &CloudConfig) -> Result<(), String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
     let root = sanitize_remote_path(&cfg.remote_root);
+    validate_root(&root)?;
     client
-        .list(&format!("/{root}/"), Depth::Number(0))
+        .list(&remote_path(&root, ""), Depth::Number(0))
         .await
         .map_err(|e| format!("连接失败，请检查账号/应用密码/路径: {e}"))?;
     Ok(())
 }
 
-/// 全量拉取：把远程的文件同步到本地缓存
-/// 策略：远程为准。远程有的下载，远程没有的本地 .md 备份到 .trash 后删除。
-/// 关键修复：排除 .trash 目录，避免无限循环；只处理真实 prompt 文件。
+/// 拉取完整远程清单并比较实际内容。本地独有文件永不因下载被删除。
 pub async fn pull_from_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
     let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
-    let root = sanitize_remote_path(&cfg.remote_root);
-
-    // 确保远程根目录存在
-    let _ = client.mkcol(&format!("/{root}")).await;
-
-    let mut remote_files: HashSet<String> = HashSet::new();
-    let mut downloaded = 0u32;
-    let mut skipped = 0u32;
-    let mut errors: Vec<String> = Vec::new();
-
-    // 关键修复：坚果云 WebDAV 不支持 Depth::Infinity（静默降级为只返回一层），
-    // 必须用 Depth::Number(1) 逐层递归遍历（与 Obsidian Remotely Save / rclone 同策略）。
-    // walk_remote 返回 (文件列表, 错误列表)，文件已是去 .trash、解码后的相对路径。
-    let files = walk_remote(&client, &root, &mut errors).await;
-
-    for file in files {
-        remote_files.insert(file.rel.clone());
-
-        let local_path = local_dir.join(&file.rel);
-        // 内容校对：用文件大小 + 存在性判断是否需要下载
-        let need_download = match std::fs::metadata(&local_path) {
-            Ok(meta) => meta.len() as i64 != file.content_length,
-            Err(_) => true, // 本地不存在
-        };
-
-        if need_download {
-            if let Err(e) = download_file(&client, &root, &file.rel, &local_path).await {
-                errors.push(format!("{}: {e}", file.rel));
-                continue;
-            }
-            downloaded += 1;
-        } else {
-            skipped += 1;
-        }
-    }
-
-    // 清理本地多余文件（远程已删）—— 排除 .trash
-    // 防御：如果 remote_files 为空（可能 PROPFIND 解析失败），不执行清理，
-    // 避免把本地真实文件全部误移到 .trash
-    let mut deleted = 0u32;
-    if !remote_files.is_empty() {
-        clean_local_extra(local_dir, &remote_files, Path::new(""), &mut deleted)?;
-    } else {
-        // 远程列表为空：记录警告，让用户知道可能有连接/解析问题
-        errors.push("警告：未获取到远程文件列表，跳过本地清理（可能网络或解析问题）".to_string());
-    }
-
-    Ok(SyncReport {
-        downloaded,
-        skipped,
-        deleted,
-        uploaded: 0,
-        errors,
-    })
+    pull_with_client(&client, &sanitize_remote_path(&cfg.remote_root), local_dir).await
 }
 
 #[derive(Debug, Default)]
@@ -135,409 +79,953 @@ pub struct SyncReport {
     pub skipped: u32,
     pub deleted: u32,
     pub uploaded: u32,
+    pub conflicts: u32,
     pub errors: Vec<String>,
 }
 
-/// 远程文件（已解码、已去根前缀、已过滤 .trash 的相对路径）
-struct RemoteFile {
-    rel: String,
-    content_length: i64,
+// A baseline means both sides were observed to contain these exact bytes. Old
+// upload-only hash records cannot establish that invariant and are not trusted.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SyncMeta {
+    version: u8,
+    scope: String,
+    files: std::collections::BTreeMap<String, String>,
 }
 
-/// 用 Depth::Number(1) 递归遍历远程目录树。
-///
-/// 关键背景：坚果云 WebDAV 不支持 Depth::Infinity——发 infinity 时服务端
-/// 静默降级成只返回一层（实测 infinity 与 depth=1 返回字节完全一致），
-/// 导致 `pull_from_remote` 永远看不到任何 .md 文件。
-///
-/// 解法（与 Obsidian Remotely Save / rclone 一致）：逐层 PROPFIND depth=1，
-/// 遇到文件夹就递归再列一层，把整棵树走完。坚果云 600 次/30 分钟的限速
-/// 对本工具的规模（几个分类、几十个文件）完全够用。
-///
-/// - 跳过 `.trash` 目录（含其所有后代）
-/// - 跳过根目录自身（depth=1 会把被列目录自己也返回一次）
-/// - 单个目录列举失败不中断整树：记录到 errors，继续其它目录
-async fn walk_remote(client: &Client, root: &str, errors: &mut Vec<String>) -> Vec<RemoteFile> {
-    let mut files: Vec<RemoteFile> = Vec::new();
-    // 待访问的远程相对目录路径队列（相对 root，空串表示根目录）
-    let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-    queue.push_back(String::new());
-
-    while let Some(rel_dir) = queue.pop_front() {
-        // 该层的请求路径：根用 "/{root}/"，子目录用 "/{root}/{rel_dir}/"
-        let req_path = if rel_dir.is_empty() {
-            format!("/{root}/")
-        } else {
-            format!("/{root}/{rel_dir}/")
-        };
-
-        let entities = match client.list(&req_path, Depth::Number(1)).await {
-            Ok(es) => es,
-            Err(e) => {
-                // 单层列举失败：记录后继续其它分支，不让整次同步崩溃
-                let label = if rel_dir.is_empty() {
-                    "/".to_string()
-                } else {
-                    format!("{rel_dir}/")
-                };
-                errors.push(format!("列出远程目录 {label} 失败: {e}"));
-                continue;
-            }
-        };
-
-        for entity in entities {
-            match entity {
-                ListEntity::File(file) => {
-                    let Some(rel) = extract_rel_path(&file.href, root) else {
-                        continue;
-                    };
-                    // 过滤 .trash 及任何 . 开头的目录（防御）
-                    if is_trash_or_hidden_rel(&rel) {
-                        continue;
-                    }
-                    files.push(RemoteFile {
-                        rel,
-                        content_length: file.content_length,
-                    });
-                }
-                ListEntity::Folder(folder) => {
-                    let Some(rel) = extract_rel_path(&folder.href, root) else {
-                        continue;
-                    };
-                    // 跳过根自身（depth=1 会把被列目录自身作为 Folder 返回一次）
-                    if rel == rel_dir || rel.is_empty() {
-                        continue;
-                    }
-                    // 过滤 .trash / 隐藏目录，不递归进去
-                    if is_trash_or_hidden_rel(&rel) {
-                        continue;
-                    }
-                    queue.push_back(rel);
-                }
-            }
+impl SyncMeta {
+    fn new(scope: &str) -> Self {
+        Self {
+            version: 2,
+            scope: scope.into(),
+            files: Default::default(),
         }
     }
-
-    files
 }
 
-/// 判断相对路径是否落在 .trash 或任意隐藏目录下（不参与同步）
-/// 例：".trash/x.md" / "a/.trash/b.md" / ".hidden/y.md" 均返回 true
-fn is_trash_or_hidden_rel(rel: &str) -> bool {
-    rel.split('/')
-        .any(|seg| seg == ".trash" || seg.starts_with('.'))
+fn sync_scope(client: &Client, root: &str) -> String {
+    let user = match &client.auth {
+        Auth::Basic(user, _) | Auth::Digest(user, _) => user.as_str(),
+        Auth::Anonymous => "",
+    };
+    serde_json::to_string(&(&client.host, user, root)).expect("strings serialize")
 }
 
-/// 全量上传：把本地所有文件推送到远程（只增不删，不删除云端多余文件）
-/// 内容校对（杜绝无限制重复上传）：
-///   上传前算本地内容哈希(FNV-1a)，与 .sync_meta.json 里记录的「上次上传哈希」比对：
-///   - 哈希相同 → 内容未变 → 跳过
-///   - 哈希不同 或 无记录 → 上传，上传成功后更新记录
-///     这完全不依赖服务端 ETag 算法，100% 由客户端掌控，准确可靠。
-pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
-    let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
-    let root = sanitize_remote_path(&cfg.remote_root);
-
-    // 确保远程根目录存在
-    let _ = client.mkcol(&format!("/{root}")).await;
-
-    // 读取上次上传记录 { 路径: 哈希 }
-    let mut sync_meta: std::collections::HashMap<String, u64> = load_sync_meta(local_dir);
-
-    let mut uploaded = 0u32;
-    let mut skipped = 0u32;
-    let mut errors: Vec<String> = Vec::new();
-
-    // 遍历本地所有 .md 文件 + .order.json
-    for entry in walkdir::WalkDir::new(local_dir)
-        .min_depth(1)
-        .into_iter()
-        .filter_entry(|e| {
-            // 排除 .trash / .sync_meta.json 自身
-            let name = e.file_name().to_string_lossy();
-            name != ".trash" && name != ".sync_meta.json"
-        })
-        .filter_map(|e| e.ok())
-    {
-        if !entry.file_type().is_file() {
-            continue;
+fn load_sync_meta(local_dir: &Path, scope: &str) -> Result<SyncMeta, String> {
+    let path = local_dir.join(".sync_meta.json");
+    match std::fs::symlink_metadata(&path) {
+        Ok(info) if !info.is_file() || info.file_type().is_symlink() => {
+            return Err("同步基线不是普通文件".into())
         }
-        let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str());
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-
-        let is_md = ext == Some("md");
-        let is_order = name == ".order.json";
-        if !is_md && !is_order {
-            continue;
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SyncMeta::new(scope))
         }
-        if name.starts_with('~') {
-            continue;
-        }
-
-        let rel = path.strip_prefix(local_dir).map_err(|e| e.to_string())?;
-        let rel_unix = rel.to_string_lossy().replace('\\', "/");
-
-        let local_content = match std::fs::read(path) {
-            Ok(c) => c,
-            Err(e) => {
-                errors.push(format!("{rel_unix}（读文件）: {e}"));
-                continue;
-            }
-        };
-
-        // 内容校对：本地哈希 vs 上次上传记录的哈希
-        let local_hash = fnv1a_hash(&local_content);
-        if let Some(&last_hash) = sync_meta.get(&rel_unix) {
-            if last_hash == local_hash {
-                skipped += 1;
-                continue; // 内容未变，跳过
-            }
-        }
-
-        // 确保远程目录存在
-        if let Err(e) = ensure_remote_dirs(&client, &root, &rel_unix).await {
-            errors.push(format!("{rel_unix}（建目录）: {e}"));
-            continue;
-        }
-
-        match client
-            .put(&format!("/{root}/{rel_unix}"), local_content)
-            .await
-        {
-            Ok(()) => {
-                uploaded += 1;
-                // 上传成功，更新记录
-                sync_meta.insert(rel_unix, local_hash);
-            }
-            Err(e) => errors.push(format!("{rel_unix}: {e}")),
-        }
+        Err(error) => return Err(error.to_string()),
+        _ => {}
     }
-
-    // 持久化更新后的记录
-    save_sync_meta(local_dir, &sync_meta);
-
-    Ok(SyncReport {
-        uploaded,
-        skipped,
-        errors,
-        ..Default::default()
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("同步基线损坏: {e}"))?;
+    if value.get("version").and_then(serde_json::Value::as_u64) != Some(2) {
+        return Ok(SyncMeta::new(scope));
+    }
+    let meta: SyncMeta = serde_json::from_value(value).map_err(|e| format!("同步基线损坏: {e}"))?;
+    Ok(if meta.scope == scope {
+        meta
+    } else {
+        SyncMeta::new(scope)
     })
 }
 
-/// 读取 .sync_meta.json（记录每个文件上次上传时的内容哈希）
-fn load_sync_meta(local_dir: &Path) -> std::collections::HashMap<String, u64> {
+fn save_sync_meta(local_dir: &Path, meta: &SyncMeta) -> Result<(), String> {
     let path = local_dir.join(".sync_meta.json");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    if std::fs::symlink_metadata(&path)
+        .is_ok_and(|info| !info.is_file() || info.file_type().is_symlink())
+    {
+        return Err("同步基线不是普通文件".into());
+    }
+    let bytes = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
+    crate::recovery::atomic_write(&path, &bytes).map_err(|e| format!("保存同步基线失败: {e}"))
 }
 
-/// 写入 .sync_meta.json
-fn save_sync_meta(local_dir: &Path, meta: &std::collections::HashMap<String, u64>) {
-    let path = local_dir.join(".sync_meta.json");
-    if let Ok(json) = serde_json::to_string_pretty(meta) {
-        let _ = std::fs::write(path, json);
+async fn pull_with_client(
+    client: &Client,
+    root: &str,
+    local_dir: &Path,
+) -> Result<SyncReport, String> {
+    validate_root(root)?;
+    let canonical_dir = std::fs::canonicalize(local_dir).map_err(|e| e.to_string())?;
+    let local_dir = canonical_dir.as_path();
+    let mut report = SyncReport::default();
+    let mut meta = load_sync_meta(local_dir, &sync_scope(client, root))?;
+    let files = walk_remote(client, root, &mut report.errors).await;
+    for rel in files {
+        let result = async {
+            let path = crate::recovery::checked_path(local_dir, &rel).map_err(|e| e.to_string())?;
+            let remote = fetch_remote(client, root, &rel)
+                .await?
+                .ok_or("远程文件在列举后已不存在")?;
+            let local = read_optional(&path)?;
+            if local.as_deref() == Some(remote.content.as_bytes()) {
+                meta.files.insert(rel.clone(), remote.content);
+                report.skipped += 1;
+                return Ok::<(), String>(());
+            }
+            if let Some(local) = local.as_deref() {
+                let base = meta.files.get(&rel).map(String::as_bytes);
+                if base == Some(remote.content.as_bytes()) {
+                    // Only the local side changed. Download is not permission to discard it.
+                    report.skipped += 1;
+                    return Ok(());
+                }
+                if base != Some(local) {
+                    record_conflict(local_dir, &rel, &remote.content, &mut report)?;
+                    return Ok(());
+                }
+            }
+            write_download(local_dir, &rel, local.as_deref(), remote.content.as_bytes())?;
+            meta.files.insert(rel.clone(), remote.content);
+            report.downloaded += 1;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            report.errors.push(format!("{rel}: {error}"));
+        }
+    }
+    // No deletion pass: neither an incomplete listing nor a remote deletion is
+    // sufficient evidence to remove an independent or locally changed prompt.
+    save_sync_meta(local_dir, &meta)?;
+    Ok(report)
+}
+
+fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
     }
 }
 
-/// FNV-1a 64 位哈希（轻量内容指纹，无外部依赖，对内容任何变化敏感）
-fn fnv1a_hash(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &b in data {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
+fn write_download(
+    root: &Path,
+    rel: &str,
+    expected: Option<&[u8]>,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let path = crate::recovery::checked_path(root, rel).map_err(|e| e.to_string())?;
+    if read_optional(&path)?.as_deref() != expected {
+        return Err("下载期间本地内容已变化，已保留本地文件，请重试".into());
     }
-    hash
+    if expected.is_some() {
+        crate::recovery::snapshot(root, &path, "sync")
+            .map_err(|e| format!("备份失败，未覆盖原文件: {e}"))?;
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // Revalidate after creating parents / taking the snapshot.
+    let path = crate::recovery::checked_path(root, rel).map_err(|e| e.to_string())?;
+    if read_optional(&path)?.as_deref() != expected {
+        return Err("下载期间本地内容已变化，已保留本地文件，请重试".into());
+    }
+    crate::recovery::atomic_write(&path, bytes).map_err(|e| e.to_string())
 }
 
-// ────────────────────────────────────────────────
-// 辅助函数
-// ────────────────────────────────────────────────
+fn record_conflict(
+    root: &Path,
+    rel: &str,
+    remote: &str,
+    report: &mut SyncReport,
+) -> Result<(), String> {
+    use std::io::Write;
+    let original = crate::recovery::checked_path(root, rel).map_err(|e| e.to_string())?;
+    let parent = original.parent().ok_or("冲突文件缺少父目录")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let stem = original
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("prompt")
+        .trim_start_matches('.');
+    let ext = original
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("md");
+    // Content-derived names reuse an existing identical conflict; a collision
+    // always compares bytes and picks another name, never overwrites a file.
+    for index in 0..1000 {
+        let name = format!(
+            "{stem}.remote-conflict-{:016x}-{index}.{ext}",
+            fnv1a_hash(remote.as_bytes())
+        );
+        let path = parent.join(name);
+        let conflict_rel = path
+            .strip_prefix(root)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let path = crate::recovery::checked_path(root, &conflict_rel).map_err(|e| e.to_string())?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if original.exists() {
+                    if let Err(error) = crate::recovery::snapshot(root, &original, "sync") {
+                        drop(file);
+                        let _ = std::fs::remove_file(&path);
+                        return Err(format!("冲突备份失败: {error}"));
+                    }
+                }
+                if let Err(error) = file
+                    .write_all(remote.as_bytes())
+                    .and_then(|_| file.sync_all())
+                {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!("保存冲突副本失败: {error}"));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::read(&path).map_err(|e| e.to_string())? != remote.as_bytes() {
+                    continue;
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+        report.conflicts += 1;
+        report.errors.push(format!(
+            "{rel}: 保留本地内容，远程冲突副本已保存为 {conflict_rel}"
+        ));
+        return Ok(());
+    }
+    Err("无法分配冲突副本文件名".into())
+}
 
-/// 规范化远程路径：去首尾斜杠
+struct RemoteContent {
+    content: String,
+    etag: Option<String>,
+}
+
+async fn fetch_remote(
+    client: &Client,
+    root: &str,
+    rel: &str,
+) -> Result<Option<RemoteContent>, String> {
+    let response = client
+        .get_raw(&remote_path(root, rel))
+        .await
+        .map_err(|e| format!("GET 失败: {e}"))?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        return Err(format!("GET 失败: {}", response.status()));
+    }
+    let response = response
+        .error_for_status()
+        .map_err(|e| format!("GET 失败: {e}"))?;
+    let etag = response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .filter(|tag| tag.starts_with('"') && tag.ends_with('"'))
+        .map(str::to_owned);
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    let content =
+        String::from_utf8(bytes.to_vec()).map_err(|e| format!("远程文件不是有效 UTF-8: {e}"))?;
+    Ok(Some(RemoteContent { content, etag }))
+}
+
+async fn walk_remote(client: &Client, root: &str, errors: &mut Vec<String>) -> Vec<String> {
+    let mut files = std::collections::BTreeSet::new();
+    let mut queue = std::collections::VecDeque::from([String::new()]);
+    let mut visited = HashSet::new();
+    while let Some(dir) = queue.pop_front() {
+        if !visited.insert(dir.clone()) {
+            continue;
+        }
+        let request = format!("{}/", remote_path(root, &dir).trim_end_matches('/'));
+        let entities = match client.list(&request, Depth::Number(1)).await {
+            Ok(entities) => entities,
+            Err(error) => {
+                errors.push(format!("列出远程目录 {dir}/ 失败: {error}"));
+                continue;
+            }
+        };
+        for entity in entities {
+            match entity {
+                ListEntity::File(file) => {
+                    if let Some(rel) =
+                        extract_rel_path(&file.href, root).filter(|rel| is_sync_file(rel))
+                    {
+                        files.insert(rel);
+                    }
+                }
+                ListEntity::Folder(folder) => {
+                    if let Some(rel) =
+                        extract_rel_path(&folder.href, root).filter(|rel| is_sync_dir(rel))
+                    {
+                        if rel != dir && !visited.contains(&rel) {
+                            queue.push_back(rel);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    files.into_iter().collect()
+}
+
+fn is_sync_dir(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.contains(['\\', ':', '\0'])
+        && rel
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.starts_with('~'))
+}
+
+fn is_sync_file(rel: &str) -> bool {
+    let (parent, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    if !parent.is_empty() && !is_sync_dir(parent) {
+        return false;
+    }
+    if name.is_empty()
+        || name.contains(['\\', ':', '\0'])
+        || name.starts_with('~')
+        || name.contains(".remote-conflict-")
+    {
+        return false;
+    }
+    name == ".order.json"
+        || name == ".category-order.json"
+        || (!name.starts_with('.') && name.ends_with(".md"))
+}
+
+/// 上传始终读取远端当前内容。只有共同基线未在远端变化时才允许覆盖，
+/// 并使用强 ETag 的 If-Match（新文件使用 If-None-Match:*）保护 GET/PUT 竞争。
+pub async fn push_all_to_remote(cfg: &CloudConfig, local_dir: &Path) -> Result<SyncReport, String> {
+    let client = build_client(cfg).map_err(|e| format!("客户端构建失败: {e}"))?;
+    push_with_client(&client, &sanitize_remote_path(&cfg.remote_root), local_dir).await
+}
+
+async fn push_with_client(
+    client: &Client,
+    root: &str,
+    local_dir: &Path,
+) -> Result<SyncReport, String> {
+    validate_root(root)?;
+    let canonical_dir = std::fs::canonicalize(local_dir).map_err(|e| e.to_string())?;
+    let local_dir = canonical_dir.as_path();
+    let mut report = SyncReport::default();
+    let mut meta = load_sync_meta(local_dir, &sync_scope(client, root))?;
+    ensure_remote_dirs(client, root, "").await?;
+    for entry in walkdir::WalkDir::new(local_dir)
+        .min_depth(1)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            if entry.file_type().is_symlink() {
+                return false;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(local_dir)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            if entry.file_type().is_dir() {
+                is_sync_dir(&rel)
+            } else {
+                is_sync_file(&rel)
+            }
+        })
+    {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                report.errors.push(error.to_string());
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(local_dir)
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let result = async {
+            let path = crate::recovery::checked_path(local_dir, &rel).map_err(|e| e.to_string())?;
+            let local = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let remote = fetch_remote(client, root, &rel).await?;
+            if remote.as_ref().is_some_and(|r| r.content == local) {
+                meta.files.insert(rel.clone(), local);
+                report.skipped += 1;
+                return Ok::<(), String>(());
+            }
+            if let Some(remote) = &remote {
+                if meta.files.get(&rel) != Some(&remote.content) || remote.etag.is_none() {
+                    record_conflict(local_dir, &rel, &remote.content, &mut report)?;
+                    return Ok(());
+                }
+            } else if meta.files.contains_key(&rel) {
+                // A remote deletion and a surviving local file need an explicit
+                // decision; silently recreating it could undo another device.
+                report.conflicts += 1;
+                report.errors.push(format!(
+                    "{rel}: 远程文件已删除，已保留本地文件，未自动重新上传"
+                ));
+                return Ok(());
+            }
+            ensure_remote_dirs(client, root, &rel).await?;
+            let mut request = client
+                .start_request(reqwest::Method::PUT, &remote_path(root, &rel))
+                .await
+                .map_err(|e| e.to_string())?;
+            request = match remote.as_ref().and_then(|r| r.etag.as_ref()) {
+                Some(etag) => request.header(reqwest::header::IF_MATCH, etag),
+                None => request.header(reqwest::header::IF_NONE_MATCH, "*"),
+            };
+            let response = request
+                .body(local.clone())
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if response.status() == reqwest::StatusCode::PRECONDITION_FAILED
+                || response.status() == reqwest::StatusCode::CONFLICT
+            {
+                if let Some(latest) = fetch_remote(client, root, &rel).await? {
+                    record_conflict(local_dir, &rel, &latest.content, &mut report)?;
+                } else {
+                    report.conflicts += 1;
+                    report
+                        .errors
+                        .push(format!("{rel}: 上传期间远程文件已变化，未覆盖"));
+                }
+                return Ok(());
+            }
+            response
+                .error_for_status()
+                .map_err(|e| format!("PUT 失败: {e}"))?;
+            meta.files.insert(rel.clone(), local);
+            report.uploaded += 1;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            report.errors.push(format!("{rel}: {error}"));
+        }
+    }
+    save_sync_meta(local_dir, &meta)?;
+    Ok(report)
+}
+
+async fn ensure_remote_dirs(client: &Client, root: &str, rel: &str) -> Result<(), String> {
+    let parent = rel.rsplit_once('/').map_or("", |(parent, _)| parent);
+    let mut parts = vec![root.to_string()];
+    let mut accumulated = String::new();
+    for part in parent.split('/').filter(|part| !part.is_empty()) {
+        if !accumulated.is_empty() {
+            accumulated.push('/');
+        }
+        accumulated.push_str(part);
+        parts.push(format!("{root}/{accumulated}"));
+    }
+    for path in parts {
+        let response = client
+            .mkcol_raw(&format!("/{}", encode_path(&path)))
+            .await
+            .map_err(|e| e.to_string())?;
+        if !response.status().is_success()
+            && response.status() != reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            return Err(format!("创建远程目录失败: {}", response.status()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_root(root: &str) -> Result<(), String> {
+    if is_sync_dir(root) {
+        Ok(())
+    } else {
+        Err("远程根路径不能为空或包含隐藏/上级目录".into())
+    }
+}
+
 fn sanitize_remote_path(s: &str) -> String {
     s.trim_matches('/').to_string()
 }
 
-/// 紧凑时间戳，用于备份文件名（如 20260628T153000）
-fn now_iso_compact() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let days = secs / 86400;
-    let rem = secs % 86400;
-    let h = rem / 3600;
-    let m = (rem % 3600) / 60;
-    let s = rem % 60;
-    let (y, mo, d) = civil_from_days(days as i64);
-    format!("{:04}{:02}{:02}T{:02}{:02}{:02}", y, mo, d, h, m, s)
+fn remote_path(root: &str, rel: &str) -> String {
+    format!("/{}/{}", encode_path(root), encode_path(rel))
 }
 
-/// Howard Hinnant 的 days_from_civil 逆运算
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+fn encode_path(path: &str) -> String {
+    path.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
-/// 从 WebDAV href 中提取相对于 remote_root 的路径
-/// href 形如 /dav/PromptPocket/%E5%86%99%E4%BD%9C/a.md
-/// 返回 写作/a.md（URL 解码 + 去掉根前缀）
 fn extract_rel_path(href: &str, root: &str) -> Option<String> {
-    // URL 解码
-    let decoded = urlencoding_decode(href)?;
-    // 找到 root 之后的部分
-    let marker = format!("/{root}/");
-    let idx = decoded.find(&marker)?;
-    let after = &decoded[idx + marker.len()..];
-    if after.is_empty() {
-        return None;
-    }
-    Some(after.to_string())
-}
-
-/// 简单的 URL 解码（处理 %XX），正确处理多字节 UTF-8
-fn urlencoding_decode(s: &str) -> Option<String> {
-    let mut bytes_out: Vec<u8> = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?;
-            if let Ok(byte) = u8::from_str_radix(hex, 16) {
-                bytes_out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        bytes_out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(bytes_out).ok()
-}
-
-/// 下载单个远程文件到本地
-async fn download_file(
-    client: &Client,
-    root: &str,
-    rel: &str,
-    local_path: &Path,
-) -> Result<(), String> {
-    if let Some(parent) = local_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let resp = client
-        .get(&format!("/{root}/{rel}"))
-        .await
-        .map_err(|e| format!("GET 失败: {e}"))?;
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("读取响应失败: {e}"))?;
-    std::fs::write(local_path, &bytes).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// 清理本地缓存中"远程已不存在"的 .md 文件
-/// 关键修复：
-/// 1. 跳过 .trash 目录（不递归清理备份文件）
-/// 2. 跳过隐藏文件（以 . 开头）
-fn clean_local_extra(
-    local_dir: &Path,
-    remote_files: &HashSet<String>,
-    current_rel: &Path,
-    deleted: &mut u32,
-) -> Result<(), String> {
-    let scan_dir = if current_rel.as_os_str().is_empty() {
-        local_dir.to_path_buf()
+    let path = if href.starts_with("http://") || href.starts_with("https://") {
+        reqwest::Url::parse(href).ok()?.path().to_string()
     } else {
-        local_dir.join(current_rel)
+        href.to_string()
     };
-
-    let entries = match std::fs::read_dir(&scan_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-
-        // 跳过 .trash 和所有隐藏目录/文件（不参与清理）
-        if name.starts_with('.') {
-            continue;
-        }
-
-        if path.is_dir() {
-            let sub_rel = current_rel.join(&name);
-            clean_local_extra(local_dir, remote_files, &sub_rel, deleted)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
-            let rel_unix = path
-                .strip_prefix(local_dir)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_default();
-            if !remote_files.contains(&rel_unix) {
-                // 备份到 .trash/ 后删除（避免永久丢失）
-                let trash_dir = local_dir.join(".trash");
-                let _ = std::fs::create_dir_all(&trash_dir);
-                let backup_name = format!(
-                    "{}_{}.md",
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("untitled"),
-                    now_iso_compact()
-                );
-                let backup_path = trash_dir.join(backup_name);
-                if std::fs::rename(&path, &backup_path).is_err() {
-                    let _ = std::fs::remove_file(&path);
-                }
-                *deleted += 1;
-            }
-        }
+    let decoded = urlencoding_decode(&path)?;
+    let marker = format!("/{root}/");
+    let index = decoded.find(&marker)?;
+    let rel = decoded[index + marker.len()..].trim_end_matches('/');
+    if rel.is_empty()
+        || rel
+            .split('/')
+            .any(|part| part == "." || part == ".." || part.is_empty())
+        || rel.contains(['\\', ':', '\0'])
+    {
+        None
+    } else {
+        Some(rel.into())
     }
-    Ok(())
 }
 
-/// 逐级创建远程目录（如 写作/子目录/a.md 会先 mkcol 写作 再 mkcol 写作/子目录）
-async fn ensure_remote_dirs(client: &Client, root: &str, rel_unix: &str) -> Result<(), String> {
-    // 取出文件所在的目录路径
-    let parent = match rel_unix.rfind('/') {
-        Some(i) => &rel_unix[..i],
-        None => return Ok(()), // 文件在根目录，无需建目录
-    };
-
-    // 逐级 mkcol（忽略"已存在"错误）
-    let mut acc = String::new();
-    for part in parent.split('/') {
-        if part.is_empty() {
-            continue;
-        }
-        acc = if acc.is_empty() {
-            part.to_string()
+fn urlencoding_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
         } else {
-            format!("{acc}/{part}")
-        };
-        let _ = client.mkcol(&format!("/{root}/{acc}")).await;
+            decoded.push(bytes[index]);
+            index += 1;
+        }
     }
-    Ok(())
+    String::from_utf8(decoded).ok()
+}
+
+// Used only to name conflict copies; all sync decisions compare exact content.
+fn fnv1a_hash(data: &[u8]) -> u64 {
+    data.iter().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression contract for the new synchronizer. Tests use isolated temporary
+    // libraries and a loopback-only DAV server; never the configured user account.
+    #[test]
+    fn equal_length_remote_edit_is_downloaded_and_old_version_is_recoverable() {
+        let dir = TestDir::new();
+        let server = MockDav::new(&[("a.md", b"old")]);
+        run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        server.set("a.md", b"new");
+        let report = run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        assert_eq!(report.downloaded, 1, "{report:?}");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(std::fs::read(dir.0.join("a.md")).unwrap(), b"new");
+        let recovered = crate::recovery::list_recovery(&dir.0).unwrap();
+        assert!(
+            recovered.iter().any(|entry| entry.original_path == "a.md"
+                && entry.kind == "sync"
+                && crate::recovery::read_recovery(&dir.0, &entry.id).unwrap() == "old"),
+            "{recovered:?}"
+        );
+    }
+
+    #[test]
+    fn failed_snapshot_prevents_download_overwrite_and_baseline_advance() {
+        let dir = TestDir::new();
+        let server = MockDav::new(&[("a.md", b"base")]);
+        let initial = run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        assert!(initial.errors.is_empty(), "{initial:?}");
+        std::fs::write(dir.0.join(".recovery"), b"blocked directory").unwrap();
+        server.set("a.md", b"new content");
+        let report = run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        assert_eq!(report.downloaded, 0);
+        assert!(
+            report.errors.iter().any(|error| error.contains("备份失败")),
+            "{report:?}"
+        );
+        assert_eq!(std::fs::read(dir.0.join("a.md")).unwrap(), b"base");
+        let baseline =
+            load_sync_meta(&dir.0, &sync_scope(&server.client(), "PromptPocket")).unwrap();
+        assert_eq!(baseline.files["a.md"], "base");
+    }
+
+    #[test]
+    fn incomplete_listing_and_failed_download_never_remove_local_files() {
+        let dir = TestDir::new();
+        let server = MockDav::new(&[("a.md", b"remote"), ("folder/b.md", b"remote")]);
+        std::fs::write(dir.0.join("local.md"), b"only here").unwrap();
+        server
+            .state
+            .lock()
+            .unwrap()
+            .failed_list
+            .insert("folder".into());
+        server
+            .state
+            .lock()
+            .unwrap()
+            .failed_get
+            .insert("a.md".into());
+        let report = run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        assert!(
+            report.errors.iter().any(|error| error.contains("folder/")),
+            "{report:?}, requests: {:?}",
+            server.state.lock().unwrap().requests
+        );
+        assert!(report.errors.iter().any(|error| error.contains("a.md")));
+        assert_eq!(report.deleted, 0);
+        assert_eq!(std::fs::read(dir.0.join("local.md")).unwrap(), b"only here");
+    }
+
+    #[test]
+    fn local_only_and_local_edits_survive_download() {
+        let dir = TestDir::new();
+        let server = MockDav::new(&[("a.md", b"base")]);
+        run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        std::fs::write(dir.0.join("a.md"), b"my edit").unwrap();
+        std::fs::write(dir.0.join("local.md"), b"only here").unwrap();
+        let report = run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        assert_eq!(report.downloaded, 0);
+        assert_eq!(std::fs::read(dir.0.join("a.md")).unwrap(), b"my edit");
+        assert!(dir.0.join("local.md").exists());
+    }
+
+    #[test]
+    fn diverged_or_unbased_files_preserve_both_versions_and_do_not_advance_baseline() {
+        for establish_base in [false, true] {
+            let dir = TestDir::new();
+            let server = MockDav::new(&[("a.md", b"base")]);
+            if establish_base {
+                run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+            }
+            std::fs::write(dir.0.join("a.md"), b"local edit").unwrap();
+            server.set("a.md", b"remote edit");
+            let report = run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+            assert_eq!(report.conflicts, 1);
+            assert_eq!(std::fs::read(dir.0.join("a.md")).unwrap(), b"local edit");
+            assert!(std::fs::read_dir(&dir.0)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("remote-conflict")
+                    && std::fs::read(entry.path()).ok().as_deref() == Some(b"remote edit")));
+            let again = run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+            assert_eq!(again.conflicts, 1);
+        }
+    }
+
+    #[test]
+    fn order_metadata_roundtrips_but_hidden_files_and_symlinks_do_not_sync() {
+        let dir = TestDir::new();
+        let server = MockDav::new(&[
+            (".category-order.json", b"[]"),
+            ("folder/.order.json", b"[]"),
+            (".hidden/a.md", b"secret"),
+        ]);
+        let report = run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        assert_eq!(
+            report.downloaded,
+            2,
+            "{report:?}, requests: {:?}",
+            server.state.lock().unwrap().requests
+        );
+        assert!(!dir.0.join(".hidden").exists());
+        std::fs::write(dir.0.join(".category-order.json"), b"[\"folder\"]").unwrap();
+        std::fs::write(dir.0.join("folder/.order.json"), b"[\"a.md\"]").unwrap();
+        std::fs::create_dir(dir.0.join(".private")).unwrap();
+        std::fs::write(dir.0.join(".private/secret.md"), b"private").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.0.join(".private/secret.md"), dir.0.join("link.md"))
+            .unwrap();
+        let report = run(push_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        assert_eq!(report.uploaded, 2);
+        let state = server.state.lock().unwrap();
+        assert_eq!(state.files[".category-order.json"], b"[\"folder\"]");
+        assert_eq!(state.files["folder/.order.json"], b"[\"a.md\"]");
+        assert!(!state.files.contains_key(".private/secret.md"));
+        assert!(!state.files.contains_key("link.md"));
+        assert!(!state.files.contains_key(".sync_meta.json"));
+    }
+
+    #[test]
+    fn upload_uses_preconditions_and_preserves_a_concurrent_remote_edit() {
+        let dir = TestDir::new();
+        let server = MockDav::new(&[("a.md", b"base")]);
+        run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        std::fs::write(dir.0.join("a.md"), b"local edit").unwrap();
+        server.state.lock().unwrap().race_on_put = true;
+        let report = run(push_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        assert_eq!(report.uploaded, 0);
+        assert_eq!(report.conflicts, 1);
+        assert_eq!(
+            server.state.lock().unwrap().files["a.md"],
+            b"concurrent edit"
+        );
+        assert_eq!(std::fs::read(dir.0.join("a.md")).unwrap(), b"local edit");
+    }
+
+    #[test]
+    fn upload_without_etag_refuses_existing_remote_overwrite() {
+        let dir = TestDir::new();
+        let server = MockDav::new(&[("a.md", b"base")]);
+        run(pull_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        std::fs::write(dir.0.join("a.md"), b"local edit").unwrap();
+        server.state.lock().unwrap().omit_etag = true;
+        let report = run(push_with_client(&server.client(), "PromptPocket", &dir.0)).unwrap();
+        assert_eq!(report.uploaded, 0);
+        assert_eq!(report.conflicts, 1);
+        assert_eq!(server.state.lock().unwrap().files["a.md"], b"base");
+    }
+
+    fn run<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    struct TestDir(std::path::PathBuf);
+    impl TestDir {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "pp-sync-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[derive(Default)]
+    struct DavState {
+        files: std::collections::BTreeMap<String, Vec<u8>>,
+        requests: Vec<String>,
+        failed_list: HashSet<String>,
+        failed_get: HashSet<String>,
+        race_on_put: bool,
+        omit_etag: bool,
+    }
+    struct MockDav {
+        host: String,
+        state: std::sync::Arc<std::sync::Mutex<DavState>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl MockDav {
+        fn new(files: &[(&str, &[u8])]) -> Self {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let host = format!("http://{}", listener.local_addr().unwrap());
+            let state = std::sync::Arc::new(std::sync::Mutex::new(DavState::default()));
+            state
+                .lock()
+                .unwrap()
+                .files
+                .extend(files.iter().map(|(p, b)| (p.to_string(), b.to_vec())));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let shared = state.clone();
+            let stopped = stop.clone();
+            let thread = std::thread::spawn(move || {
+                while !stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(s) => s,
+                        Err(_) => {
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                            continue;
+                        }
+                    };
+                    // On macOS an accepted socket inherits O_NONBLOCK from the
+                    // listener. Blocking reads are required for fragmented HTTP
+                    // headers/body; otherwise a normal WouldBlock closes it.
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .unwrap();
+                    let mut input = Vec::new();
+                    let mut buffer = [0u8; 4096];
+                    let boundary = loop {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => break None,
+                            Ok(n) => input.extend_from_slice(&buffer[..n]),
+                        }
+                        if let Some(pos) = input.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break Some(pos + 4);
+                        }
+                    };
+                    let Some(boundary) = boundary else {
+                        continue;
+                    };
+                    let head = String::from_utf8_lossy(&input[..boundary]).into_owned();
+                    let mut lines = head.lines();
+                    let request: Vec<_> = lines.next().unwrap().split_whitespace().collect();
+                    let headers: std::collections::BTreeMap<_, _> = lines
+                        .filter_map(|line| line.split_once(':'))
+                        .map(|(k, v)| (k.to_lowercase(), v.trim().to_string()))
+                        .collect();
+                    let length = headers
+                        .get("content-length")
+                        .and_then(|n| n.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while input.len() < boundary + length {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => input.extend_from_slice(&buffer[..n]),
+                        }
+                    }
+                    let path = urlencoding_decode(request[1]).unwrap();
+                    let rel = path.trim_start_matches("/PromptPocket").trim_matches('/');
+                    let mut state = shared.lock().unwrap();
+                    state.requests.push(format!("{} {path}", request[0]));
+                    let mut status = 200;
+                    let mut extra = String::new();
+                    let body = match request[0] {
+                        "PROPFIND" if state.failed_list.contains(rel) => {
+                            status = 500;
+                            Vec::new()
+                        }
+                        "PROPFIND" => {
+                            status = 207;
+                            dav_listing(&state.files, rel).into_bytes()
+                        }
+                        "GET" if state.failed_get.contains(rel) => {
+                            status = 500;
+                            Vec::new()
+                        }
+                        "GET" => match state.files.get(rel) {
+                            Some(bytes) => {
+                                if !state.omit_etag {
+                                    extra = format!("ETag: \"{}\"\r\n", fnv1a_hash(bytes));
+                                }
+                                bytes.clone()
+                            }
+                            None => {
+                                status = 404;
+                                Vec::new()
+                            }
+                        },
+                        "PUT" => {
+                            if state.race_on_put {
+                                state.race_on_put = false;
+                                state.files.insert(rel.into(), b"concurrent edit".to_vec());
+                            }
+                            let current = state
+                                .files
+                                .get(rel)
+                                .map(|b| format!("\"{}\"", fnv1a_hash(b)));
+                            let allowed = match headers.get("if-match") {
+                                Some(tag) => current.as_ref() == Some(tag),
+                                None => {
+                                    headers.get("if-none-match").is_some_and(|tag| tag == "*")
+                                        && current.is_none()
+                                }
+                            };
+                            if allowed {
+                                state.files.insert(rel.into(), input[boundary..].to_vec());
+                                status = 201;
+                            } else {
+                                status = 412;
+                            }
+                            Vec::new()
+                        }
+                        "MKCOL" => {
+                            status = 201;
+                            Vec::new()
+                        }
+                        _ => {
+                            status = 405;
+                            Vec::new()
+                        }
+                    };
+                    let response = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n", body.len());
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.write_all(&body);
+                }
+            });
+            Self {
+                host,
+                state,
+                stop,
+                thread: Some(thread),
+            }
+        }
+        fn client(&self) -> Client {
+            ClientBuilder::new()
+                .set_host(self.host.clone())
+                .set_auth(Auth::Anonymous)
+                .build()
+                .unwrap()
+        }
+        fn set(&self, rel: &str, bytes: &[u8]) {
+            self.state
+                .lock()
+                .unwrap()
+                .files
+                .insert(rel.into(), bytes.to_vec());
+        }
+    }
+    impl Drop for MockDav {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+    fn dav_listing(files: &std::collections::BTreeMap<String, Vec<u8>>, dir: &str) -> String {
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let mut entries = std::collections::BTreeMap::new();
+        for (path, bytes) in files {
+            if let Some(tail) = path.strip_prefix(&prefix) {
+                if let Some((folder, _)) = tail.split_once('/') {
+                    entries.insert(format!("{prefix}{folder}/"), None);
+                } else {
+                    entries.insert(path.clone(), Some(bytes.len()));
+                }
+            }
+        }
+        let mut xml = String::from("<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\">");
+        xml.push_str(&format!("<d:response><d:href>/PromptPocket/{prefix}</d:href><d:propstat><d:status>HTTP/1.1 200 OK</d:status><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>"));
+        for (path, size) in entries {
+            let resource = if size.is_none() {
+                "<d:collection/>"
+            } else {
+                ""
+            };
+            xml.push_str(&format!("<d:response><d:href>/PromptPocket/{path}</d:href><d:propstat><d:status>HTTP/1.1 200 OK</d:status><d:prop><d:resourcetype>{resource}</d:resourcetype><d:getlastmodified>Wed, 10 Apr 2019 14:00:00 GMT</d:getlastmodified><d:getcontenttype>text/plain</d:getcontenttype><d:getcontentlength>{}</d:getcontentlength></d:prop></d:propstat></d:response>",size.unwrap_or(0)));
+        }
+        xml.push_str("</d:multistatus>");
+        xml
+    }
 
     #[test]
     fn test_sanitize_remote_path() {
@@ -567,103 +1055,57 @@ mod tests {
         assert_eq!(extract_rel_path("/dav/PromptPocket/", "PromptPocket"), None);
     }
 
-    /// 验证 clean_local_extra 跳过 .trash 目录（不清理备份文件）
     #[test]
-    fn clean_local_extra_skips_trash() {
-        let dir = std::env::temp_dir().join("pp_test_clean_trash");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // .trash 里放一个备份文件
-        let trash = dir.join(".trash");
-        std::fs::create_dir_all(&trash).unwrap();
-        std::fs::write(trash.join("backup.md"), "备份内容").unwrap();
-        // 真实分类里放一个文件
-        std::fs::create_dir_all(dir.join("写作")).unwrap();
-        std::fs::write(dir.join("写作").join("真实.md"), "内容").unwrap();
-
-        // remote_files 为空（远程没有任何文件），clean 应该只清理真实文件，不动 .trash
-        let mut deleted = 0u32;
-        let remote_files: HashSet<String> = HashSet::new();
-        clean_local_extra(&dir, &remote_files, std::path::Path::new(""), &mut deleted).unwrap();
-
-        // 真实文件被移到 .trash（删除计数 +1）
-        assert_eq!(deleted, 1, "应只删除 1 个真实文件");
-        // .trash 里的备份文件仍然存在
-        assert!(trash.join("backup.md").exists(), ".trash 备份不应被清理");
-        // 现在有 2 个文件在 .trash（原备份 + 移入的真实文件）
-        let trash_count = std::fs::read_dir(&trash).unwrap().count();
-        assert_eq!(trash_count, 2, ".trash 应有 2 个文件");
-
-        std::fs::remove_dir_all(&dir).unwrap();
+    fn baseline_roundtrip_is_scoped_and_legacy_hashes_are_not_trusted() {
+        let dir = TestDir::new();
+        let mut meta = SyncMeta::new("account-a");
+        meta.files.insert("写作/a.md".into(), "原文".into());
+        save_sync_meta(&dir.0, &meta).unwrap();
+        assert_eq!(
+            load_sync_meta(&dir.0, "account-a").unwrap().files["写作/a.md"],
+            "原文"
+        );
+        assert!(load_sync_meta(&dir.0, "account-b")
+            .unwrap()
+            .files
+            .is_empty());
+        std::fs::write(dir.0.join(".sync_meta.json"), r#"{"a.md":12345}"#).unwrap();
+        assert!(load_sync_meta(&dir.0, "account-a")
+            .unwrap()
+            .files
+            .is_empty());
     }
 
-    /// 验证 clean_local_extra 正确匹配远程文件（不误删）
     #[test]
-    fn clean_local_extra_keeps_matched() {
-        let dir = std::env::temp_dir().join("pp_test_clean_keep");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::create_dir_all(dir.join("写作")).unwrap();
-        std::fs::write(dir.join("写作").join("保留.md"), "内容").unwrap();
-
-        let mut remote_files: HashSet<String> = HashSet::new();
-        remote_files.insert("写作/保留.md".to_string());
-
-        let mut deleted = 0u32;
-        clean_local_extra(&dir, &remote_files, std::path::Path::new(""), &mut deleted).unwrap();
-
-        assert_eq!(deleted, 0, "远程存在的文件不应被删除");
-        assert!(dir.join("写作").join("保留.md").exists(), "文件应保留");
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// 验证 FNV-1a 哈希对内容变化敏感（相同内容同哈希，不同内容不同哈希）
-    #[test]
-    fn fnv1a_hash_detects_changes() {
-        let h1 = fnv1a_hash(b"hello world");
-        let h2 = fnv1a_hash(b"hello world");
-        let h3 = fnv1a_hash(b"hello world!");
-        assert_eq!(h1, h2, "相同内容应有相同哈希");
-        assert_ne!(h1, h3, "不同内容应有不同哈希");
-    }
-
-    /// 验证 .sync_meta.json 的读写
-    #[test]
-    fn sync_meta_roundtrip() {
-        let dir = std::env::temp_dir().join("pp_test_sync_meta");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let mut meta: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
-        meta.insert("写作/a.md".to_string(), 12345);
-        meta.insert("编程/b.md".to_string(), 67890);
-        save_sync_meta(&dir, &meta);
-
-        let loaded = load_sync_meta(&dir);
-        assert_eq!(loaded.get("写作/a.md"), Some(&12345));
-        assert_eq!(loaded.get("编程/b.md"), Some(&67890));
-        assert!(dir.join(".sync_meta.json").exists());
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// 验证 walk_remote 的路径过滤：.trash 及隐藏目录下的文件应被排除
-    /// 这是 walk_remote 不递归进 .trash、不收录隐藏文件的核心防线。
-    #[test]
-    fn is_trash_or_hidden_rel_filters_correctly() {
-        // 应被排除（true）
-        assert!(is_trash_or_hidden_rel(".trash/x.md"));
-        assert!(is_trash_or_hidden_rel("写作/.trash/b.md"));
-        assert!(is_trash_or_hidden_rel(".cache/y.md"));
-        assert!(is_trash_or_hidden_rel("a/.hidden/b.md"));
-        // 根目录下的隐藏文件
-        assert!(is_trash_or_hidden_rel(".sync_meta.json"));
-
-        // 应保留（false）：正常分类路径
-        assert!(!is_trash_or_hidden_rel("写作/a.md"));
-        assert!(!is_trash_or_hidden_rel("编程/子目录/b.md"));
-        assert!(!is_trash_or_hidden_rel("root.md"));
-        assert!(!is_trash_or_hidden_rel("web服务/html-read.md"));
+    fn sync_whitelist_and_remote_paths_reject_unsafe_or_internal_entries() {
+        for rel in [
+            "a.md",
+            "写作/a.md",
+            ".order.json",
+            ".category-order.json",
+            "写作/.order.json",
+        ] {
+            assert!(is_sync_file(rel), "{rel}");
+        }
+        for rel in [
+            ".trash/a.md",
+            ".cache/a.md",
+            "a/.hidden.md",
+            "../a.md",
+            "a/../../b.md",
+            "a\\b.md",
+            "a/.sync_meta.json",
+            "~a.md",
+            "a.remote-conflict-1.md",
+            "x.txt",
+        ] {
+            assert!(!is_sync_file(rel), "{rel}");
+        }
+        assert!(extract_rel_path("/dav/PromptPocket/%2e%2e/escape.md", "PromptPocket").is_none());
+        assert!(extract_rel_path("/dav/PromptPocket/a%5Cb.md", "PromptPocket").is_none());
+        assert_eq!(
+            remote_path("PromptPocket", "写作/a #%.md"),
+            "/PromptPocket/%E5%86%99%E4%BD%9C/a%20%23%25.md"
+        );
     }
 }

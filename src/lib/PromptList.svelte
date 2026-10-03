@@ -1,6 +1,8 @@
 <script lang="ts">
   import type { Prompt } from "./types";
   import { createTranslator, type Translator } from "./i18n";
+  import type { Library } from "./library";
+  import { highlightParts, searchExcerpt } from "./search";
 
   const fallbackT = createTranslator("zh");
 
@@ -8,9 +10,15 @@
     prompts,
     selectedPath,
     selectedIndex,
+    query = "",
+    compact = false,
+    preferencesDisabled = false,
+    library = {},
     onselect,
     oncontextmenu,
     onreorder,
+    onfavorite = () => {},
+    onmounted,
     draggable = true,
     disabledReason = "",
     t = fallbackT,
@@ -18,10 +26,16 @@
     prompts: Prompt[];
     selectedPath: string | null;
     selectedIndex: number;
+    query?: string;
+    compact?: boolean;
+    preferencesDisabled?: boolean;
+    library?: Library;
     onselect: (path: string) => void;
     oncontextmenu: (prompt: Prompt, x: number, y: number) => void;
     /** 拖拽结束回调：把 fromIndex 处的项移动到 toIndex 之前 */
     onreorder: (fromIndex: number, toIndex: number) => void;
+    onfavorite?: (path: string) => void;
+    onmounted?: (fn: (index: number) => void) => void;
     draggable?: boolean;
     disabledReason?: string;
     t?: Translator;
@@ -29,6 +43,25 @@
 
   function categoryLabel(name: string): string {
     return name === "未分类" ? t("common.uncategorized") : name;
+  }
+
+  function isFavorite(path: string): boolean {
+    return !!library[path]?.favorite;
+  }
+
+  function favoriteLabel(path: string): string {
+    return isFavorite(path) ? t("view.unfavorite") : t("view.favorite");
+  }
+
+  function bodyExcerpt(prompt: Prompt): string {
+    if ((!compact && !query.trim()) || !prompt.body) return "";
+    return searchExcerpt(prompt.body, query);
+  }
+
+  function scrollToIndex(index: number) {
+    listEl
+      ?.querySelector<HTMLElement>(`[data-idx="${index}"]`)
+      ?.scrollIntoView({ block: "nearest" });
   }
 
   // 用 Pointer Events 实现排序，不依赖 HTML5 Drag and Drop 的 dataTransfer/drop。
@@ -149,6 +182,10 @@
   $effect(() => {
     if (!draggable && isDragging) resetDrag();
   });
+
+  $effect(() => {
+    if (listEl && onmounted) onmounted(scrollToIndex);
+  });
 </script>
 
 <ul
@@ -195,12 +232,37 @@
           >
             ⠿
           </button>
-          <span class="title">{p.title}</span>
+          <span class="title">
+            {#each highlightParts(p.title, query) as part}
+              {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
+            {/each}
+          </span>
         </div>
+        {#if bodyExcerpt(p)}
+          <div class="excerpt">
+            {#each highlightParts(bodyExcerpt(p), query) as part}
+              {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
+            {/each}
+          </div>
+        {/if}
         <div class="sub">
           <span class="cat">{categoryLabel(p.category)}</span>
         </div>
       </div>
+      <button
+        class="favorite-btn"
+        class:active={isFavorite(p.path)}
+        disabled={preferencesDisabled}
+        title={favoriteLabel(p.path)}
+        aria-label={favoriteLabel(p.path)}
+        aria-pressed={isFavorite(p.path)}
+        onclick={(e) => {
+          e.stopPropagation();
+          onfavorite(p.path);
+        }}
+      >
+        ★
+      </button>
       <button
         class="more-btn"
         title={t("prompt.moreActions")}
@@ -339,7 +401,7 @@
   .sub {
     display: flex;
     gap: 8px;
-    margin-top: 2px;
+    margin-top: 3px;
     margin-left: 17px;
     font-size: 11px;
     color: var(--muted);
@@ -347,6 +409,49 @@
   }
   .cat {
     flex-shrink: 0;
+  }
+
+  .excerpt {
+    margin: 3px 0 0 17px;
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.35;
+    overflow: hidden;
+    display: -webkit-box;
+    line-clamp: 2;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  mark {
+    padding: 0 1px;
+    border-radius: 3px;
+    background: #fff1a8;
+    color: inherit;
+  }
+
+  .favorite-btn {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--border-strong);
+    cursor: pointer;
+    opacity: 0.55;
+    transition:
+      opacity 0.12s,
+      background 0.12s,
+      color 0.12s;
+  }
+  .favorite-btn:hover,
+  .favorite-btn.active {
+    opacity: 1;
+    color: #d6a300;
+  }
+  .favorite-btn:hover {
+    background: var(--bg-hover);
   }
 
   .more-btn {

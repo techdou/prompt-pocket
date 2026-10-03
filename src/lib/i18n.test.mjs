@@ -62,7 +62,7 @@ describe("i18n language helpers", () => {
     assert.equal(translate("zh", "app.searchPlaceholder"), "搜索提示词...");
     assert.equal(
       createTranslator("en")("app.deleteConfirm", { title: "Example" }),
-      'Delete "Example"? This cannot be undone.',
+      'Delete "Example"? You can restore it from Settings.',
     );
   });
 });

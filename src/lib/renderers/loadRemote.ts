@@ -79,7 +79,7 @@ export function loadScript<T = unknown>(
 
     el.onload = () => {
       clearTimeout(timer);
-      const g = (window as Record<string, unknown>)[globalKey];
+      const g = (window as unknown as Record<string, unknown>)[globalKey];
       if (!g) {
         scriptCache.delete(url);
         reject(new RemoteLoadError(lib, `全局对象 window.${globalKey} 不存在`));

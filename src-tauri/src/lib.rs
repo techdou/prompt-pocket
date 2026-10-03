@@ -1,8 +1,8 @@
-// Prompt Pocket — Tauri 应用入口（v1.0.0 坚果云同步版）
+// Prompt Pocket — Tauri 应用入口
 //
-// 架构：本地缓存 + 坚果云 WebDAV 后台同步
+// 架构：本地 Markdown + 手动坚果云 WebDAV 同步
 // - UI 读写走本地缓存（store.rs），瞬间响应
-// - 启动时从坚果云拉取，保存后异步推送
+// - 所有内容写入与云同步共享存储锁，覆盖前保留恢复副本
 // - 账号/路径存 config.json，应用密码存系统凭据库
 
 use std::path::{Path, PathBuf};
@@ -11,12 +11,13 @@ use std::sync::Mutex;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, LogicalPosition, Manager, WindowEvent,
+    Emitter, LogicalPosition, LogicalSize, Manager, WindowEvent,
 };
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
+mod recovery;
 mod store;
 mod sync;
 use crate::store::{
@@ -55,7 +56,11 @@ struct AppState {
     last_sync: Mutex<Option<String>>,
     last_error: Mutex<Option<String>>,
     syncing: Mutex<bool>,
-    last_hotkey_had_text_input: Mutex<bool>,
+    paste_target: Mutex<Option<PasteTarget>>,
+    storage_gate: tokio::sync::Mutex<()>,
+    hotkey: tokio::sync::Mutex<String>,
+    preferences_file: PathBuf,
+    interaction_locked: AtomicBool,
 }
 
 impl AppState {
@@ -64,21 +69,15 @@ impl AppState {
         self.cloud.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn set_last_hotkey_had_text_input(&self, had_text_input: bool) {
-        *self
-            .last_hotkey_had_text_input
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = had_text_input;
+    fn set_paste_target(&self, target: Option<PasteTarget>) {
+        *self.paste_target.lock().unwrap_or_else(|e| e.into_inner()) = target;
     }
 
-    fn take_last_hotkey_had_text_input(&self) -> bool {
-        let mut guard = self
-            .last_hotkey_had_text_input
+    fn take_paste_target(&self) -> Option<PasteTarget> {
+        self.paste_target
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let had_text_input = *guard;
-        *guard = false;
-        had_text_input
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     fn set_cloud_config(&self, cfg: CloudConfig) -> Result<(), String> {
@@ -123,6 +122,139 @@ fn resolve_config_file(app: &tauri::AppHandle) -> PathBuf {
         .app_config_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("config.json")
+}
+
+fn parse_hotkey(value: &str) -> Result<Shortcut, String> {
+    let shortcut = value
+        .trim()
+        .parse::<Shortcut>()
+        .map_err(|e| format!("无效快捷键: {e}"))?;
+    if shortcut.mods.is_empty() {
+        return Err("快捷键必须包含 Ctrl、Alt、Shift 或 Super 修饰键".into());
+    }
+    Ok(shortcut)
+}
+
+fn load_hotkey(path: &Path) -> String {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get("hotkey")
+                .and_then(|key| key.as_str())
+                .map(str::to_owned)
+        })
+        .filter(|value| parse_hotkey(value).is_ok())
+        .unwrap_or_else(|| GLOBAL_HOTKEY.into())
+}
+
+fn save_hotkey_preferences(path: &Path, hotkey: &str) -> Result<(), String> {
+    let mut preferences = match std::fs::read(path) {
+        Ok(bytes) => {
+            serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error.to_string()),
+    };
+    let object = preferences.as_object_mut().ok_or("偏好文件格式错误")?;
+    object.insert("hotkey".into(), serde_json::Value::String(hotkey.into()));
+    let bytes = serde_json::to_vec_pretty(&preferences).map_err(|e| e.to_string())?;
+    recovery::atomic_write(path, &bytes).map_err(|e| e.to_string())
+}
+
+fn change_hotkey_transaction(
+    current: &mut String,
+    next: &str,
+    old_registered: bool,
+    mut register: impl FnMut(Shortcut) -> Result<(), String>,
+    mut unregister: impl FnMut(Shortcut) -> Result<(), String>,
+    mut persist: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let next = next.trim();
+    let new_key = parse_hotkey(next)?;
+    let old_key = parse_hotkey(current)?;
+    if old_registered && new_key == old_key {
+        return Ok(());
+    }
+    register(new_key)?;
+    if let Err(error) = persist(next) {
+        let rollback = unregister(new_key);
+        return Err(format!(
+            "快捷键未更改，保存失败: {error}{}",
+            rollback
+                .err()
+                .map(|e| format!("；撤销新键失败: {e}"))
+                .unwrap_or_default()
+        ));
+    }
+    if old_registered {
+        if let Err(error) = unregister(old_key) {
+            let disk_rollback = persist(current);
+            let new_rollback = unregister(new_key);
+            return Err(format!(
+                "保留旧快捷键，撤销旧键失败: {error}{}{}",
+                disk_rollback
+                    .err()
+                    .map(|e| format!("；恢复偏好失败: {e}"))
+                    .unwrap_or_default(),
+                new_rollback
+                    .err()
+                    .map(|e| format!("；撤销新键失败: {e}"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    *current = next.into();
+    Ok(())
+}
+
+fn register_hotkey(app: &tauri::AppHandle, shortcut: Shortcut) -> Result<(), String> {
+    app.global_shortcut()
+        .on_shortcut(shortcut, |app, _, event| {
+            if event.state != ShortcutState::Pressed {
+                return;
+            }
+            let visible = app
+                .get_webview_window("main")
+                .and_then(|win| win.is_visible().ok())
+                .unwrap_or(false);
+            let target = if visible {
+                None
+            } else {
+                foreground_identity().filter(|_| foreground_has_text_input_focus())
+            };
+            app.state::<AppState>().set_paste_target(target);
+            toggle_main_window(app);
+        })
+        .map_err(|e| format!("快捷键注册失败（可能被占用）: {e}"))
+}
+
+#[tauri::command]
+async fn get_hotkey(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    Ok(state.hotkey.lock().await.clone())
+}
+
+#[tauri::command]
+async fn set_hotkey(
+    shortcut: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let mut current = state.hotkey.lock().await;
+    let registered = app.global_shortcut().is_registered(parse_hotkey(&current)?);
+    change_hotkey_transaction(
+        &mut current,
+        &shortcut,
+        registered,
+        |key| register_hotkey(&app, key),
+        |key| {
+            app.global_shortcut()
+                .unregister(key)
+                .map_err(|e| e.to_string())
+        },
+        |value| save_hotkey_preferences(&state.preferences_file, value),
+    )
 }
 
 /// 启动时加载配置
@@ -175,7 +307,7 @@ fn write_persisted_config(config_file: &Path, cfg: &PersistedConfig) -> Result<(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    std::fs::write(config_file, json).map_err(|e| e.to_string())
+    recovery::atomic_write(config_file, json.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn persist_cloud_config(
@@ -243,7 +375,8 @@ fn load_cloud_config_with_store(
 // ────────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn init_app(state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn init_app(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _storage = state.storage_gate.lock().await;
     std::fs::create_dir_all(&state.local_dir).map_err(|e| e.to_string())?;
     let any_md = walkdir_has_md(&state.local_dir);
     if !any_md {
@@ -273,7 +406,7 @@ fn scan_prompts(state: tauri::State<'_, AppState>) -> Result<ScanResult, String>
 
 #[tauri::command]
 fn read_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<PromptContent, String> {
-    let abs = resolve_abs(&state.local_dir, &path);
+    let abs = resolve_abs(&state.local_dir, &path)?;
     read_prompt_disk(&abs).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             "FILE_NOT_FOUND".to_string()
@@ -284,14 +417,15 @@ fn read_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<Prompt
 }
 
 #[tauri::command]
-fn save_prompt(
+async fn save_prompt(
     path: String,
     req: SaveRequest,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
-    let abs = resolve_abs(&state.local_dir, &path);
+    let _storage = state.storage_gate.lock().await;
+    let abs = resolve_abs(&state.local_dir, &path)?;
     // save_prompt 现在返回新路径（可能因标题重命名而变化）
-    let new_abs = save_prompt_disk(&abs, &req).map_err(|e| {
+    let new_abs = save_prompt_disk(&state.local_dir, &abs, &req).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             "FILE_NOT_FOUND".to_string()
         } else {
@@ -303,19 +437,20 @@ fn save_prompt(
         .map_err(|e| e.to_string())?
         .prompts
         .into_iter()
-        .find(|p| p.abs_path.as_str() == new_abs.to_string_lossy().as_ref())
+        .find(|p| same_disk_path(Path::new(&p.abs_path), &new_abs))
         .ok_or_else(|| "保存后未能重新定位该提示词".to_string())?;
     Ok(result)
 }
 
 #[tauri::command]
-fn rename_prompt(
+async fn rename_prompt(
     path: String,
     new_title: String,
     new_category: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
-    let old_abs = resolve_abs(&state.local_dir, &path);
+    let _storage = state.storage_gate.lock().await;
+    let old_abs = resolve_abs(&state.local_dir, &path)?;
     let new_abs = rename_prompt_disk(&state.local_dir, &old_abs, &new_title, &new_category)
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -329,35 +464,37 @@ fn rename_prompt(
         .map_err(|e| e.to_string())?
         .prompts
         .into_iter()
-        .find(|p| p.abs_path.as_str() == new_abs.to_string_lossy().as_ref())
+        .find(|p| same_disk_path(Path::new(&p.abs_path), &new_abs))
         .ok_or_else(|| "重命名后未能定位该提示词".to_string())
 }
 
 #[tauri::command]
-fn rename_category(
+async fn rename_category(
     old_name: String,
     new_name: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let _storage = state.storage_gate.lock().await;
     rename_category_disk(&state.local_dir, &old_name, &new_name).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn create_category(name: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn create_category(name: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _storage = state.storage_gate.lock().await;
     create_category_disk(&state.local_dir, &name).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn create_prompt(
+async fn create_prompt(
     category: String,
     title: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Prompt, String> {
+    let _storage = state.storage_gate.lock().await;
     let abs = create_prompt_disk(&state.local_dir, &category, &title).map_err(|e| e.to_string())?;
-    let rel = abs.strip_prefix(&state.local_dir).unwrap_or(&abs);
-    let rel_unix = store::path_to_unix(rel);
+    let rel_unix = relative_library_path(&state.local_dir, &abs)?;
     scan_disk(&state.local_dir)
         .map_err(|e| e.to_string())?
         .prompts
@@ -367,27 +504,54 @@ fn create_prompt(
 }
 
 #[tauri::command]
-fn delete_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs = resolve_abs(&state.local_dir, &path);
-    delete_prompt_disk(&abs).map_err(|e| e.to_string())?;
+async fn delete_prompt(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let _storage = state.storage_gate.lock().await;
+    let abs = resolve_abs(&state.local_dir, &path)?;
+    delete_prompt_disk(&state.local_dir, &abs).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// 拖拽排序：重写某分类的顺序到 .order.json（纯本地，手动上传时才同步）
 #[tauri::command]
-fn reorder(
+async fn reorder(
     category: String,
     paths: Vec<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let _storage = state.storage_gate.lock().await;
     reorder_category_disk(&state.local_dir, &category, &paths).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// 分类拖拽排序：重写 .category-order.json
 #[tauri::command]
-fn reorder_categories(names: Vec<String>, state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn reorder_categories(
+    names: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let _storage = state.storage_gate.lock().await;
     store::save_category_order(&state.local_dir, &names).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_recovery(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<recovery::RecoveryEntry>, String> {
+    let _storage = state.storage_gate.lock().await;
+    recovery::list_recovery(&state.local_dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn read_recovery(id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let _storage = state.storage_gate.lock().await;
+    recovery::read_recovery(&state.local_dir, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn restore_recovery(id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let _storage = state.storage_gate.lock().await;
+    let restored = recovery::restore_recovery(&state.local_dir, &id).map_err(|e| e.to_string())?;
+    relative_library_path(&state.local_dir, &restored)
 }
 
 #[tauri::command]
@@ -395,64 +559,126 @@ async fn copy_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
-/// 智能复制/注入：写剪贴板 → 隐藏窗口 → 等焦点回归 → 按快捷键来源决定是否注入。
-/// - Ctrl+Alt+P 按下时外部前台有 caret：模拟 Ctrl+V 把内容注入原输入框
-/// - Ctrl+Alt+P 按下时不在输入框：纯复制到剪贴板，不误粘贴
-///
-/// mode 参数当前未区分转换（前端传 editingBody 原文），保留以兼容现有调用契约。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PasteTarget {
+    window: usize,
+    process_id: u32,
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CopyStatus {
+    Copied,
+    Pasted,
+    PasteFailed,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct CopyResult {
+    status: CopyStatus,
+}
+
+/// Formatting is resolved in the frontend. Once clipboard writing succeeds,
+/// focus/hide/injection failures are returned as a partial-success outcome.
 #[tauri::command]
 async fn copy_or_paste(
     text: String,
     mode: String,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
-) -> Result<(), String> {
-    // mode 当前未做格式转换（前端传原文），保留参数以兼容现有调用契约。
+) -> Result<CopyResult, String> {
     let _ = mode;
-    // 1. 写剪贴板（无论后续是否注入，剪贴板都得有内容）
     app.clipboard()
         .write_text(&text)
         .map_err(|e| e.to_string())?;
-
-    let invoked_from_text_input = state.take_last_hotkey_had_text_input();
-
-    // 2. 隐藏当前窗口，让 OS 焦点回归到用户原本聚焦的应用
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.hide();
-    }
-
-    // 3. 不来自输入框时立即结束：剪贴板已写好，不做任何粘贴尝试。
-    if !invoked_from_text_input {
-        return Ok(());
-    }
-
-    // 4. hide() 后焦点回归是异步的。短轮询比固定等待更快：
-    //    输入框一恢复焦点就粘贴，最长只等一小段时间。
-    let returned_to_text_input = wait_for_text_input_focus(
-        std::time::Duration::from_millis(FOCUS_RESTORE_TIMEOUT_MS),
-        std::time::Duration::from_millis(FOCUS_RESTORE_POLL_MS),
-    )
-    .await;
-    if !should_inject_after_hotkey(invoked_from_text_input, returned_to_text_input) {
-        return Ok(());
-    }
-
-    // 5. 模拟 Ctrl+V 注入
-    simulate_paste().map_err(|e| format!("注入失败: {e}"))?;
-    Ok(())
+    let target = state.take_paste_target();
+    let hidden = app
+        .get_webview_window("main")
+        .is_some_and(|win| win.hide().is_ok());
+    let restored = if let Some(target) = target.filter(|_| hidden) {
+        wait_for_text_input_focus(
+            target,
+            std::time::Duration::from_millis(FOCUS_RESTORE_TIMEOUT_MS),
+            std::time::Duration::from_millis(FOCUS_RESTORE_POLL_MS),
+        )
+        .await
+            && matches_paste_target(
+                target,
+                foreground_identity(),
+                foreground_has_text_input_focus(),
+            )
+    } else {
+        false
+    };
+    Ok(finish_copy(
+        target.is_some(),
+        hidden,
+        restored,
+        simulate_paste,
+    ))
 }
 
-fn should_inject_after_hotkey(invoked_from_text_input: bool, returned_to_text_input: bool) -> bool {
-    invoked_from_text_input && returned_to_text_input
+fn finish_copy(
+    should_paste: bool,
+    hidden: bool,
+    restored: bool,
+    inject: impl FnOnce() -> Result<(), String>,
+) -> CopyResult {
+    let status = if !should_paste {
+        CopyStatus::Copied
+    } else if !hidden || !restored || inject().is_err() {
+        CopyStatus::PasteFailed
+    } else {
+        CopyStatus::Pasted
+    };
+    CopyResult { status }
+}
+
+fn matches_paste_target(
+    expected: PasteTarget,
+    foreground: Option<PasteTarget>,
+    has_input: bool,
+) -> bool {
+    has_input && foreground == Some(expected)
+}
+
+#[cfg(windows)]
+fn foreground_identity() -> Option<PasteTarget> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return None;
+        }
+        let mut process_id = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+        if process_id == 0 {
+            return None;
+        }
+        Some(PasteTarget {
+            window: hwnd.0 as usize,
+            process_id,
+        })
+    }
+}
+
+#[cfg(not(windows))]
+fn foreground_identity() -> Option<PasteTarget> {
+    None
 }
 
 async fn wait_for_text_input_focus(
+    target: PasteTarget,
     timeout: std::time::Duration,
     poll: std::time::Duration,
 ) -> bool {
     let started = std::time::Instant::now();
     loop {
-        if foreground_has_text_input_focus() {
+        if matches_paste_target(
+            target,
+            foreground_identity(),
+            foreground_has_text_input_focus(),
+        ) {
             return true;
         }
         let elapsed = started.elapsed();
@@ -624,27 +850,21 @@ fn foreground_matches_app_window(is_same_window: bool, is_child_window: bool) ->
     is_same_window || is_child_window
 }
 
-/// 用 enigo 模拟一次 Ctrl+V 粘贴（跨平台，macOS 需改 Meta，此处先支持 Windows/Linux）
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
+#[cfg(windows)]
+fn simulate_paste() -> Result<(), String> {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-
-    let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(Key::Control, Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Click)?;
-    enigo.key(Key::Control, Direction::Release)?;
-    Ok(())
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+    enigo
+        .key(Key::Control, Direction::Press)
+        .map_err(|e| e.to_string())?;
+    let pasted = enigo.key(Key::Unicode('v'), Direction::Click);
+    let released = enigo.key(Key::Control, Direction::Release);
+    pasted.and(released).map_err(|e| e.to_string())
 }
 
-#[cfg(target_os = "macos")]
-fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-
-    let mut enigo = Enigo::new(&Settings::default())?;
-    enigo.key(Key::Meta, Direction::Press)?;
-    enigo.key(Key::Unicode('v'), Direction::Click)?;
-    enigo.key(Key::Meta, Direction::Release)?;
-    Ok(())
+#[cfg(not(windows))]
+fn simulate_paste() -> Result<(), String> {
+    Err("此平台仅支持复制".into())
 }
 
 #[tauri::command]
@@ -656,8 +876,29 @@ fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_window_mode(mode: String, app: tauri::AppHandle) -> Result<(), String> {
+    let (width, height) = match mode.as_str() {
+        "quick" => (680.0, 500.0),
+        "manage" => (960.0, 640.0),
+        _ => return Err("未知窗口模式".into()),
+    };
+    let window = app.get_webview_window("main").ok_or("主窗口未就绪")?;
+    window
+        .set_min_size(Some(LogicalSize::new(640.0, 440.0)))
+        .map_err(|e| e.to_string())?;
+    window
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_interaction_lock(locked: bool, state: tauri::State<'_, AppState>) {
+    state.interaction_locked.store(locked, Ordering::SeqCst);
+}
+
+#[tauri::command]
 fn reveal_in_finder(path: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let abs = resolve_abs(&state.local_dir, &path);
+    let abs = resolve_abs(&state.local_dir, &path)?;
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
@@ -708,7 +949,9 @@ async fn test_cloud_connection(
     username: String,
     password: String,
     remote_root: String,
+    state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    let password = resolve_cloud_password(&username, &password, &state.cloud_config())?;
     let cfg = CloudConfig {
         username,
         password,
@@ -725,12 +968,7 @@ fn save_cloud_config(
     remote_root: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    // __KEEP__ 占位符表示保留旧密码（用户未重新填写）
-    let final_password = if password == "__KEEP__" {
-        state.cloud_config().password
-    } else {
-        password
-    };
+    let final_password = resolve_cloud_password(&username, &password, &state.cloud_config())?;
 
     let cfg = CloudConfig {
         username,
@@ -742,6 +980,37 @@ fn save_cloud_config(
     Ok(())
 }
 
+fn resolve_cloud_password(
+    username: &str,
+    password: &str,
+    stored: &CloudConfig,
+) -> Result<String, String> {
+    if password != "__KEEP__" {
+        return Ok(password.into());
+    }
+    if username != stored.username || stored.password.is_empty() {
+        return Err("账号已变化或没有已保存的密码，请重新输入应用密码".into());
+    }
+    Ok(stored.password.clone())
+}
+
+struct SyncGuard<'a>(&'a Mutex<bool>);
+impl<'a> SyncGuard<'a> {
+    fn begin(flag: &'a Mutex<bool>) -> Result<Self, String> {
+        let mut syncing = flag.lock().map_err(|e| e.to_string())?;
+        if *syncing {
+            return Err("正在同步中，请稍候".into());
+        }
+        *syncing = true;
+        Ok(Self(flag))
+    }
+}
+impl Drop for SyncGuard<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+}
+
 /// 上传到坚果云：本地所有文件推送到云端（只增不删）
 #[tauri::command]
 async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
@@ -750,20 +1019,17 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     if !cfg.is_configured() {
         return Err("未配置坚果云同步".to_string());
     }
-    // P0-3 并发保护：若已在同步中，拒绝重复触发
-    {
-        let syncing = state.syncing.lock().map_err(|e| e.to_string())?;
-        if *syncing {
-            return Err("正在同步中，请稍候".to_string());
-        }
-    }
-    *state.syncing.lock().map_err(|e| e.to_string())? = true;
+    let _sync = SyncGuard::begin(&state.syncing)?;
+    let _storage = state.storage_gate.lock().await;
     let result = push_all_to_remote(&cfg, &state.local_dir).await;
-    // 无论成功失败都释放 syncing（用 map_err 防 poison，不 unwrap）
-    *state.syncing.lock().map_err(|e| e.to_string())? = false;
+    // Clear before emitting the status update; Drop also covers cancelled tasks.
+    drop(_sync);
     match result {
         Ok(report) => {
-            let mut msg = format!("上传完成：共 {} 个文件", report.uploaded);
+            let mut msg = format!(
+                "上传完成：共 {} 个文件，保留冲突 {}",
+                report.uploaded, report.conflicts
+            );
             if !report.errors.is_empty() {
                 msg.push_str(&format!("，{} 个失败", report.errors.len()));
                 *state.last_error.lock().map_err(|e| e.to_string())? =
@@ -782,7 +1048,7 @@ async fn upload_all(app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
-/// 下载到本地：从坚果云拉取并覆盖本地（清理本地多余文件）
+/// 下载到本地：依据共同基线更新，保留本地独有内容与冲突副本。
 #[tauri::command]
 async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     let state = app.state::<AppState>();
@@ -790,21 +1056,16 @@ async fn download_all(app: tauri::AppHandle) -> Result<String, String> {
     if !cfg.is_configured() {
         return Err("未配置坚果云同步".to_string());
     }
-    // P0-3 并发保护
-    {
-        let syncing = state.syncing.lock().map_err(|e| e.to_string())?;
-        if *syncing {
-            return Err("正在同步中，请稍候".to_string());
-        }
-    }
-    *state.syncing.lock().map_err(|e| e.to_string())? = true;
+    let _sync = SyncGuard::begin(&state.syncing)?;
+    let _storage = state.storage_gate.lock().await;
     let result = sync::pull_from_remote(&cfg, &state.local_dir).await;
-    *state.syncing.lock().map_err(|e| e.to_string())? = false;
+    // Clear before emitting the status update; Drop also covers cancelled tasks.
+    drop(_sync);
     match result {
         Ok(report) => {
             let mut msg = format!(
-                "下载完成：更新 {}，跳过 {}，清理 {}",
-                report.downloaded, report.skipped, report.deleted
+                "下载完成：更新 {}，跳过 {}，清理 {}，保留冲突 {}",
+                report.downloaded, report.skipped, report.deleted, report.conflicts
             );
             if !report.errors.is_empty() {
                 msg.push_str(&format!("，{} 个失败", report.errors.len()));
@@ -879,25 +1140,31 @@ fn is_allowed_external_url(url: &str) -> bool {
 // 辅助
 // ────────────────────────────────────────────────────────────
 
-fn resolve_abs(root: &std::path::Path, rel: &str) -> PathBuf {
-    let joined = root.join(rel);
-    match std::fs::canonicalize(&joined) {
-        Ok(canon) => {
-            let stripped = strip_unc_prefix(&canon);
-            if stripped.starts_with(root) {
-                stripped
-            } else {
-                joined
-            }
-        }
-        Err(_) => joined,
-    }
+fn resolve_abs(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    recovery::checked_path(root, rel).map_err(|e| e.to_string())
+}
+
+fn same_disk_path(left: &Path, right: &Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    strip_unc_prefix(&left) == strip_unc_prefix(&right)
+}
+
+fn relative_library_path(root: &Path, path: &Path) -> Result<String, String> {
+    let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let rel = path
+        .strip_prefix(&root)
+        .map_err(|_| "路径不在提示词库内".to_string())?;
+    Ok(store::path_to_unix(rel))
 }
 
 #[cfg(windows)]
 fn strip_unc_prefix(path: &std::path::Path) -> PathBuf {
     let s = path.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+    if let Some(stripped) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{stripped}"))
+    } else if let Some(stripped) = s.strip_prefix(r"\\?\") {
         PathBuf::from(stripped)
     } else {
         path.to_path_buf()
@@ -928,9 +1195,10 @@ fn seed_sample_prompts(dir: &std::path::Path) -> Result<(), String> {
         ),
     ];
     for (cat, name, content) in samples {
-        let sub = dir.join(cat);
-        std::fs::create_dir_all(&sub).map_err(|e| format!("创建示例分类失败: {e}"))?;
-        std::fs::write(sub.join(name), content).map_err(|e| format!("写入示例文件失败: {e}"))?;
+        let path =
+            recovery::checked_path(dir, Path::new(cat).join(name)).map_err(|e| e.to_string())?;
+        recovery::atomic_write(&path, content.as_bytes())
+            .map_err(|e| format!("写入示例文件失败: {e}"))?;
     }
     Ok(())
 }
@@ -946,7 +1214,9 @@ fn toggle_main_window(app: &tauri::AppHandle) {
         _ => {
             // 多屏跟随鼠标定位：找到鼠标所在的显示器，在该屏居中显示
             position_window_at_cursor(&win);
-            let _ = win.show();
+            if win.show().is_ok() {
+                let _ = win.emit("window-shown", ());
+            }
             let _ = win.set_focus();
         }
     }
@@ -1035,7 +1305,8 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 用户再次双击 exe 时走到这里：聚焦到已有窗口
             if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
+                app.state::<AppState>().set_paste_target(None);
+                if win.show().is_ok() { let _ = win.emit("window-shown", ()); }
                 let _ = win.set_focus();
             }
         }))
@@ -1046,6 +1317,8 @@ pub fn run() {
             let local_dir = resolve_local_dir(app.handle());
             let config_file = resolve_config_file(app.handle());
             let cloud = load_cloud_config(&config_file);
+            let preferences_file = config_file.with_file_name("preferences.json");
+            let hotkey = load_hotkey(&preferences_file);
 
             // 确保本地缓存目录存在
             let _ = std::fs::create_dir_all(&local_dir);
@@ -1057,50 +1330,19 @@ pub fn run() {
                 last_sync: Mutex::new(None),
                 last_error: Mutex::new(None),
                 syncing: Mutex::new(false),
-                last_hotkey_had_text_input: Mutex::new(false),
+                paste_target: Mutex::new(None),
+                storage_gate: tokio::sync::Mutex::new(()),
+                hotkey: tokio::sync::Mutex::new(hotkey.clone()),
+                preferences_file,
+                interaction_locked: AtomicBool::new(false),
             });
 
             // v1.0.1：同步改为纯手动，启动时不再自动拉取
 
-            // 注册全局快捷键（解析失败则降级为无快捷键，不 panic）
-            let app_handle = app.handle().clone();
-            match GLOBAL_HOTKEY.parse::<Shortcut>() {
-                Ok(shortcut) => {
-                    if let Err(e) = app.global_shortcut().on_shortcut(
-                        shortcut,
-                        move |_app, _shortcut, event| {
-                            if event.state == ShortcutState::Pressed {
-                                let window_is_visible = app_handle
-                                    .get_webview_window("main")
-                                    .and_then(|win| win.is_visible().ok())
-                                    .unwrap_or(false);
-                                let hotkey_had_text_input =
-                                    !window_is_visible && foreground_has_text_input_focus();
-                                app_handle
-                                    .state::<AppState>()
-                                    .set_last_hotkey_had_text_input(hotkey_had_text_input);
-                                toggle_main_window(&app_handle);
-                            }
-                        },
-                    ) {
-                        eprintln!("[启动] 全局快捷键注册失败（可能被占用）: {e}");
-                        // 弹窗提示用户：快捷键被占用，应用只能靠托盘/双击第二实例唤起
-                        let app_handle = app.handle().clone();
-                        let hotkey = GLOBAL_HOTKEY.to_string();
-                        app_handle
-                            .dialog()
-                            .message(format!(
-                                "全局快捷键 {hotkey} 注册失败（可能被其他软件占用）。\n\n\
-                                 你仍可以点击右下角托盘图标来打开主界面，或在设置里关闭占用该快捷键的软件后重启本程序。"
-                            ))
-                            .kind(MessageDialogKind::Warning)
-                            .title("快捷键注册失败")
-                            .show(|_| {});
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[启动] 全局快捷键解析失败: {e}");
-                }
+            if let Err(error) = parse_hotkey(&hotkey).and_then(|key| register_hotkey(app.handle(), key)) {
+                eprintln!("[启动] {error}");
+                app.dialog().message(format!("全局快捷键 {hotkey} 注册失败。\n\n你仍可以通过托盘打开主界面，并在设置中修改快捷键。\n{error}"))
+                    .kind(MessageDialogKind::Warning).title("快捷键注册失败").show(|_| {});
             }
 
             // 系统托盘：左键单击 toggle 窗口；右键菜单提供「显示 / 退出」
@@ -1123,14 +1365,16 @@ pub fn run() {
                         ..
                     } = event
                     {
+                        tray.app_handle().state::<AppState>().set_paste_target(None);
                         toggle_main_window(tray.app_handle());
                     }
                 })
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "show" => {
+                            app.state::<AppState>().set_paste_target(None);
                             if let Some(win) = app.get_webview_window("main") {
-                                let _ = win.show();
+                                if win.show().is_ok() { let _ = win.emit("window-shown", ()); }
                                 let _ = win.set_focus();
                             }
                         }
@@ -1168,6 +1412,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::Focused(false) = event {
+                if window.state::<AppState>().interaction_locked.load(Ordering::SeqCst) { return; }
                 // 首次启动豁免：第一次失焦不隐藏，让用户看清界面、可以自由点别处。
                 // 之后的失焦恢复正常的"贴入式"行为（点外部即收起）。
                 if FIRST_RUN_SUPPRESS_BLUR_HIDE.swap(false, Ordering::SeqCst) {
@@ -1193,6 +1438,13 @@ pub fn run() {
             delete_prompt,
             reorder,
             reorder_categories,
+            list_recovery,
+            read_recovery,
+            restore_recovery,
+            get_hotkey,
+            set_hotkey,
+            set_window_mode,
+            set_interaction_lock,
             copy_text,
             copy_or_paste,
             hide_window,
@@ -1214,6 +1466,206 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[test]
+    fn hotkey_registration_and_persistence_failures_keep_old_binding() {
+        use std::cell::RefCell;
+        for fail_registration in [false, true] {
+            let mut current = GLOBAL_HOTKEY.to_string();
+            let registered = RefCell::new(vec![GLOBAL_HOTKEY.parse::<Shortcut>().unwrap()]);
+            let disk = RefCell::new(current.clone());
+            let result = change_hotkey_transaction(
+                &mut current,
+                "Ctrl+Alt+K",
+                true,
+                |key| {
+                    if fail_registration {
+                        Err("occupied".into())
+                    } else {
+                        registered.borrow_mut().push(key);
+                        Ok(())
+                    }
+                },
+                |key| {
+                    registered.borrow_mut().retain(|k| k != &key);
+                    Ok(())
+                },
+                |value| {
+                    if value == "Ctrl+Alt+K" {
+                        Err("read-only preferences".into())
+                    } else {
+                        *disk.borrow_mut() = value.into();
+                        Ok(())
+                    }
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(current, GLOBAL_HOTKEY);
+            assert_eq!(*disk.borrow(), GLOBAL_HOTKEY);
+            assert_eq!(
+                *registered.borrow(),
+                vec![GLOBAL_HOTKEY.parse::<Shortcut>().unwrap()]
+            );
+        }
+    }
+
+    #[test]
+    fn hotkey_change_persists_before_removing_old_binding() {
+        use std::cell::RefCell;
+        let mut current = GLOBAL_HOTKEY.into();
+        let steps = RefCell::new(Vec::new());
+        change_hotkey_transaction(
+            &mut current,
+            "Ctrl+Alt+K",
+            true,
+            |_| {
+                steps.borrow_mut().push("register");
+                Ok(())
+            },
+            |_| {
+                steps.borrow_mut().push("unregister");
+                Ok(())
+            },
+            |_| {
+                steps.borrow_mut().push("persist");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(*steps.borrow(), vec!["register", "persist", "unregister"]);
+        assert_eq!(current, "Ctrl+Alt+K");
+        assert!(parse_hotkey("invalid key").is_err());
+        assert!(parse_hotkey("P").is_err());
+        assert!(parse_hotkey(GLOBAL_HOTKEY).is_ok());
+    }
+
+    #[test]
+    fn copy_success_is_preserved_when_hiding_focus_or_injection_fails() {
+        assert_eq!(
+            finish_copy(false, false, false, || panic!("must not paste")).status,
+            CopyStatus::Copied
+        );
+        assert_eq!(
+            finish_copy(true, false, true, || panic!("must not paste")).status,
+            CopyStatus::PasteFailed
+        );
+        assert_eq!(
+            finish_copy(true, true, false, || panic!("must not paste")).status,
+            CopyStatus::PasteFailed
+        );
+        assert_eq!(
+            finish_copy(true, true, true, || Err("injection failed".into())).status,
+            CopyStatus::PasteFailed
+        );
+        assert_eq!(
+            finish_copy(true, true, true, || Ok(())).status,
+            CopyStatus::Pasted
+        );
+    }
+
+    #[test]
+    fn paste_target_requires_same_window_and_process() {
+        let original = PasteTarget {
+            window: 42,
+            process_id: 7,
+        };
+        assert!(matches_paste_target(original, Some(original), true));
+        assert!(!matches_paste_target(
+            original,
+            Some(PasteTarget {
+                window: 43,
+                process_id: 7
+            }),
+            true
+        ));
+        assert!(!matches_paste_target(
+            original,
+            Some(PasteTarget {
+                window: 42,
+                process_id: 8
+            }),
+            true
+        ));
+        assert!(!matches_paste_target(original, Some(original), false));
+        assert!(!matches_paste_target(original, None, true));
+    }
+
+    #[test]
+    fn keep_password_rejects_account_changes() {
+        let stored = CloudConfig {
+            username: "one".into(),
+            password: "secret".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_cloud_password("one", "__KEEP__", &stored).unwrap(),
+            "secret"
+        );
+        assert!(resolve_cloud_password("two", "__KEEP__", &stored).is_err());
+        assert_eq!(
+            resolve_cloud_password("two", "new", &stored).unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn native_path_resolution_rejects_escape_and_leaf_symlinks() {
+        let dir = std::env::temp_dir().join(format!("pp-native-paths-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), "body").unwrap();
+        assert!(resolve_abs(&dir, "../escape.md").is_err());
+        assert!(resolve_abs(&dir, dir.join("a.md").to_str().unwrap()).is_err());
+        let resolved = resolve_abs(&dir, "a.md").unwrap();
+        assert_eq!(relative_library_path(&dir, &resolved).unwrap(), "a.md");
+        assert!(same_disk_path(&resolved, &dir.join("a.md")));
+        let request = SaveRequest {
+            title: "a".into(),
+            body: "updated".into(),
+            copy_mode: "markdown".into(),
+            category: Some("未分类".into()),
+        };
+        let saved = save_prompt_disk(&dir, &resolved, &request).unwrap();
+        assert!(same_disk_path(&saved, &resolved));
+        assert_eq!(recovery::list_recovery(&dir).unwrap().len(), 1);
+        assert!(!dir.join("a-1.md").exists());
+        recovery::snapshot(&dir, &resolved, "history").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("a.md"), dir.join("link.md")).unwrap();
+            assert!(resolve_abs(&dir, "link.md").is_err());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sync_guard_prevents_duplicates_and_releases_after_failure() {
+        let flag = Mutex::new(false);
+        let first = SyncGuard::begin(&flag).unwrap();
+        assert!(SyncGuard::begin(&flag).is_err());
+        drop(first);
+        assert!(SyncGuard::begin(&flag).is_ok());
+        assert!(!*flag.lock().unwrap());
+    }
+
+    #[test]
+    fn hotkey_preferences_preserve_cloud_config_and_other_preferences() {
+        let dir = std::env::temp_dir().join(format!("pp-native-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let preferences = dir.join("preferences.json");
+        assert_eq!(load_hotkey(&preferences), GLOBAL_HOTKEY);
+        std::fs::write(dir.join("config.json"), "cloud config").unwrap();
+        std::fs::write(&preferences, r#"{"other":true}"#).unwrap();
+        save_hotkey_preferences(&preferences, "Ctrl+Alt+K").unwrap();
+        assert_eq!(load_hotkey(&preferences), "Ctrl+Alt+K");
+        assert!(std::fs::read_to_string(&preferences)
+            .unwrap()
+            .contains("\"other\": true"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.json")).unwrap(),
+            "cloud config"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[derive(Default)]
     struct MemorySecretStore {
         passwords: Mutex<HashMap<String, String>>,
@@ -1231,14 +1683,6 @@ mod tests {
                 .insert(username.to_string(), password.to_string());
             Ok(())
         }
-    }
-
-    #[test]
-    fn paste_injection_requires_hotkey_origin_and_returned_caret() {
-        assert!(should_inject_after_hotkey(true, true));
-        assert!(!should_inject_after_hotkey(false, true));
-        assert!(!should_inject_after_hotkey(true, false));
-        assert!(!should_inject_after_hotkey(false, false));
     }
 
     #[test]
