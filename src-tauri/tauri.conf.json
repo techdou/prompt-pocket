@@ -37,6 +37,14 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "linux": {
+      "rpm": {
+        "compression": {
+          "type": "zstd",
+          "level": 3
+        }
+      }
+    },
     "publisher": "techdou",
     "copyright": "© 2026 techdou",
     "icon": [
