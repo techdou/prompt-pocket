@@ -152,9 +152,22 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      # 验证 Tauri 应用在三平台都能打包（debug 模式更快，约 1-2 分钟）
+      # 验证 Tauri 应用在三平台都能打包；debug 模式复用测试编译缓存。
       # release 模式留给 release.yml（签名 + 发版时用）。
       # 前端构建由 tauri.conf.json 的 beforeBuildCommand（npm run build）自动执行，
       # 不再单独跑一遍避免重复
       - name: Build Tauri app (debug)
+        if: runner.os != 'Linux'
         run: npx tauri build --debug
+
+      # Linux 调试符号会显著放大安装包压缩开销。保留 debug 应用逻辑，
+      # 仅在打包前删除调试符号；所有 DEB/RPM/AppImage 目标仍由配置决定。
+      - name: Build Tauri app and Linux bundles (debug)
+        if: runner.os == 'Linux'
+        timeout-minutes: 20
+        run: |
+          npx tauri build --debug --no-bundle
+          ls -lh src-tauri/target/debug/prompt-pocket
+          strip --strip-debug src-tauri/target/debug/prompt-pocket
+          ls -lh src-tauri/target/debug/prompt-pocket
+          npx tauri bundle --debug

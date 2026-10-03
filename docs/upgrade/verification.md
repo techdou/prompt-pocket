@@ -61,7 +61,7 @@
 
 ## 验证边界
 
-- 合并后的三平台测试与 Windows/macOS 调试安装包构建已在 GitHub Actions 通过。Linux 默认 Gzip RPM 打包长时间无后续输出，改为 Tauri 支持的 Zstd 级别 3，保留 `targets: all` 并重新运行三平台验证。
+- 合并后的三平台测试与 Windows/macOS 调试安装包构建已在 GitHub Actions 通过。Linux 默认 Gzip RPM 打包长时间无后续输出，改为 Tauri 支持的 Zstd 级别 3；CI 在 Linux 打包前剥离调试符号以减少压缩负担，保留 debug 应用逻辑、`targets: all` 和三平台验证。
 
 - Windows 条件编译、原窗口识别、快捷键实际注册和粘贴注入尚未在 Windows 实机执行；已加入 Windows/macOS/Linux CI，运行结果以对应提交的 GitHub Actions 记录为准。
 - 本地模拟 WebDAV 验证了完整/不完整清单、失败下载、等长更新、排序、冲突及条件上传；真实坚果云服务的 ETag 支持情况需用测试库验证。缺少强 ETag 时实现会拒绝覆盖已有远程文件。
