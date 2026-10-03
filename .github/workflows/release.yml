@@ -1,0 +1,121 @@
+name: Release
+
+# 发版 workflow：打 tag 时触发，tauri-action 自动 build + 上传到 GitHub Release
+#
+# 触发：push 形如 v2.0.3、v1.2.3 的 tag
+#   git tag v2.0.3
+#   git push origin v2.0.3
+#
+# 与 ci.yml 区别：
+#   ci.yml 每次 push/PR 都跑（验证用，debug build）
+#   release.yml 只在打 tag 时跑（产 release 包，release build + 上传）
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:   # 支持手动触发（GitHub 页面点 Run workflow，需填发布 tag）
+    inputs:
+      tagName:
+        description: '发布 tag（形如 v2.0.4）'
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    permissions:
+      contents: write   # tauri-action 需要写权限创建 Release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon（M1+，覆盖当前主流 Mac）
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+          # Windows x64
+          - platform: 'windows-latest'
+            args: ''
+          # Linux x64
+          - platform: 'ubuntu-22.04'
+            args: ''
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 质量门：tag 推送不触发 ci.yml，发布前在本 job 里把测试跑一遍，
+      # 防止未过 CI 的提交被直接打包发给用户。
+      # shell: bash——矩阵含 Windows（默认 pwsh 解析不了 [[ =~ ]] 语法）
+      - name: Validate tag name
+        shell: bash
+        run: |
+          TAG="${{ inputs.tagName || github.ref_name }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::发布 tag 必须形如 v2.0.4，当前: $TAG"
+            exit 1
+          fi
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Frontend quality gate (check + test)
+        run: |
+          npm ci
+          npm run check
+          npm test
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # macOS 需要额外的目标架构（aarch64）
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 质量门（Rust）：需在系统依赖 + 工具链就绪后跑
+      - name: Rust quality gate (test + clippy)
+        working-directory: src-tauri
+        run: |
+          cargo test --locked --verbose
+          cargo clippy --locked --all-targets -- -D warnings
+
+      # tauri-action：build + 自动创建/上传 GitHub Release
+      # tagName 用 git 推上来的 tag 本身（v2.0.3），releaseName/releaseBody 自定义。
+      # action 按 commit SHA pin（tag 可被移动重指向，SHA 不可），升级时更新 SHA 并
+      # 在注释中保留版本号对照
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ inputs.tagName || github.ref_name }}
+          releaseName: '${{ inputs.tagName || github.ref_name }} — Prompt Pocket'
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

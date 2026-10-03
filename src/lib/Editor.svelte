@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
+  import { autofocus } from "./actions";
   import type { CategoryCount, Prompt } from "./types";
   import { renderMarkdown } from "./markdown";
   import { renderRich } from "./renderers";
@@ -56,8 +57,7 @@
     t?: Translator;
   } = $props();
 
-  // 分类下拉里加一个"未分类"选项（根目录）
-  let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name)]);
+  let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name).filter((name) => name !== "未分类")]);
 
   function categoryLabel(name: string): string {
     return name === "未分类" ? t("common.uncategorized") : name;
@@ -87,7 +87,9 @@
   // preview 容器引用，供 renderRich 扫描 DOM
   let previewEl: HTMLDivElement | undefined = $state();
 
-  // 链接点击拦截：<a> 走 openUrl 在系统浏览器打开，而非 webview 内导航
+  // 链接点击拦截：只有 http(s) 交给系统浏览器（openUrl 有协议白名单）。
+  // 其余链接（相对路径、协议相对 //、mailto 等）一律吞掉——放行 webview 默认
+  // 行为会让页面导航离开应用，整个 UI 白屏只能重启
   function onPreviewClick(e: MouseEvent) {
     const target = e.target as HTMLElement;
     const anchor = target.closest("a");
@@ -95,17 +97,31 @@
     const href = anchor.getAttribute("href");
     if (!href || href === "#") return;
     e.preventDefault();
-    void openUrl(href);
+    if (/^https?:/i.test(href)) {
+      void openUrl(href);
+    }
+    // 锚点走页内滚动（默认行为已阻止，手动滚到目标）
+    if (href.startsWith("#")) {
+      document.getElementById(href.slice(1))?.scrollIntoView();
+    }
   }
 
-  // body 变化 → marked 同步渲染（秒出 GFM）→ tick 后异步 CDN 增强（mermaid/katex/高亮）
+  // body 变化 → marked 同步渲染（秒出 GFM）→ tick 后异步增强（mermaid/katex/高亮）。
+  // 关键：effect 必须读取 body 把它纳入依赖——否则 view 模式直接切换 prompt 时
+  // （previewEl/mode 都不变），新内容的 mermaid/KaTeX/高亮不会渲染。
   $effect(() => {
+    const currentBody = body;
     if (!previewEl || mode !== "view") return;
-    void tick().then(() => renderRich(previewEl!));
+    void currentBody;
+    // tick 回调执行时可能已切到编辑模式（previewEl 变 undefined），判空防止
+    // renderRich(undefined) 抛 TypeError
+    void tick().then(() => {
+      if (previewEl && mode === "view") renderRich(previewEl);
+    });
   });
 </script>
 
-{#if !prompt}
+{#if !prompt && mode !== "edit"}
   <section class="editor empty">
     <div class="placeholder">
       <div class="big">📝</div>
@@ -117,7 +133,7 @@
   <section class="editor">
     <header class="editor-head">
       <div class="title-block">
-        <h2 class="title">{title || prompt.title}</h2>
+        <h2 class="title">{title || prompt?.title}</h2>
         {#if dirty}
           <span class="dirty-badge">{t("editor.unsaved")}</span>
         {/if}
@@ -183,7 +199,7 @@
           <kbd>Enter</kbd>
         </button>
         <span class="meta-info">
-          {categoryLabel(prompt.category)}
+          {categoryLabel(prompt?.category ?? "")}
         </span>
       </footer>
     {:else}
@@ -192,7 +208,7 @@
         <div class="form-row">
           <label class="form-label" for="f-title">{t("editor.titleLabel")}</label>
           <input
-            id="f-title"
+            id="f-title" use:autofocus
             class="form-input"
             type="text"
             bind:value={title}

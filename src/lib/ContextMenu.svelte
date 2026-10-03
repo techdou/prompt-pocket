@@ -32,7 +32,30 @@
   // 移动分类子菜单
   let showMoveMenu = $state(false);
 
-  let categoryOptions = $derived(["未分类", ...categories.map((c) => c.name)]);
+  // open 被外部置 false（如 App 的 Esc 链直接关闭）时复位子菜单状态，
+  // 避免下次打开时移动子菜单直接展开
+  $effect(() => {
+    if (!open) showMoveMenu = false;
+  });
+
+  let categoryOptions = $derived([
+    "未分类",
+    ...categories.map((c) => c.name).filter((n) => n !== "未分类"),
+  ]);
+
+  // 视口边界翻转：菜单挂载后测量，越出窗口右/下缘则向左/上收回
+  let menuEl: HTMLDivElement | null = $state(null);
+  let posX = $state(0);
+  let posY = $state(0);
+
+  $effect(() => {
+    if (!open || !menuEl) return;
+    // showMoveMenu 展开会改变高度，纳入依赖重测
+    void showMoveMenu;
+    const rect = menuEl.getBoundingClientRect();
+    posX = Math.max(4, Math.min(x, window.innerWidth - rect.width - 8));
+    posY = Math.max(4, Math.min(y, window.innerHeight - rect.height - 8));
+  });
 
   function categoryLabel(name: string): string {
     return name === "未分类" ? t("common.uncategorized") : name;
@@ -55,7 +78,13 @@
 </script>
 
 <svelte:window
-  onkeydown={(e) => e.key === "Escape" && close()}
+  onkeydown={(e) => {
+    if (e.key === "Escape" && open) {
+      // preventDefault：App 的 window handler 看到 defaultPrevented 就不再穿透隐藏窗口
+      e.preventDefault();
+      close();
+    }
+  }}
 />
 
 {#if open && prompt}
@@ -71,8 +100,9 @@
     transition:fly={{ duration: 80 }}
   ></div>
   <div
+    bind:this={menuEl}
     class="menu"
-    style="left: {x}px; top: {y}px;"
+    style="left: {posX || x}px; top: {posY || y}px;"
     transition:fly={{ y: -4, duration: 100 }}
   >
     <button class="item" onclick={() => handle(onrename)}>
@@ -80,7 +110,11 @@
     </button>
 
     <button class="item" onclick={() => (showMoveMenu = !showMoveMenu)}>
-      <span class="ico">📁</span> {t("context.moveToCategory")}
+      <span class="ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+      </span> {t("context.moveToCategory")}
       <span class="arrow">{showMoveMenu ? "▾" : "▸"}</span>
     </button>
 
@@ -102,7 +136,12 @@
     <div class="sep"></div>
 
     <button class="item danger" onclick={() => handle(ondelete)}>
-      <span class="ico">🗑</span> {t("context.delete")}
+      <span class="ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6" />
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        </svg>
+      </span> {t("context.delete")}
     </button>
   </div>
 {/if}
@@ -152,15 +191,15 @@
   }
   .ico {
     width: 16px;
-    text-align: center;
+    display: inline-flex;
+    justify-content: center;
     opacity: 0.8;
   }
-  .arrow {
-    margin-left: auto;
-    color: var(--muted);
-    font-size: 11px;
+  .ico svg {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
   }
-
   .arrow {
     margin-left: auto;
     color: var(--muted);

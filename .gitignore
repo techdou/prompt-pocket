@@ -46,12 +46,19 @@ secrets.*
 .gemini/
 .continue/
 
+# 临时内部审查和开发记录
+REVIEW-*.md
+PLAN-*.md
+NOTES-*.md
+TODO-*.md
+
 # 本地提示词库与恢复记录（开发时若放仓库内）
 PromptPocket-Data/
 PromptPocket/
 .recovery/
 .trash/
 .sync_meta.json
+.sync_deleted.json
 .first_run_done
 
 # 仅根目录的运行时配置；不屏蔽源码中的配置文件

@@ -14,6 +14,8 @@ export function installPreview() {
     ...Array.from({ length: 14 }, (_, index) => sample(`参考提示词 ${index + 1}`, "参考", `第 ${index + 1} 条示例内容，用于验证长列表键盘导航。`)),
   ];
   let hotkey = "Ctrl+Alt+P";
+  let autostart = false;
+  let provider = "webdav";
   let sequence = 0;
   const recovery: (RecoveryEntry & { content: PromptContent })[] = [];
   const archive = (prompt: Prompt, kind: string) => recovery.unshift({
@@ -40,7 +42,10 @@ export function installPreview() {
       }
       if (command === "copy_or_paste") return { status: "copied" };
       if (command === "get_sync_status") return { configured: false, enabled: false, lastSync: null, lastError: null, syncing: false };
-      if (command === "get_cloud_config") return { username: "", remoteRoot: "PromptPocket", enabled: false, hasPassword: false };
+      if (command === "get_cloud_config") return { username: "", remoteRoot: "PromptPocket", enabled: false, hasPassword: false, provider, ghRepo: "", ghBranch: "main", ghPrefix: "PromptPocket", ghEnabled: false, hasToken: false };
+      if (command === "set_sync_provider") { provider = String(args.provider); return; }
+      if (command === "get_autostart") return autostart;
+      if (command === "set_autostart") { autostart = Boolean(args.enabled); return; }
       if (command === "get_hotkey") return hotkey;
       if (command === "set_hotkey") { hotkey = String(args.shortcut); return; }
       if (command === "list_recovery") return structuredClone(recovery);

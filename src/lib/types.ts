@@ -1,11 +1,19 @@
-// prompt 数据结构，与 Rust 端 Prompt struct 一一对应（serde 自动转 camelCase）
+// ── 前后端数据形状契约 ──
+// Rust 端结构体全部 serde(rename_all = "camelCase")，invoke 返回的运行时
+// 形状是 camelCase。本文件分两类：
+// - Prompt 族（Prompt/PromptMeta/PromptContent/ScanResult/CategoryCount）：
+//   前端类型约定 snake_case（copy_mode/abs_path），翻译只发生在 api.ts 的
+//   normalize* 层——新增 command 的返回必须过 normalize 再进组件，绕过
+//   normalize 直接消费 invoke 结果会拿到 camelCase，类型说有 copy_mode、
+//   运行时却是 undefined，编译期查不出来。
+// - SyncStatus / CloudConfigView：camelCase 直映 wire，不经 normalize。
 export type CopyMode = "markdown" | "plain";
 
 export interface PromptMeta {
+  /** 兼容带标签的提示词元数据。 */
+  tags?: string[];
   /** 标题，缺省时取文件名（去扩展名） */
   title: string;
-  /** 旧版 frontmatter 兼容字段；新文件不再写入 */
-  tags?: string[];
   /** 复制时是否先转纯文本：markdown 渲染成纯文本 / 原样 */
   copy_mode: CopyMode;
   /** 创建时间 ISO 字符串 */
@@ -15,8 +23,6 @@ export interface PromptMeta {
 }
 
 export interface Prompt {
-  /** 正文随扫描返回，供离线全文检索。 */
-  body?: string;
   /** 相对于仓库根的稳定 id（无扩展名路径，正斜杠分隔） */
   id: string;
   /** 显示标题 */
@@ -29,6 +35,8 @@ export interface Prompt {
   abs_path: string;
   /** frontmatter 元数据 */
   meta: PromptMeta;
+  /** 正文全文（扫描时随列表返回，供内容搜索） */
+  body: string;
   /** 在分类内的排序权重（来自 .order.json），undefined 表示未定义 */
   order?: number;
 }
@@ -50,6 +58,14 @@ export interface CloudConfigView {
   remoteRoot: string;
   enabled: boolean;
   hasPassword: boolean;
+  /** 当前激活的同步后端："webdav"（缺省）| "github" */
+  provider?: string;
+  /** GitHub 存档配置（密钥只返回 hasToken，永不下发明文） */
+  ghRepo?: string;
+  ghBranch?: string;
+  ghPrefix?: string;
+  ghEnabled?: boolean;
+  hasToken?: boolean;
 }
 
 /** 同步状态 */
@@ -70,9 +86,21 @@ export interface PromptContent {
 /** save_prompt 接收的结构化保存请求（前端表单直接构造） */
 export interface SaveRequest {
   title: string;
-  category?: string;
   copy_mode: CopyMode;
   body: string;
+  /** 目标分类：与当前目录不同则保存时移动文件（serde camelCase → category） */
+  category?: string;
+}
+
+/** 同步一次执行的统计（Rust SyncReport 结构化返回，文案由前端 i18n 拼装） */
+export interface SyncReport {
+  downloaded: number;
+  skipped: number;
+  deleted: number;
+  uploaded: number;
+  deletedRemote: number;
+  conflicts: number;
+  errors: string[];
 }
 
 export interface RecoveryEntry {

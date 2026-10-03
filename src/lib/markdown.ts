@@ -1,6 +1,6 @@
 // 富 Markdown 渲染核心：marked 打包，离线可用 GFM 全语法。
 // XSS 防护不依赖 DOMPurify——raw HTML 块一律转义显示，危险协议链接替换为 #。
-// mermaid / 代码高亮走 DOM 阶段 CDN 加载（见 ./renderers）。
+// mermaid / 代码高亮 / KaTeX 走 DOM 阶段本地打包增强（见 ./renderers）。
 
 import { Marked } from "marked";
 import { markedHighlight } from "marked-highlight";
@@ -12,12 +12,14 @@ const escAttr = (s: string): string => escHtml(s).replace(/"/g, "&quot;");
 
 // 链接协议白名单：仅放行 http(s)/mailto/ftp/相对路径/锚点
 const SAFE_HREF = /^(https?:|mailto:|ftp:|\/|#|\.\/|\.\.\/)/i;
+// 图片额外放行 data:image/*（贴图常用 base64 内嵌）；data:text/html 等仍拦截
+const SAFE_IMG = /^(https?:|ftp:|\/|#|\.\/|\.\.\/|data:image\/)/i;
 
 const marked = new Marked();
 
 // ── KaTeX tokenizer（手写，不依赖 katex 包本体）──
 // 规则取自 marked-katex-extension：$...$ 行内、$$...$$/$...$ 块级。
-// renderer 只产出占位标记，真正的渲染交给 DOM 阶段 CDN 加载的 katex（见 renderers/katex.ts）。
+// renderer 只产出占位标记，真正的渲染交给 DOM 阶段本地打包的 katex（见 renderers/katex.ts）。
 const inlineKatexRule =
   /^(\${1,2})(?!\$)((?:\\.|[^\\\n])*?(?:\\.|[^\\\n$]))\1(?=[\s?!.,:？！。，：]|$)/;
 const blockKatexRule = /^(\${1,2})\n((?:\\[^]|[^\\])+?)\n\1(?:\n|$)/;
@@ -29,15 +31,14 @@ function katexPlaceholder(tex: string, displayMode: boolean): string {
   return `<code class="katex-placeholder katex-${mode}" data-tex="${escAttr(tex)}" data-display="${displayMode}">${escHtml(tex)}</code>`;
 }
 
-// marked-highlight：代码高亮 hook。mermaid 语言原样返回，留给 DOM 阶段处理。
-// 其余语言目前不在解析阶段着色（highlight.js 走 CDN，DOM 阶段统一处理），
-// 这里只负责给 code 元素打上 language-xxx class，方便后续 highlightElement() 定位。
+// marked-highlight：只借它的 langPrefix 给 code 元素打 class，不在解析阶段着色。
+// highlight 回调返回原文（=== token.text 时 marked-highlight 视为"无高亮"跳过转义标记），
+// mermaid 由下方自定义 renderer 接管，highlight.js 留给 DOM 阶段本地处理。
 marked.use(
   markedHighlight({
     langPrefix: "hljs language-",
-    highlight(code, lang) {
-      if ((lang || "").trim() === "mermaid") return code;
-      return code; // Unchanged source is escaped by marked-highlight.
+    highlight(code, _lang) {
+      return code;
     },
   }),
 );
@@ -60,6 +61,10 @@ marked.use({
     // 危险协议（javascript:/data:text-html 等）链接 → href 替换为 #
     if (token.type === "link" && token.href && !SAFE_HREF.test(token.href)) {
       token.href = "#";
+    }
+    // 图片同源防护：javascript:/data:text-html 等协议的 src 清空
+    if (token.type === "image" && token.href && !SAFE_IMG.test(token.href)) {
+      token.href = "";
     }
   },
   gfm: true,
@@ -122,4 +127,55 @@ marked.use({
 export function renderMarkdown(src: string): string {
   if (!src || !src.trim()) return '<p class="empty-body">（无内容）</p>';
   return marked.parse(src, { async: false }) as string;
+}
+
+/**
+ * Markdown → 纯文本：copy_mode 为 plain 时去掉常见 Markdown 标记，
+ * 让粘贴目标（不支持 Markdown 的输入框）拿到可读文本。
+ * 轻量正则实现，目标是常见标记干净去除，不追求语义级还原；
+ * 表格保留竖线结构（去掉标记后仍可读）。
+ */
+export function markdownToPlain(src: string): string {
+  if (!src) return "";
+  // 先抽走代码段暂存：代码里的 __init__、*args、[i](j) 都是字面标识符而非
+  // Markdown 语法，必须在任何标记剥离之前保护，最后原样还原（去围栏/反引号）
+  const codeSlots: string[] = [];
+  const stashCode = (raw: string): string => {
+    codeSlots.push(raw);
+    return `\u0000${codeSlots.length - 1}\u0000`;
+  };
+  let out = src.replace(/```[^\n]*\n[\s\S]*?```/g, stashCode);
+  out = out.replace(/`[^`]+`/g, stashCode);
+
+  // 图片 ![alt](url) → alt；链接 [text](url) → text。
+  // url 允许一层嵌套括号：Wikipedia 风格 .../Foo_(bar) 不能在 (bar) 处截断
+  const url = String.raw`(?:[^()]|\([^()]*\))*`;
+  out = out.replace(new RegExp(String.raw`!\[([^\]]*)\]\(${url}\)`, "g"), "$1");
+  out = out.replace(new RegExp(String.raw`\[([^\]]*)\]\(${url}\)`, "g"), "$1");
+  // 行内标记：**x** / __x__ / ~~x~~ / *x* → x。
+  // __/_ 粗斜体带词边界守卫（CommonMark 词中强调不生效）：foo__bar__baz 不剥，
+  // 否则 Python 的 __init__/__main__ 等标识符会被静默损坏
+  out = out.replace(/\*\*([^*]+)\*\*/g, "$1");
+  out = out.replace(/(^|[^\w])__([^_]+)__(?!\w)/gm, "$1$2");
+  out = out.replace(/~~([^~]+)~~/g, "$1");
+  out = out.replace(/\*([^*]+)\*/g, "$1");
+  // 斜体 _x_：无 lookbehind 写法（lookbehind 是 ES2018，老 WKWebView/WebKitGTK
+  // 不支持，静态 import 下模块解析即 SyntaxError 会让整个应用白屏）
+  out = out.replace(/(^|[^\w])_([^_]+)_(?!\w)/gm, "$1$2");
+  // 行首标记：标题 #、引用 >、任务列表 [ ]/[x]、无序 -/*/+、有序 1.
+  out = out.replace(
+    /^(\s*)(#{1,6}\s+|>\s?|[-*+]\s+\[[ xX]\]\s+|[-*+]\s+|\d+\.\s+)/gm,
+    "$1",
+  );
+  // 水平线（--- / *** / ___）
+  out = out.replace(/^\s*([-*_]\s*){3,}$/gm, "");
+  // 还原代码段：围栏块去首尾 ``` 行，行内代码去反引号
+  out = out.replace(/\u0000(\d+)\u0000/g, (_, i: string) => {
+    const raw = codeSlots[Number(i)] ?? "";
+    if (raw.startsWith("```")) {
+      return raw.replace(/^```[^\n]*\n/, "").replace(/```\s*$/, "");
+    }
+    return raw.slice(1, -1);
+  });
+  return out.trim();
 }

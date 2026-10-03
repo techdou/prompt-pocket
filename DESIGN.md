@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-10-03
+- Last refreshed: 2026-10-04
 - Primary product surfaces: 快速调用、提示词整理、模板填写、设置与恢复。
 - Evidence reviewed: README.md、docs/screenshots/list.png、src/App.svelte、src/app.css、src/lib/Editor.svelte、PromptList.svelte、Settings.svelte。
 
@@ -75,7 +75,7 @@
 - Framework/styling system: Svelte 5 + TypeScript + Tauri/Rust；沿用 CSS。
 - Design-token constraints: 复用 src/app.css，不引入 UI 框架。
 - Performance constraints: 搜索在内存完成；正文加载校验请求身份；不阻塞键盘操作。
-- Compatibility constraints: 旧 Markdown 可继续读取；中英切换保留。
+- Compatibility constraints: 旧 Markdown 可继续读取；中英切换、GitHub/WebDAV 手动同步、开机自启动和本地富文本渲染保留。
 - Test/screenshot expectations: 新逻辑有回归测试；预览截图审查主要状态。
 
 ## Open questions

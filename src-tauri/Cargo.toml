@@ -1,6 +1,6 @@
 [package]
 name = "prompt-pocket"
-version = "2.0.2"
+version = "2.3.0"
 description = "轻量级提示词管理工具"
 authors = ["you"]
 edition = "2021"
@@ -19,6 +19,8 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
+# 开机自启动（设置页开关，读写系统真实状态，不落 config.json）
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # YAML frontmatter 解析
@@ -27,11 +29,12 @@ serde_yaml = "0.9"
 walkdir = "2"
 # 文件名非法字符清理
 sanitize-filename = "0.5"
-# 系统默认数据目录
-dirs = "5"
 # 坚果云 WebDAV 同步
 reqwest_dav = "0.2"
-reqwest = "0.12"
+# json feature：GitHub Contents API 的请求/响应体都是 JSON
+reqwest = { version = "0.12", features = ["json"] }
+# GitHub Contents API 上传内容的 base64 编码
+base64 = "0.22"
 # 系统凭据库：WebDAV 应用密码不落入 config.json 明文
 keyring = "4"
 # async runtime（Tauri 自带，这里显式声明用于 spawn 后台同步）
@@ -39,14 +42,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 # 模拟系统级键盘输入（注入 Ctrl+V 到原输入框）
 enigo = "0.6"
 
-# Windows API：检测前台窗口是否有文本光标（caret）以决定是否注入
+# Windows API：前台窗口判定（注入判据）/ 在资源管理器中显示
 # 仅 Windows 需要，放 target-specific 避免在 macOS/Linux 拉取无用的 windows crate
 [target.'cfg(windows)'.dependencies]
 # 版本与 enigo 传递依赖一致（0.61），避免双版本拉取
 windows = { version = "0.61", features = [
     "Win32_Foundation",
-    "Win32_System_Com",
-    "Win32_UI_Accessibility",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

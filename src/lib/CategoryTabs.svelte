@@ -6,6 +6,8 @@
   } from "./reorder";
   import type { CategoryCount } from "./types";
   import { createTranslator, type Translator } from "./i18n";
+  import { autofocus } from "./actions";
+  import { onMount } from "svelte";
 
   const fallbackT = createTranslator("zh");
 
@@ -17,6 +19,8 @@
     onrename,
     oncontextmenu,
     onreorder,
+    ondragstart,
+    ondragend,
     t = fallbackT,
   }: {
     categories: CategoryCount[];
@@ -27,6 +31,9 @@
     oncontextmenu: (name: string, x: number, y: number) => void;
     /** 拖拽结束回调：把 fromIndex 的分类移到 toIndex 前 */
     onreorder: (fromIndex: number, toIndex: number) => void;
+    /** 拖拽手势开始/结束（父组件借此挂起 refresh，防手势被重绘打断） */
+    ondragstart?: () => void;
+    ondragend?: () => void;
     t?: Translator;
   } = $props();
 
@@ -70,6 +77,7 @@
     dragFromIndex = index;
     isDragging = true;
     updateDropTarget(e.clientX, e.clientY);
+    ondragstart?.();
 
     window.addEventListener("pointermove", onWindowPointerMove, { passive: false });
     window.addEventListener("pointerup", onWindowPointerUp, { passive: false });
@@ -79,6 +87,11 @@
   function onWindowPointerMove(e: PointerEvent) {
     if (e.pointerId !== activePointerId || dragFromIndex < 0) return;
     e.preventDefault();
+    // 主键已松开但 pointerup 丢了（指针拖出窗口）：放弃本次拖拽，防状态卡死
+    if ((e.buttons & 1) === 0) {
+      finishPointerDrag(false);
+      return;
+    }
     updateDropTarget(e.clientX, e.clientY);
   }
 
@@ -129,24 +142,26 @@
   function finishPointerDrag(commit: boolean) {
     const from = dragFromIndex;
     const to = dropToIndex;
-    resetDrag();
 
-    if (!commit || from < 0 || to < 0) return;
-    // 落在原位（自身左侧或自身右侧）→ 无变化
-    if (to === from || to === from + 1) return;
-    onreorder(from, to);
+    // 先提交重排再结束手势（与 PromptList 同因）：onreorder 同步段置起
+    // reorderInFlight 后，resetDrag 触发的补刷才会正确挂起
+    const noChange = !commit || from < 0 || to < 0 || to === from || to === from + 1;
+    if (!noChange) onreorder(from, to);
+    resetDrag();
   }
 
   function resetDrag() {
     window.removeEventListener("pointermove", onWindowPointerMove);
     window.removeEventListener("pointerup", onWindowPointerUp);
     window.removeEventListener("pointercancel", onWindowPointerCancel);
+    const wasDragging = isDragging;
     activePointerId = -1;
     isDragging = false;
     dragFromIndex = -1;
     dropToIndex = -1;
     dropLineIndex = -1;
     dropLineBefore = true;
+    if (wasDragging) ondragend?.();
   }
 
   function onTabClick(e: MouseEvent, name: string) {
@@ -164,12 +179,49 @@
   function showDropLineAfter(tabIdx: number): boolean {
     return isDragging && dropLineIndex === tabIdx && !dropLineBefore && tabIdx !== dragFromIndex;
   }
+
+  // 横向溢出渐隐：分类多到滚出视口时在溢出侧加 24px 渐隐，提示还有更多 tab；
+  // 分类少时不显示（scroll 事件 + ResizeObserver 覆盖增删分类和窗口缩放）
+  let fadedLeft = $state(false);
+  let fadedRight = $state(false);
+
+  function updateScrollFade() {
+    if (!scrollEl) return;
+    fadedLeft = scrollEl.scrollLeft > 4;
+    fadedRight = scrollEl.scrollLeft + scrollEl.clientWidth < scrollEl.scrollWidth - 4;
+  }
+
+  $effect(() => {
+    // 分类数量/窗口尺寸变化后重算（读一下依赖即可，DOM 测量在微任务里做）
+    void categories;
+    void total;
+    const el = scrollEl;
+    if (!el) return;
+    const raf = requestAnimationFrame(updateScrollFade);
+    const ro = new ResizeObserver(() => updateScrollFade());
+    ro.observe(el);
+    return () => {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+    };
+  });
 </script>
 
-<div class="tabs-row">
+<div class="tabs-row" data-tauri-drag-region>
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="tabs-scroll" bind:this={scrollEl} ondragstart={onNativeDragStart}>
+  <!-- drag-region 只作用于带属性的元素本身（tauri 注入脚本按命中元素精确
+       匹配）：tabs-row 与 tabs-scroll 的空白区可拖动整窗；tab 按钮和手柄
+       是交互元素，注入脚本自行豁免，点击/拖拽不受影响 -->
+  <div
+    class="tabs-scroll"
+    class:faded-left={fadedLeft}
+    class:faded-right={fadedRight}
+    data-tauri-drag-region
+    bind:this={scrollEl}
+    ondragstart={onNativeDragStart}
+    onscroll={updateScrollFade}
+  >
     <!-- "全部"：固定首位，不可拖，但可作为落点（拖到它右侧 = 排第一） -->
     <button
       type="button"
@@ -197,6 +249,8 @@
         onclick={(e) => onTabClick(e, cat.name)}
         oncontextmenu={(e) => {
           e.preventDefault();
+          // 未分类是根目录文件的虚拟统称、无实体目录，重命名入口必失败——不弹菜单
+          if (cat.name === "未分类") return;
           oncontextmenu(cat.name, e.clientX, e.clientY);
         }}
         title={categoryLabel(cat.name)}
@@ -222,10 +276,14 @@
       <input
         type="text"
         bind:value={newName}
+        use:autofocus
         placeholder={t("category.namePlaceholder")}
         onkeydown={(e) => {
           if (e.key === "Enter") submitCreate();
           if (e.key === "Escape") {
+            // 阻止冒泡：取消输入不应连带隐藏整个窗口
+            e.stopPropagation();
+            e.preventDefault();
             creating = false;
             newName = "";
           }
@@ -278,6 +336,31 @@
   .tabs-scroll::-webkit-scrollbar {
     display: none;
   }
+  /* 溢出侧 24px 渐隐：内容滚出视口的提示，分类少时不显示 */
+  .tabs-scroll.faded-right {
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+  }
+  .tabs-scroll.faded-left {
+    -webkit-mask-image: linear-gradient(to left, black calc(100% - 24px), transparent);
+    mask-image: linear-gradient(to left, black calc(100% - 24px), transparent);
+  }
+  .tabs-scroll.faded-left.faded-right {
+    -webkit-mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 24px,
+      black calc(100% - 24px),
+      transparent 100%
+    );
+    mask-image: linear-gradient(
+      to right,
+      transparent 0,
+      black 24px,
+      black calc(100% - 24px),
+      transparent 100%
+    );
+  }
 
   .tab {
     display: inline-flex;
@@ -308,12 +391,12 @@
   .tab.active {
     color: var(--accent);
     background: var(--accent-soft);
-    border-color: #c9dafc;
+    border-color: var(--accent-border);
     font-weight: 600;
   }
   .tab:hover .drag-handle,
   .tab.active .drag-handle {
-    opacity: 0.55;
+    opacity: 0.8;
   }
   /* 拖动中的源项半透明 */
   .tab.dragging {
@@ -344,8 +427,11 @@
     text-overflow: ellipsis;
   }
   .drag-handle {
-    width: 12px;
-    height: 16px;
+    /* 热区 20px（负 margin 抵消布局位移，视觉宽度不变），命中宽度对齐
+       可用性下限，拖拽起手不易失焦 */
+    width: 20px;
+    height: 18px;
+    margin: 0 -4px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -388,7 +474,7 @@
   }
   .add-btn:hover {
     background: var(--accent-soft);
-    border-color: #c9dafc;
+    border-color: var(--accent-border);
     color: var(--accent-hover);
   }
 
@@ -425,6 +511,6 @@
   }
   .mini:hover {
     background: var(--accent-soft);
-    border-color: #c9dafc;
+    border-color: var(--accent-border);
   }
 </style>

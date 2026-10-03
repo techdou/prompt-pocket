@@ -1,8 +1,9 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import type { Prompt } from "./types";
-  import { createTranslator, type Translator } from "./i18n";
+  import { bodyMatchSnippet, searchExcerpt, highlightParts } from "./search";
   import type { Library } from "./library";
-  import { highlightParts, searchExcerpt } from "./search";
+  import { createTranslator, formatRelativeTime, type Language, type Translator } from "./i18n";
 
   const fallbackT = createTranslator("zh");
 
@@ -10,40 +11,48 @@
     prompts,
     selectedPath,
     selectedIndex,
+    onselect,
+    oncontextmenu,
+    onreorder,
+    onmounted,
+    ondragstart,
+    ondragend,
+    draggable = true,
+    disabledReason = "",
     query = "",
     compact = false,
     preferencesDisabled = false,
     library = {},
-    onselect,
-    oncontextmenu,
-    onreorder,
-    onfavorite = () => {},
-    onmounted,
-    draggable = true,
-    disabledReason = "",
+    onfavorite = (_path: string) => {},
+    /** 副行内容：分类名（全部视图/搜索时）或相对更新时间（单分类视图） */
+    subMode = "category",
+    language = "zh",
     t = fallbackT,
   }: {
     prompts: Prompt[];
     selectedPath: string | null;
     selectedIndex: number;
-    query?: string;
-    compact?: boolean;
-    preferencesDisabled?: boolean;
-    library?: Library;
     onselect: (path: string) => void;
     oncontextmenu: (prompt: Prompt, x: number, y: number) => void;
     /** 拖拽结束回调：把 fromIndex 处的项移动到 toIndex 之前 */
     onreorder: (fromIndex: number, toIndex: number) => void;
-    onfavorite?: (path: string) => void;
-    onmounted?: (fn: (index: number) => void) => void;
+    /** 挂载后回传滚动函数给父组件（键盘导航定位用） */
+    onmounted?: (scrollToIndex: (i: number) => void) => void;
+    /** 拖拽手势开始/结束（父组件借此挂起 refresh，防列表被重绘打断手势） */
+    ondragstart?: () => void;
+    ondragend?: () => void;
     draggable?: boolean;
     disabledReason?: string;
+    /** 当前搜索词：正文命中时列表项展示命中摘录 */
+    query?: string;
+    compact?: boolean;
+    preferencesDisabled?: boolean;
+    library?: Library;
+    onfavorite?: (path: string) => void;
+    subMode?: "category" | "time";
+    language?: Language;
     t?: Translator;
   } = $props();
-
-  function categoryLabel(name: string): string {
-    return name === "未分类" ? t("common.uncategorized") : name;
-  }
 
   function isFavorite(path: string): boolean {
     return !!library[path]?.favorite;
@@ -58,10 +67,15 @@
     return searchExcerpt(prompt.body, query);
   }
 
-  function scrollToIndex(index: number) {
-    listEl
-      ?.querySelector<HTMLElement>(`[data-idx="${index}"]`)
-      ?.scrollIntoView({ block: "nearest" });
+  // 列表项元素引用：键盘导航时 scrollIntoView 定位
+  let itemEls: (HTMLLIElement | undefined)[] = $state([]);
+
+  onMount(() => {
+    onmounted?.((i) => itemEls[i]?.scrollIntoView({ block: "nearest" }));
+  });
+
+  function categoryLabel(name: string): string {
+    return name === "未分类" ? t("common.uncategorized") : name;
   }
 
   // 用 Pointer Events 实现排序，不依赖 HTML5 Drag and Drop 的 dataTransfer/drop。
@@ -84,6 +98,7 @@
     dragFromIndex = index;
     isDragging = true;
     updateDropTarget(e.clientX, e.clientY);
+    ondragstart?.();
 
     window.addEventListener("pointermove", onWindowPointerMove, { passive: false });
     window.addEventListener("pointerup", onWindowPointerUp, { passive: false });
@@ -93,6 +108,11 @@
   function onWindowPointerMove(e: PointerEvent) {
     if (e.pointerId !== activePointerId || dragFromIndex < 0) return;
     e.preventDefault();
+    // 主键已松开但 pointerup 丢了（指针拖出窗口）：放弃本次拖拽，防状态卡死
+    if ((e.buttons & 1) === 0) {
+      finishPointerDrag(false);
+      return;
+    }
     updateDropTarget(e.clientX, e.clientY);
   }
 
@@ -145,12 +165,14 @@
   function finishPointerDrag(commit: boolean) {
     const from = dragFromIndex;
     const to = dropToIndex;
-    resetDrag();
 
-    if (!commit || from < 0 || to < 0) return;
-    // 落在原位（自身上方或自身正下方）→ 无变化
-    if (to === from || to === from + 1) return;
-    onreorder(from, to);
+    // 先提交重排再结束手势：onreorder 的同步段会置起 reorderInFlight，
+    // resetDrag 触发的 ondragend 补刷看到标志位在飞就会挂起，由 doReorder
+    // 的 finally 补刷——顺序反了，手势期间攒下的补刷会抢在写盘前发出，
+    // 把刚拖的顺序冲掉
+    const noChange = !commit || from < 0 || to < 0 || to === from || to === from + 1;
+    if (!noChange) onreorder(from, to);
+    resetDrag();
   }
 
   function resetDrag() {
@@ -158,12 +180,14 @@
     window.removeEventListener("pointerup", onWindowPointerUp);
     window.removeEventListener("pointercancel", onWindowPointerCancel);
 
+    const wasDragging = isDragging;
     activePointerId = -1;
     isDragging = false;
     dragFromIndex = -1;
     dropToIndex = -1;
     dropLineIndex = -1;
     dropLineBefore = true;
+    if (wasDragging) ondragend?.();
   }
 
   function onNativeDragStart(e: DragEvent) {
@@ -182,10 +206,6 @@
   $effect(() => {
     if (!draggable && isDragging) resetDrag();
   });
-
-  $effect(() => {
-    if (listEl && onmounted) onmounted(scrollToIndex);
-  });
 </script>
 
 <ul
@@ -195,7 +215,11 @@
   ondragstart={onNativeDragStart}
 >
   {#each prompts as p, i (p.path)}
+    {@const snippet = compact ? bodyExcerpt(p) : bodyMatchSnippet(p, query)}
+    {@const relTime =
+      subMode === "time" ? formatRelativeTime(p.meta.updated, language) : ""}
     <li
+      bind:this={itemEls[i]}
       data-idx={i}
       role="option"
       tabindex="-1"
@@ -232,21 +256,17 @@
           >
             ⠿
           </button>
-          <span class="title">
-            {#each highlightParts(p.title, query) as part}
-              {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
-            {/each}
-          </span>
+          <span class="title">{#each highlightParts(p.title, query) as part}{#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
         </div>
-        {#if bodyExcerpt(p)}
-          <div class="excerpt">
-            {#each highlightParts(bodyExcerpt(p), query) as part}
-              {#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}
-            {/each}
-          </div>
-        {/if}
         <div class="sub">
-          <span class="cat">{categoryLabel(p.category)}</span>
+          {#if relTime}
+            <span class="cat">{relTime}</span>
+          {:else}
+            <span class="cat">{categoryLabel(p.category)}</span>
+          {/if}
+          {#if snippet}
+            <span class="snippet" title={snippet}>{#each highlightParts(snippet, query) as part}{#if part.match}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
+          {/if}
         </div>
       </div>
       <button
@@ -277,7 +297,17 @@
       </button>
     </li>
   {:else}
-    <li class="empty">{t("prompt.empty")}</li>
+    <!-- 空态分化：搜不到（换词/清空引导） vs 真的没有（新建引导），
+         用户不用猜「是没这个词还是没这功能」 -->
+    <li class="empty">
+      {#if query.trim()}
+        <p>{t("prompt.emptySearch", { query: query.trim() })}</p>
+        <p class="empty-hint">{t("prompt.emptySearchHint")}</p>
+      {:else}
+        <p>{t("prompt.empty")}</p>
+        <p class="empty-hint">{t("prompt.emptyHint")}</p>
+      {/if}
+    </li>
   {/each}
 </ul>
 
@@ -316,18 +346,18 @@
     opacity: 1;
   }
   .item:hover .drag-handle {
-    opacity: 0.4;
+    opacity: 0.7;
   }
   .item.active {
     background: var(--bg-active);
-    border-color: #c9dafc;
+    border-color: var(--accent-border);
     box-shadow: 0 1px 2px rgba(37, 99, 235, 0.08);
   }
   .item.active .more-btn {
     opacity: 0.7;
   }
   .item.active .drag-handle {
-    opacity: 0.4;
+    opacity: 0.7;
   }
   .item.disabled .drag-handle {
     opacity: 0;
@@ -370,8 +400,11 @@
     gap: 5px;
   }
   .drag-handle {
-    width: 12px;
-    height: 16px;
+    /* 视觉仍是窄符号，热区用宽度+负 margin 撑到 20px（对齐可点击区域
+       可用性下限），拖拽起手不再容易失焦 */
+    width: 20px;
+    height: 18px;
+    margin-left: -8px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -401,7 +434,7 @@
   .sub {
     display: flex;
     gap: 8px;
-    margin-top: 3px;
+    margin-top: 2px;
     margin-left: 17px;
     font-size: 11px;
     color: var(--muted);
@@ -410,48 +443,12 @@
   .cat {
     flex-shrink: 0;
   }
-
-  .excerpt {
-    margin: 3px 0 0 17px;
-    color: var(--muted);
-    font-size: 11.5px;
-    line-height: 1.35;
+  /* 正文命中摘录：搜索词只命中正文时展示，帮用户认出目标 */
+  .snippet {
     overflow: hidden;
-    display: -webkit-box;
-    line-clamp: 2;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-  }
-
-  mark {
-    padding: 0 1px;
-    border-radius: 3px;
-    background: #fff1a8;
-    color: inherit;
-  }
-
-  .favorite-btn {
-    flex-shrink: 0;
-    width: 24px;
-    height: 24px;
-    border: 0;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--border-strong);
-    cursor: pointer;
-    opacity: 0.55;
-    transition:
-      opacity 0.12s,
-      background 0.12s,
-      color 0.12s;
-  }
-  .favorite-btn:hover,
-  .favorite-btn.active {
-    opacity: 1;
-    color: #d6a300;
-  }
-  .favorite-btn:hover {
-    background: var(--bg-hover);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.85;
   }
 
   .more-btn {
@@ -477,5 +474,42 @@
     text-align: center;
     color: var(--muted);
     font-size: 13px;
+  }
+  .empty p {
+    margin: 0;
+  }
+  .empty .empty-hint {
+    margin-top: 6px;
+    font-size: 12px;
+    opacity: 0.8;
+  }
+  .favorite-btn {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--border-strong);
+    cursor: pointer;
+    opacity: 0.55;
+    transition:
+      opacity 0.12s,
+      background 0.12s,
+      color 0.12s;
+  }
+  .favorite-btn:hover,
+  .favorite-btn.active {
+    opacity: 1;
+    color: #d6a300;
+  }
+  .favorite-btn:hover {
+    background: var(--bg-hover);
+  }
+  mark {
+    padding: 0 1px;
+    border-radius: 3px;
+    background: #fff1a8;
+    color: inherit;
   }
 </style>

@@ -1,10 +1,5 @@
-// Mermaid 图表渲染：CDN 按需加载 ESM，securityLevel=strict 防 XSS。
+// Mermaid 图表渲染：本地打包（npm mermaid），动态 import 按需加载，securityLevel=strict 防 XSS。
 // 失败把 .mermaid 块回填源码到 <pre class="render-fallback">，绝不白屏。
-
-import { importEsm } from "./loadRemote";
-
-const MERMAID_URL =
-  "https://cdn.jsdelivr.net/npm/mermaid@11.20.0/dist/mermaid.esm.min.mjs";
 
 interface MermaidApi {
   initialize: (config: Record<string, unknown>) => void;
@@ -17,7 +12,9 @@ let mermaidPromise: Promise<MermaidApi> | null = null;
 function ensureMermaid(): Promise<MermaidApi> {
   if (mermaidPromise) return mermaidPromise;
   mermaidPromise = (async () => {
-    const mermaid = await importEsm<MermaidApi>(MERMAID_URL, "mermaid");
+    // 本地依赖：Vite 自动分包，首次使用时才下载该 chunk
+    const mod = await import("mermaid");
+    const mermaid = (mod.default ?? mod) as unknown as MermaidApi;
     mermaid.initialize({
       startOnLoad: false, // 手动调 run()
       securityLevel: "strict", // 用户输入不可信，禁掉 html label 里的脚本

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
+  import { ask } from "@tauri-apps/plugin-dialog";
   import { listen } from "@tauri-apps/api/event";
   import { fly } from "svelte/transition";
   import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -43,6 +44,7 @@
   } from "./lib/reorder";
   import {
     createTranslator,
+    mapBackendMessage,
     getStoredLanguage,
     nextLanguage,
     setStoredLanguage,
@@ -64,6 +66,7 @@
   let editingCategory = $state("");
   let editingCopyMode = $state<"markdown" | "plain">("markdown");
 
+  let draftNew = $state(false);
   let library = $state<Library>({});
   let scope = $state<"all" | "favorites" | "recent">("all");
   let windowMode = $state<"quick" | "manage">("quick");
@@ -74,8 +77,8 @@
   let baseline = $state<Draft>({ title: "", body: "", category: "", copy_mode: "markdown" });
   let currentDraft = $derived({ title: editingTitle, body: editingBody, category: editingCategory, copy_mode: editingCopyMode });
   let dirty = $derived(editorMode === "edit" && draftChanged(currentDraft, baseline));
-  let ready = $derived(!!selectedPath && loadedPath === selectedPath && !contentLoading && !saving);
-  let templateSession = $state<{ body: string; title: string; path: string; mode: "markdown" | "plain" } | null>(null);
+  let ready = $derived((draftNew || !!selectedPath && loadedPath === selectedPath) && !contentLoading && !saving);
+  let templateSession = $state<{ body: string; title: string; path: string; mode: "markdown" | "plain"; hideAfter: boolean } | null>(null);
   const requestGate = createRequestGate();
   let loading = $state(true);
   let error = $state<string | null>(null);
@@ -84,6 +87,7 @@
 
   // 统一错误提示：显示后 5 秒自动消失，不阻塞 UI
   function showError(msg: string) {
+    msg = mapBackendMessage(msg, t);
     error = msg;
     setTimeout(() => {
       if (error === msg) error = null;
@@ -120,7 +124,7 @@
     scope === "recent" ? categoryFiltered.filter((p) => library[p.path]?.lastUsed).sort((a, b) => library[b.path].lastUsed - library[a.path].lastUsed) : categoryFiltered);
   let visiblePrompts = $derived(filterPrompts(scopedPrompts, query, library));
   let canReorderPrompts = $derived(
-    scope === "all" && windowMode === "manage" && canReorderPromptList(query, selectedCategory, visiblePrompts),
+    editorMode !== "edit" && !saving && scope === "all" && windowMode === "manage" && canReorderPromptList(query, selectedCategory, visiblePrompts),
   );
   let reorderDisabledReason = $derived(
     getReorderDisabledReason(query, selectedCategory, visiblePrompts),
@@ -129,7 +133,7 @@
     translateReorderDisabledReason(reorderDisabledReason, language),
   );
 
-  let selectedIndex = $state(0);
+  let selectedIndex = $derived(selectedPath ? visiblePrompts.findIndex((p) => p.path === selectedPath) : -1);
   // PromptList 上报的滚动函数（键盘导航用）
   let scrollToIndexFn: ((i: number) => void) | null = null;
 
@@ -164,17 +168,17 @@
     changeLanguage(nextLanguage(language));
   }
 
-  function translateReorderDisabledReason(reason: string, lang: Language): string {
+  function translateReorderDisabledReason(reason: string | null, lang: Language): string {
     const translateFor = createTranslator(lang);
     switch (reason) {
-      case "至少需要 2 条提示词才能排序":
+      case "needTwo":
         return translateFor("reorder.needTwoPrompts");
-      case "切到单个分类后可拖拽排序":
+      case "singleCategory":
         return translateFor("reorder.singleCategory");
-      case "搜索结果不支持拖拽排序":
+      case "searchDisabled":
         return translateFor("reorder.searchDisabled");
       default:
-        return reason;
+        return reason ?? "";
     }
   }
 
@@ -201,8 +205,17 @@
   // 用该标志让写盘期间的 refresh 延迟到写盘完成后，避免竞态。
   let reorderInFlight = false;
   let pendingRefresh = false;
+  let dragGestureActive = false;
+  function onDragGestureStart() { dragGestureActive = true; }
+  function onDragGestureEnd() {
+    dragGestureActive = false;
+    if (pendingRefresh && !reorderInFlight) {
+      pendingRefresh = false;
+      void guardedRefresh().catch((e) => showError(String(e)));
+    }
+  }
   async function guardedRefresh() {
-    if (reorderInFlight) {
+    if (reorderInFlight || dragGestureActive) {
       // 重排写盘中：标记需要补刷，等 doReorder 完成后自己刷
       pendingRefresh = true;
       return;
@@ -221,7 +234,7 @@
     });
   });
   $effect(() => {
-    const locked = windowMode === "manage" || settingsOpen || !!templateSession || dirty || renameDialog.open || catRenameDialog.open;
+    const locked = windowMode === "manage" || editorMode === "edit" || settingsOpen || !!templateSession || dirty || renameDialog.open || catRenameDialog.open || contextMenu.open || catContextMenu.open;
     void setInteractionLock(locked).catch(() => {});
   });
   async function loadPromptContent(path: string) {
@@ -245,23 +258,23 @@
       if (requestGate.accepts(token, path)) contentLoading = false;
     }
   }
-  function permitLeave(): boolean {
+  async function permitLeave(): Promise<boolean> {
     if (saving || copying) return false;
-    if (dirty && !confirm(t("editor.leaveConfirm"))) return false;
+    if (dirty && !(await ask(t("editor.leaveConfirm"), { title: t("app.unsavedTitle"), kind: "warning" }))) return false;
     if (editorMode === "edit") {
       editingTitle = baseline.title;
       editingBody = baseline.body;
       editingCategory = baseline.category;
       editingCopyMode = baseline.copy_mode === "plain" ? "plain" : "markdown";
     }
+    draftNew = false;
     editorMode = "view";
     return true;
   }
-  function selectPath(path: string) {
+  async function selectPath(path: string) {
     if (path === selectedPath) { if (!contentLoading && loadedPath !== path) void loadPromptContent(path); return; }
-    if (!permitLeave()) return;
+    if (!(await permitLeave())) return;
     selectedPath = path;
-    selectedIndex = Math.max(0, visiblePrompts.findIndex((p) => p.path === path));
   }
   function persistLibrary(next: Library) {
     library = next;
@@ -269,12 +282,12 @@
   }
   function favorite(path: string) { if (editorMode === "edit" || saving) return; persistLibrary(toggleFavorite(library, path)); }
   async function changeWindowMode(mode: "quick" | "manage") {
-    if (mode === "quick" && !permitLeave()) return;
+    if (mode === "quick" && !(await permitLeave())) return;
     windowMode = mode;
     try { await setWindowMode(mode); } catch (e) { showError(String(e)); }
   }
   function startEditing() { if (ready) { void changeWindowMode("manage"); baseline = { ...currentDraft }; editorMode = "edit"; } }
-  function cancelEdit() { if (permitLeave() && selectedPath) void loadPromptContent(selectedPath); }
+  async function cancelEdit() { if (await permitLeave()) { if (selectedPath) void loadPromptContent(selectedPath); else await refresh(); } }
 
   function applyMetaToEditFields(meta: PromptMeta) {
     editingTitle = meta.title;
@@ -301,39 +314,43 @@
     void refresh();
   }
 
-  async function completeCopy(text: string, mode: "markdown" | "plain", path: string) {
+  async function completeCopy(text: string, mode: "markdown" | "plain", path: string, hideAfter = true) {
     if (copying) return;
     copying = true;
     try {
-      const result = await copyOrPaste(mode === "plain" ? markdownToPlain(text) : text, mode);
+      const result = await copyOrPaste(mode === "plain" ? markdownToPlain(text) : text, mode, hideAfter);
       persistLibrary(recordUse(library, path));
       copyMessage = t(result.status === "pasted" ? "app.pastedToast" : result.status === "paste_failed" ? "app.pasteFailedToast" : "app.copiedToast");
       copiedFlash = true;
       setTimeout(() => (copiedFlash = false), 2200);
     } finally { copying = false; }
   }
-  async function doCopy(mode: "markdown" | "plain") {
+  async function doCopy(mode: "markdown" | "plain", hideAfter = true) {
     if (!selectedPrompt || !ready || copying || editorMode === "edit") return;
     const path = selectedPrompt.path;
     if (templateFields(editingBody).length) {
-      templateSession = { body: editingBody, title: selectedPrompt.title, path, mode };
+      templateSession = { body: editingBody, title: selectedPrompt.title, path, mode, hideAfter };
       return;
     }
-    try { await completeCopy(renderTemplate(editingBody, {}), mode, path); } catch (e) { showError(String(e)); }
+    try { await completeCopy(renderTemplate(editingBody, {}), mode, path, hideAfter); } catch (e) { showError(String(e)); }
   }
   async function doSave() {
-    if (!selectedPrompt || !ready || saving) return;
-    const path = selectedPrompt.path;
+    if ((!selectedPrompt && !draftNew) || !ready || saving) return;
+    const path = selectedPrompt?.path ?? "";
     const draft = { ...currentDraft };
     saving = true;
     try {
-      const saved = await savePrompt(path, { ...draft, title: draft.title.trim() || t("app.untitled") });
+      let savePath = path;
+      if (draftNew) savePath = (await createPrompt(draft.category, draft.title.trim())).path;
+      const saved = await savePrompt(savePath, { ...draft, title: draft.title.trim() || t("app.untitled") });
+      draftNew = false;
       requestGate.invalidate();
       persistLibrary(moveLibraryEntry(library, path, saved.path));
       selectedPath = saved.path;
       lastLoadedPath = saved.path;
       loadedPath = saved.path;
-      baseline = { ...draft, title: saved.title };
+      baseline = { ...draft, title: saved.title, category: saved.category };
+      editingCategory = saved.category;
       editingTitle = saved.title;
       editorMode = "view";
       selectedCategory = "__all__";
@@ -344,7 +361,7 @@
     finally { saving = false; }
   }
   async function duplicatePrompt() {
-    if (!selectedPrompt || !ready || !permitLeave()) return;
+    if (!selectedPrompt || !ready || !(await permitLeave())) return;
     const source = selectedPrompt;
     const content = editingBody;
     try {
@@ -352,7 +369,7 @@
       const saved = await savePrompt(created.path, { title: created.title, category: source.category, body: content, copy_mode: editingCopyMode });
       query = ""; scope = "all"; selectedCategory = "__all__";
       await refresh();
-      selectPath(saved.path);
+      await selectPath(saved.path);
       void changeWindowMode("manage");
     } catch (e) { showError(String(e)); }
   }
@@ -362,38 +379,31 @@
   }
 
   async function doCreate() {
-    if (!permitLeave()) return;
+    if (!(await permitLeave())) return;
     requestGate.invalidate();
-    void changeWindowMode("manage");
+    await changeWindowMode("manage");
     const cat = selectedCategory === "__all__" ? "未分类" : selectedCategory;
-    try {
-      // 新建用占位标题（文件名是时间戳），进入编辑后用户填写真实标题
-      // 保存时若标题变化会自动重命名文件
-      const p = await createPrompt(cat, "");
-      await refresh();
-      selectedPath = p.path;
-      lastLoadedPath = p.path;
-      query = "";
-      scope = "all";
-      loadedPath = p.path;
-      contentLoading = false;
-      // 进入编辑，标题留空引导用户输入
-      editingTitle = "";
-      editingCategory = cat;
-      editingCopyMode = "markdown";
-      editingBody = "";
-      baseline = { ...currentDraft };
-      editorMode = "edit";
-    } catch (e) {
-      showError(String(e));
-    }
+    selectedPath = null;
+    lastLoadedPath = null;
+    loadedPath = null;
+    contentLoading = false;
+    query = "";
+    scope = "all";
+    editingTitle = "";
+    editingCategory = cat;
+    editingCopyMode = "markdown";
+    editingBody = "";
+    baseline = { ...currentDraft };
+    draftNew = true;
+    editorMode = "edit";
   }
 
   async function doDelete() {
-    if (!selectedPrompt || !permitLeave()) return;
-    if (!confirm(t("app.deleteConfirm", { title: selectedPrompt.title }))) return;
+    const prompt = selectedPrompt;
+    if (!prompt || !(await permitLeave())) return;
+    if (!(await ask(t("app.deleteConfirm", { title: prompt.title }), { title: t("editor.delete"), kind: "warning" }))) return;
     try {
-      await deletePrompt(selectedPrompt.path);
+      await deletePrompt(prompt.path);
       selectedPath = null;
       lastLoadedPath = null;
       await refresh();
@@ -407,23 +417,25 @@
     contextMenu = { open: true, x, y, prompt };
   }
 
-  function onCtxRename() {
-    if (!contextMenu.prompt || !permitLeave()) return;
+  async function onCtxRename() {
+    const prompt = contextMenu.prompt;
+    if (!prompt || !(await permitLeave())) return;
     renameDialog = {
       open: true,
-      path: contextMenu.prompt.path,
-      title: contextMenu.prompt.title,
-      category: contextMenu.prompt.category,
+      path: prompt.path,
+      title: prompt.title,
+      category: prompt.category,
     };
   }
 
   async function onCtxMove(category: string) {
-    if (!contextMenu.prompt || !permitLeave()) return;
-    const oldPath = contextMenu.prompt.path;
+    const prompt = contextMenu.prompt;
+    if (!prompt || !(await permitLeave())) return;
+    const oldPath = prompt.path;
     try {
       const moved = await renamePrompt(
-        contextMenu.prompt.path,
-        contextMenu.prompt.title,
+        prompt.path,
+        prompt.title,
         category,
       );
       persistLibrary(moveLibraryEntry(library, oldPath, moved.path));
@@ -439,6 +451,8 @@
   // 这里基于 visiblePrompts 重排得到新顺序，更新该分类各 prompt 的 order 字段，
   // 然后对整个 allPrompts 稳定重排（保持全局 category 字母序，避免「全部」视图闪错序）。
   async function doReorder(from: number, to: number) {
+    // 并发防护：上一次写盘未完成时忽略二次拖拽提交，防止交错写 order 文件
+    if (reorderInFlight) return;
     if (query.trim()) return;
     const categoryName = getReorderCategory(selectedCategory, visiblePrompts);
     if (!categoryName) return;
@@ -455,12 +469,20 @@
           : p,
       )
       .sort((a, b) => {
-        const c = a.category.localeCompare(b.category);
+        // 码点序与后端 scan_prompts 的 String::cmp 对齐（localeCompare 是本地化
+        // 拼音序，中文结果与码点序完全不同，会导致"全部"视图乐观排序跳变）。
+        // 已知取舍：emoji 等非 BMP 字符按 UTF-16 码元比较与 Rust 码点序仍可能
+        // 相反，极端场景（分类名含 emoji）接受一次刷新跳变
+        const c = a.category < b.category ? -1 : a.category > b.category ? 1 : 0;
         if (c !== 0) return c;
         const oa = a.order ?? Number.MAX_SAFE_INTEGER;
         const ob = b.order ?? Number.MAX_SAFE_INTEGER;
         if (oa !== ob) return oa - ob;
-        return b.meta.updated.localeCompare(a.meta.updated);
+        return b.meta.updated < a.meta.updated
+          ? -1
+          : b.meta.updated > a.meta.updated
+            ? 1
+            : 0;
       });
 
     reorderInFlight = true;
@@ -469,12 +491,14 @@
       await reorderPrompts(categoryName, newPathOrder);
     } catch (e) {
       showError(String(e));
-      await refresh();
+      await refresh().catch((e2) => showError(String(e2)));
     } finally {
       reorderInFlight = false;
       if (pendingRefresh) {
         pendingRefresh = false;
-        await refresh();
+        // 补刷失败要走 showError，裸 await 的 rejection 会从 onreorder
+        // 回调逃逸成 unhandled rejection（其余 refresh 调用点都带 catch）
+        await refresh().catch((e) => showError(String(e)));
       }
     }
   }
@@ -482,6 +506,7 @@
   // 分类拖拽重排：from/to 都是 categories 数组索引（不含"全部"）。
   // 乐观更新本地顺序 → 写盘 .category-order.json。失败回滚靠 refresh 重读后端。
   async function doReorderCategory(from: number, to: number) {
+    if (reorderInFlight) return; // 同 doReorder：写盘期间忽略二次提交
     const next = moveCategoryOrder(categories, from, to);
     if (!next) return;
 
@@ -492,20 +517,22 @@
       await reorderCategories(next.map((c) => c.name));
     } catch (e) {
       showError(String(e));
-      await refresh();
+      await refresh().catch((e2) => showError(String(e2)));
     } finally {
       reorderInFlight = false;
       if (pendingRefresh) {
         pendingRefresh = false;
-        await refresh();
+        // 补刷失败要走 showError，裸 await 的 rejection 会从 onreorder
+        // 回调逃逸成 unhandled rejection（其余 refresh 调用点都带 catch）
+        await refresh().catch((e) => showError(String(e)));
       }
     }
   }
 
-  function onCtxDelete() {
-    if (!contextMenu.prompt || !permitLeave()) return;
+  async function onCtxDelete() {
     const p = contextMenu.prompt;
-    if (!confirm(t("app.deleteConfirm", { title: p.title }))) return;
+    if (!p || !(await permitLeave())) return;
+    if (!(await ask(t("app.deleteConfirm", { title: p.title }), { title: t("editor.delete"), kind: "warning" }))) return;
     deletePrompt(p.path)
       .then(() => {
         if (selectedPath === p.path) {
@@ -519,6 +546,8 @@
 
   // 重命名对话框提交
   async function submitRename() {
+    const renamingSelected = renameDialog.path === selectedPath;
+    if (renamingSelected && !(await permitLeave())) return;
     try {
       const newPrompt = await renamePrompt(
         renameDialog.path,
@@ -527,8 +556,7 @@
       );
       persistLibrary(moveLibraryEntry(library, renameDialog.path, newPrompt.path));
       await refresh();
-      selectedPath = newPrompt.path;
-      lastLoadedPath = null;
+      if (renamingSelected) { selectedPath = newPrompt.path; lastLoadedPath = null; loadedPath = null; }
       renameDialog.open = false;
     } catch (e) {
       showError(String(e));
@@ -552,11 +580,12 @@
 
   // 优化3：重命名分类
   async function onRenameCategory(oldName: string) {
-    if (!permitLeave()) return;
+    if (!(await permitLeave())) return;
     catRenameDialog = { open: true, oldName, newName: oldName };
   }
 
   async function submitCatRename() {
+    if (!(await permitLeave())) return;
     const newName = catRenameDialog.newName.trim();
     if (!newName || newName === catRenameDialog.oldName) {
       catRenameDialog.open = false;
@@ -579,18 +608,21 @@
     }
   }
 
-  // Reset result focus on query/filter changes; edits keep their selected draft until explicitly left.
+  // Filtering chooses a visible result; edits and saves preserve the active draft.
+  let lastFilterKey: string | null = null;
   $effect(() => {
-    query; selectedCategory; scope;
-    untrack(() => { if (editorMode !== "edit") { selectedIndex = 0; selectedPath = visiblePrompts[0]?.path ?? null; } });
+    const key = `${query}\u0000${selectedCategory}\u0000${scope}`;
+    untrack(() => {
+      if (key === lastFilterKey) return;
+      lastFilterKey = key;
+      if (editorMode !== "edit" && !saving) selectedPath = visiblePrompts[0]?.path ?? null;
+    });
   });
   $effect(() => {
     const prompts = visiblePrompts;
     untrack(() => {
-      if (editorMode === "edit" || saving) return;
-      const current = prompts.findIndex((p) => p.path === selectedPath);
-      selectedIndex = current >= 0 ? current : 0;
-      selectedPath = prompts[selectedIndex]?.path ?? null;
+      if (editorMode === "edit" || saving || draftNew) return;
+      if (!selectedPath || !allPrompts.some((p) => p.path === selectedPath)) selectedPath = prompts[0]?.path ?? null;
     });
   });
   $effect(() => {
@@ -598,20 +630,22 @@
     void tick().then(() => scrollToIndexFn?.(index));
   });
   function handleKeydown(e: KeyboardEvent) {
-    if (e.isComposing || e.keyCode === 229) return;
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
     if (templateSession) return;
     if (e.key === "Escape") {
       e.preventDefault();
+      if (dragGestureActive) onDragGestureEnd();
       if (contextMenu.open) { contextMenu.open = false; return; }
       if (catContextMenu.open) { catContextMenu.open = false; return; }
       if (renameDialog.open) { renameDialog.open = false; return; }
       if (catRenameDialog.open) { catRenameDialog.open = false; return; }
       if (settingsOpen) { settingsOpen = false; return; }
       if (editorMode === "edit") { cancelEdit(); return; }
+      if (query.trim()) { query = ""; return; }
       void hideWindow();
       return;
     }
-    if (settingsOpen || renameDialog.open || catRenameDialog.open || contextMenu.open) return;
+    if (settingsOpen || renameDialog.open || catRenameDialog.open || contextMenu.open || catContextMenu.open) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" && editorMode === "edit") { e.preventDefault(); void doSave(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") { e.preventDefault(); void doCreate(); return; }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") { e.preventDefault(); document.querySelector<HTMLInputElement>("#search-input")?.focus(); return; }
@@ -622,8 +656,8 @@
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       const next = Math.max(0, Math.min(selectedIndex + (e.key === "ArrowDown" ? 1 : -1), visiblePrompts.length - 1));
-      if (visiblePrompts[next]) { selectedIndex = next; selectPath(visiblePrompts[next].path); }
-    } else if (e.key === "Enter") { e.preventDefault(); void doCopy(editingCopyMode); }
+      if (visiblePrompts[next]) void selectPath(visiblePrompts[next].path);
+    } else if (e.key === "Enter") { e.preventDefault(); void doCopy(e.shiftKey ? (editingCopyMode === "plain" ? "markdown" : "plain") : editingCopyMode); }
   }
 
   // 无边框窗口自定义 resize：8 个边缘热区，mousedown 触发系统缩放手柄。
@@ -662,8 +696,11 @@
   }
 
   function focusSearch() {
+    if (editorMode === "edit" && !settingsOpen && !templateSession && !renameDialog.open && !catRenameDialog.open) { document.querySelector<HTMLTextAreaElement>("#f-body")?.focus(); return; }
     if (editorMode !== "edit" && !settingsOpen && !templateSession && !renameDialog.open && !catRenameDialog.open) {
-      document.querySelector<HTMLInputElement>("#search-input")?.focus();
+      const input = document.querySelector<HTMLInputElement>("#search-input");
+      input?.focus();
+      input?.select();
     }
   }
 
@@ -673,7 +710,7 @@
     void bootstrap();
     let disposed = false;
     const cleanups: (() => void)[] = [];
-    void listen("sync-finished", () => { void guardedRefresh(); void getSyncStatus().then((status) => (syncStatus = status)).catch(() => {}); }).then((stop) => { if (disposed) stop(); else cleanups.push(stop); }).catch(() => {});
+    void listen("sync-finished", () => { void guardedRefresh().catch((e) => showError(String(e))); void getSyncStatus().then((status) => (syncStatus = status)).catch(() => {}); }).then((stop) => { if (disposed) stop(); else cleanups.push(stop); }).catch(() => {});
     void listen("window-shown", focusSearch).then((stop) => { if (disposed) stop(); else cleanups.push(stop); }).catch(() => {});
     return () => { disposed = true; cleanups.forEach((stop) => stop()); requestGate.invalidate(); };
   });
@@ -722,7 +759,7 @@
             class="sync-indicator"
             class:syncing={syncStatus.syncing}
             class:error={!!syncStatus.lastError}
-            title={syncStatus.lastError || syncStatus.lastSync || t("app.syncConnected")}
+            title={syncStatus.lastError || (syncStatus.lastSync ? mapBackendMessage(syncStatus.lastSync, t) : "") || t("app.syncConnected")}
           ></span>
         {/if}
         <button
@@ -763,6 +800,8 @@
         onrename={onRenameCategory}
         oncontextmenu={onCatContextMenu}
         onreorder={doReorderCategory}
+        ondragstart={onDragGestureStart}
+        ondragend={onDragGestureEnd}
         {t}
       />
     </nav>
@@ -783,6 +822,10 @@
         onselect={selectPath}
         oncontextmenu={openContextMenu}
         onreorder={doReorder}
+        ondragstart={onDragGestureStart}
+        ondragend={onDragGestureEnd}
+        subMode={selectedCategory === "__all__" ? "category" : "time"}
+        {language}
         {t}
       />
 
@@ -796,7 +839,7 @@
         bind:copyMode={editingCopyMode}
         {categories}
         {t}
-        oncopy={(m) => doCopy(m)}
+        oncopy={(m) => doCopy(m, false)}
         onsave={doSave}
         busy={!ready || copying}
         {saving}
@@ -832,14 +875,14 @@
     <Settings
       bind:open={settingsOpen}
       onsynced={onSynced}
-      onrestored={async (path) => { await refresh(); selectPath(path); }}
+      onrestored={async (path) => { await refresh(); await selectPath(path); }}
       {language}
       {t}
       onlanguagechange={changeLanguage}
     />
 
     {#if templateSession}
-      <TemplateDialog body={templateSession.body} title={templateSession.title} {t} onclose={() => (templateSession = null)} onapply={async (text) => { const session = templateSession; if (!session) return; await completeCopy(text, session.mode, session.path); templateSession = null; }} />
+      <TemplateDialog body={templateSession.body} title={templateSession.title} {t} onclose={() => (templateSession = null)} onraw={async () => { const session = templateSession; if (!session) return; await completeCopy(session.body, session.mode, session.path, session.hideAfter); templateSession = null; }} onapply={async (text) => { const session = templateSession; if (!session) return; await completeCopy(text, session.mode, session.path, session.hideAfter); templateSession = null; }} />
     {/if}
     <ContextMenu
       bind:open={contextMenu.open}
@@ -861,7 +904,7 @@
         onclick={(e) => {
           if (e.target === e.currentTarget) renameDialog.open = false;
         }}
-        onkeydown={(e) => e.key === "Escape" && (renameDialog.open = false)}
+        onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); renameDialog.open = false; } }}
         role="presentation"
       >
         <div class="dialog" role="dialog" aria-modal="true" aria-label={t("app.renameMoveTitle")} tabindex="-1" use:dialogFocus transition:fly={{ y: -10, duration: 120 }}>
@@ -925,7 +968,7 @@
         onclick={(e) => {
           if (e.target === e.currentTarget) catRenameDialog.open = false;
         }}
-        onkeydown={(e) => e.key === "Escape" && (catRenameDialog.open = false)}
+        onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); catRenameDialog.open = false; } }}
         role="presentation"
       >
         <div class="dialog" role="dialog" aria-modal="true" aria-label={t("app.categoryRenameTitle")} tabindex="-1" use:dialogFocus transition:fly={{ y: -10, duration: 120 }}>

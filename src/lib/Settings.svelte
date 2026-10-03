@@ -1,20 +1,27 @@
 <script lang="ts">
+  import { ask } from "@tauri-apps/plugin-dialog";
+  import { dialogFocus } from "./dialog";
   import { fade, scale } from "svelte/transition";
   import type { CloudConfigView, RecoveryEntry, SyncStatus } from "./types";
-  import { dialogFocus } from "./dialog";
   import {
     createTranslator,
+    mapBackendMessage,
     type Language,
     type Translator,
   } from "./i18n";
   import {
     getHotkey, setHotkey, listRecovery, restoreRecovery, readRecovery,
     downloadAll,
+    getAutostart,
     getCloudConfig,
     getSyncStatus,
     openUrl,
     saveCloudConfig,
+    saveGithubConfig,
+    setAutostart,
+    setSyncProvider,
     testCloudConnection,
+    testGithubConnection,
     uploadAll,
   } from "./api";
 
@@ -23,9 +30,9 @@
   let {
     open = $bindable(false),
     onsynced,
+    onrestored = (_path: string) => {},
     language = "zh",
     onlanguagechange = (_language: Language) => {},
-    onrestored = (_path: string) => {},
     t = fallbackT,
   }: {
     open: boolean;
@@ -45,10 +52,20 @@
   // 密码编辑模式：已配置时默认锁定（显示"已保存"），点"修改"才解锁
   let editingPassword = $state(false);
 
+  // 同步后端 + GitHub 表单（provider 切换立即持久化，两侧配置互不影响）
+  let provider = $state<"webdav" | "github">("webdav");
+  let providerBusy = $state(false);
+  let ghRepo = $state("");
+  let ghToken = $state("");
+  let ghBranch = $state("");
+  let ghPrefix = $state("");
+  let editingToken = $state(false);
+
   let testing = $state(false);
   let saving = $state(false);
   let transferring = $state<"upload" | "download" | null>(null);
   let message = $state<{ type: "ok" | "err"; text: string } | null>(null);
+
   let hotkey = $state("");
   let savingHotkey = $state(false);
   let recoveryEntries = $state<RecoveryEntry[]>([]);
@@ -56,11 +73,24 @@
   let recoveryPreview = $state<{ entry: RecoveryEntry; text: string } | null>(null);
   let recoveryBusyId = $state<string | null>(null);
 
+  // 开机自启动：状态读系统真实值，切换失败时回滚开关
+  let autostart = $state(false);
+  let autostartBusy = $state(false);
+
   // 坚果云帮助页：如何获取应用密码
   const HELP_URL = "https://help.jianguoyun.com/?p=2064";
+  // GitHub fine-grained PAT 创建页
+  const GH_HELP_URL = "https://github.com/settings/personal-access-tokens";
 
   // 密码是否已保存（用于显示状态）
   let hasPassword = $derived(!!config?.hasPassword);
+  let hasToken = $derived(!!config?.hasToken);
+  // 上传按钮目标跟随当前后端
+  let uploadLabel = $derived(
+    t("settings.upload", {
+      target: provider === "github" ? "GitHub" : t("settings.providerWebdav"),
+    }),
+  );
 
   let lastOpen = false;
   $effect(() => {
@@ -75,40 +105,70 @@
     recoveryLoading = true;
     recoveryPreview = null;
     try {
-      const [loadedConfig, loadedStatus, loadedHotkey, loadedRecovery] = await Promise.allSettled([
-        getCloudConfig(),
-        getSyncStatus(),
-        getHotkey(),
-        listRecovery(),
-      ]);
+      const results = await Promise.allSettled([getCloudConfig(), getSyncStatus(), getHotkey(), listRecovery(), getAutostart()]);
+      const [loadedConfig, loadedStatus, loadedHotkey, loadedRecovery, loadedAutostart] = results;
       if (loadedConfig.status === "fulfilled") {
         config = loadedConfig.value;
         username = config.username;
         remoteRoot = config.remoteRoot || "PromptPocket";
         password = "";
         editingPassword = !config.hasPassword;
+        provider = config.provider === "github" ? "github" : "webdav";
+        ghRepo = config.ghRepo ?? "";
+        ghBranch = config.ghBranch ?? "";
+        ghPrefix = config.ghPrefix ?? "";
+        ghToken = "";
+        editingToken = !config.hasToken;
       }
       if (loadedStatus.status === "fulfilled") status = loadedStatus.value;
       if (loadedHotkey.status === "fulfilled") hotkey = loadedHotkey.value;
       if (loadedRecovery.status === "fulfilled") recoveryEntries = loadedRecovery.value.slice(0, 50);
-      const errors = [loadedConfig, loadedStatus, loadedHotkey, loadedRecovery]
-        .filter((result) => result.status === "rejected")
-        .map((result) => String(result.reason));
+      if (loadedAutostart.status === "fulfilled") autostart = loadedAutostart.value;
+      const errors = results.filter((r) => r.status === "rejected").map((r) => String(r.reason));
       if (errors.length) message = { type: "err", text: errors.join("\n") };
-    } catch (e) {
-      message = { type: "err", text: String(e) };
     } finally {
       recoveryLoading = false;
     }
   }
 
-  async function refreshStatus(): Promise<SyncStatus | null> {
+  // 切换后端：立即持久化（set_sync_provider 只改激活标记，不动两侧配置），失败回滚
+  async function switchProvider(next: "webdav" | "github") {
+    if (provider === next || providerBusy) return;
+    providerBusy = true;
+    const prev = provider;
+    provider = next; // 乐观更新，失败回滚
+    message = null;
+    try {
+      await setSyncProvider(next);
+      await refreshStatus();
+    } catch (e) {
+      provider = prev;
+      message = { type: "err", text: String(e) };
+    } finally {
+      providerBusy = false;
+    }
+  }
+
+  async function toggleAutostart() {
+    if (autostartBusy) return;
+    autostartBusy = true;
+    const next = !autostart;
+    autostart = next; // 乐观更新，失败回滚
+    try {
+      await setAutostart(next);
+    } catch (e) {
+      autostart = !next;
+      message = { type: "err", text: t("settings.autostartFailed", { error: String(e) }) };
+    } finally {
+      autostartBusy = false;
+    }
+  }
+
+  async function refreshStatus() {
     try {
       status = await getSyncStatus();
-      return status;
     } catch {
       /* 忽略 */
-      return null;
     }
   }
 
@@ -124,17 +184,38 @@
   }
 
   async function doTest() {
-    const unchangedUser = username.trim() === (config?.username ?? "").trim();
-    const canKeepPassword = hasPassword && !editingPassword && unchangedUser;
-    const pwd = canKeepPassword ? "__KEEP__" : password.trim();
-    if (!username.trim() || !pwd) {
-      message = { type: "err", text: t("settings.fillCredentials") };
+    if (provider === "github") return doTestGithub();
+    if (!username.trim()) {
+      message = { type: "err", text: t("settings.fillUsername") };
       return;
+    }
+    // 与 doSave 同一套凭据规则：编辑模式必须填新密码；非编辑模式（已保存
+    // 不回显）传 __KEEP__ 让后端复用已存值——否则"测试连接"对已配置用户
+    // 永远要求重输密码，密码不回显的设计反而堵死了连通性测试
+    let finalPwd = password.trim();
+    if (editingPassword) {
+      if (!finalPwd) {
+        message = { type: "err", text: t("settings.fillPassword") };
+        return;
+      }
+      if (finalPwd === "__KEEP__") {
+        message = { type: "err", text: t("settings.passwordKeepReserved") };
+        return;
+      }
+    } else {
+      if (username.trim() !== (config?.username ?? "").trim()) {
+        message = { type: "err", text: t("settings.fillPassword") }; return;
+      }
+      if (!hasPassword) {
+        message = { type: "err", text: t("settings.fillPassword") };
+        return;
+      }
+      finalPwd = "__KEEP__";
     }
     testing = true;
     message = null;
     try {
-      await testCloudConnection(username.trim(), pwd, remoteRoot.trim() || "PromptPocket");
+      await testCloudConnection(username.trim(), finalPwd, remoteRoot.trim() || "PromptPocket");
       message = { type: "ok", text: t("settings.testOk") };
     } catch (e) {
       message = {
@@ -146,15 +227,65 @@
     }
   }
 
+  async function doTestGithub() {
+    if (!ghRepo.trim()) {
+      message = { type: "err", text: t("settings.fillGhRepo") };
+      return;
+    }
+    // 同 doTest：非编辑模式复用已存 token（__KEEP__），编辑模式必须填新值
+    let finalTok = ghToken.trim();
+    if (editingToken) {
+      if (!finalTok) {
+        message = { type: "err", text: t("settings.fillGhToken") };
+        return;
+      }
+      if (finalTok === "__KEEP__") {
+        message = { type: "err", text: t("settings.ghTokenKeepReserved") };
+        return;
+      }
+    } else {
+      if (ghRepo.trim() !== (config?.ghRepo ?? "").trim()) {
+        message = { type: "err", text: t("settings.fillGhToken") }; return;
+      }
+      if (!hasToken) {
+        message = { type: "err", text: t("settings.fillGhToken") };
+        return;
+      }
+      finalTok = "__KEEP__";
+    }
+    testing = true;
+    message = null;
+    try {
+      await testGithubConnection(ghRepo.trim(), finalTok, ghBranch.trim(), ghPrefix.trim());
+      message = { type: "ok", text: t("settings.ghTestOk") };
+    } catch (e) {
+      message = {
+        type: "err",
+        text: t("settings.connectionFailed", { error: String(e) }),
+      };
+    } finally {
+      testing = false;
+    }
+  }
+
   async function doSave() {
+    if (provider === "github") return doSaveGithub();
     if (!username.trim()) {
       message = { type: "err", text: t("settings.fillUsername") };
       return;
+    }
+    if (!editingPassword && username.trim() !== (config?.username ?? "").trim()) {
+      message = { type: "err", text: t("settings.fillPassword") }; return;
     }
     const pwd = password.trim();
     // 已配置且未进入密码编辑模式 → 保留旧密码；否则必须填密码
     if (editingPassword && !pwd) {
       message = { type: "err", text: t("settings.fillPassword") };
+      return;
+    }
+    // __KEEP__ 是"保留旧密码"的占位符：真实密码恰好等于它会被静默忽略，拒绝之
+    if (editingPassword && pwd === "__KEEP__") {
+      message = { type: "err", text: t("settings.passwordKeepReserved") };
       return;
     }
     saving = true;
@@ -176,16 +307,57 @@
     }
   }
 
-  // 定向上传，冲突由后端保留并报告。
+  async function doSaveGithub() {
+    if (!ghRepo.trim()) {
+      message = { type: "err", text: t("settings.fillGhRepo") };
+      return;
+    }
+    if (!editingToken && ghRepo.trim() !== (config?.ghRepo ?? "").trim()) {
+      message = { type: "err", text: t("settings.fillGhToken") }; return;
+    }
+    const tok = ghToken.trim();
+    // 与坚果云密码同规则：已配置未点"修改"→ __KEEP__ 保留旧 token
+    if (editingToken && !tok) {
+      message = { type: "err", text: t("settings.fillGhToken") };
+      return;
+    }
+    if (editingToken && tok === "__KEEP__") {
+      message = { type: "err", text: t("settings.ghTokenKeepReserved") };
+      return;
+    }
+    saving = true;
+    message = null;
+    try {
+      await saveGithubConfig(
+        ghRepo.trim(),
+        editingToken ? tok : "__KEEP__",
+        ghBranch.trim(),
+        ghPrefix.trim(),
+      );
+      message = { type: "ok", text: t("settings.configSaved") };
+      await load();
+    } catch (e) {
+      message = { type: "err", text: String(e) };
+    } finally {
+      saving = false;
+    }
+  }
+
+  // 全量上传到当前后端（坚果云 / GitHub，按 provider 分派）
   async function doUpload() {
     transferring = "upload";
     message = null;
     try {
-      const result = await uploadAll();
-      const current = await refreshStatus();
-      message = current?.lastError
-        ? { type: "err", text: current.lastError }
-        : { type: "ok", text: "↑ " + result };
+      const r = await uploadAll();
+      const parts = [t("settings.syncUploaded", { n: String(r.uploaded) })];
+      if (r.deletedRemote > 0)
+        parts.push(t("settings.syncDeletedRemote", { n: String(r.deletedRemote) }));
+      if (r.conflicts > 0) parts.push(t("settings.syncConflicts", { n: r.conflicts }));
+      if (r.errors.length > 0)
+        parts.push(t("settings.syncFailedCount", { n: String(r.errors.length) }));
+      message = { type: "ok", text: "↑ " + parts.join("，") };
+      await refreshStatus();
+      if (r.errors.length || status?.lastError) message = { type: "err", text: r.errors.join("\n") || status?.lastError || "" };
       await refreshRecovery();
       onsynced();
     } catch (e) {
@@ -195,17 +367,29 @@
     }
   }
 
-  // 定向下载，覆盖前备份，本地改动保留。
+  // 从当前后端全量下载并覆盖本地（覆盖前备份 .trash）
   async function doDownload() {
-    if (!confirm(t("settings.transferConfirm"))) return;
+    if (!(await ask(t("settings.transferConfirm"), { title: t("settings.manualSync"), kind: "warning" }))) return;
     transferring = "download";
     message = null;
     try {
-      const result = await downloadAll();
-      const current = await refreshStatus();
-      message = current?.lastError
-        ? { type: "err", text: current.lastError }
-        : { type: "ok", text: "↓ " + result };
+      const r = await downloadAll();
+      message = {
+        type: "ok",
+        text:
+          "↓ " +
+          t("settings.syncDownloaded", {
+            u: String(r.downloaded),
+            s: String(r.skipped),
+            d: String(r.deleted),
+          }) +
+          (r.conflicts > 0 ? "，" + t("settings.syncConflicts", { n: r.conflicts }) : "") +
+          (r.errors.length > 0
+            ? "，" + t("settings.syncFailedCount", { n: String(r.errors.length) })
+            : ""),
+      };
+      await refreshStatus();
+      if (r.errors.length || status?.lastError) message = { type: "err", text: r.errors.join("\n") || status?.lastError || "" };
       await refreshRecovery();
       onsynced();
     } catch (e) {
@@ -274,8 +458,6 @@
   function onBackdrop(e: MouseEvent) {
     if (e.target === e.currentTarget) close();
   }
-
-
 </script>
 
 {#if open}
@@ -283,18 +465,17 @@
     class="backdrop"
     transition:fade={{ duration: 120 }}
     onclick={onBackdrop}
-    onkeydown={(e) => e.key === "Escape" && close()}
+    onkeydown={(e) => {
+      if (e.key === "Escape") {
+        // 阻止冒泡到 <svelte:window>：关弹窗不应连带隐藏整个窗口
+        e.stopPropagation();
+        e.preventDefault();
+        close();
+      }
+    }}
     role="presentation"
   >
-    <div
-      class="modal"
-      transition:scale={{ duration: 150, start: 0.96 }}
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="settings-title"
-      tabindex="-1"
-      use:dialogFocus
-    >
+    <div class="modal" transition:scale={{ duration: 150, start: 0.96 }} role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1" use:dialogFocus>
       <header class="modal-head">
         <h2 id="settings-title">{t("settings.title")}</h2>
         <button class="close" onclick={close} aria-label={t("common.close")}>×</button>
@@ -303,7 +484,7 @@
       <div class="modal-body">
         <section class="field">
           <span class="field-label">{t("settings.language")}</span>
-          <div class="language-segment" role="group" aria-label={t("settings.language")}>
+          <div class="segment" role="group" aria-label={t("settings.language")}>
             <button
               type="button"
               class:active={language === "zh"}
@@ -320,6 +501,23 @@
             </button>
           </div>
           <p class="hint">{t("settings.languageHint")}</p>
+        </section>
+
+        <section class="field">
+          <span class="field-label">{t("settings.autostart")}</span>
+          <button
+            type="button"
+            class="switch"
+            class:on={autostart}
+            role="switch"
+            aria-checked={autostart}
+            aria-label={t("settings.autostart")}
+            disabled={autostartBusy}
+            onclick={toggleAutostart}
+          >
+            <span class="switch-dot"></span>
+          </button>
+          <p class="hint">{t("settings.autostartHint")}</p>
         </section>
 
         <section class="field">
@@ -340,7 +538,30 @@
           <p class="hint">{t("settings.hotkeyHint")}</p>
         </section>
 
-        <!-- 同步状态 -->
+        <!-- 同步后端切换：立即持久化，两侧配置互不影响 -->
+        <section class="field">
+          <span class="field-label">{t("settings.provider")}</span>
+          <div class="segment" role="group" aria-label={t("settings.provider")}>
+            <button
+              type="button"
+              class:active={provider === "webdav"}
+              disabled={providerBusy || testing || saving || transferring !== null}
+              onclick={() => void switchProvider("webdav")}
+            >
+              {t("settings.providerWebdav")}
+            </button>
+            <button
+              type="button"
+              class:active={provider === "github"}
+              disabled={providerBusy || testing || saving || transferring !== null}
+              onclick={() => void switchProvider("github")}
+            >
+              {t("settings.providerGithub")}
+            </button>
+          </div>
+        </section>
+
+        <!-- 同步状态（跟随当前激活的后端） -->
         {#if status}
           <div class="status-box" class:syncing={status.syncing} class:error={status.lastError}>
             {#if status.syncing}
@@ -350,7 +571,7 @@
             {:else if status.lastError}
               <span class="dot err-dot"></span> {t("settings.statusError")}
             {:else if status.lastSync}
-              <span class="dot ok-dot"></span> {status.lastSync}
+              <span class="dot ok-dot"></span> {mapBackendMessage(status.lastSync, t)}
             {:else}
               <span class="dot off-dot"></span> {t("settings.statusWaiting")}
             {/if}
@@ -360,73 +581,157 @@
           {/if}
         {/if}
 
-        <!-- 配置表单 -->
-        <section class="field">
-          <label class="field-label" for="settings-account">{t("settings.account")}</label>
-          <input
-            class="form-input"
-            id="settings-account"
-            type="text"
-            bind:value={username}
-            placeholder={t("settings.accountPlaceholder")}
-            spellcheck="false"
-          />
-        </section>
-
-        <section class="field">
-          <span class="field-label">
-            {t("settings.appPassword")}
-            <button class="help-link" onclick={() => void openUrl(HELP_URL)}>
-              {t("settings.help")}
-            </button>
-          </span>
-          {#if hasPassword && !editingPassword}
-            <!-- 已保存：显示状态 + 修改按钮（明确告知密码已持久化）-->
-            <div class="pwd-saved">
-              <span class="pwd-saved-text">{t("settings.passwordSaved")}</span>
-              <button
-                class="pwd-edit-btn"
-                onclick={() => {
-                  editingPassword = true;
-                  password = "";
-                }}
-              >
-                {t("settings.editPassword")}
-              </button>
-            </div>
-          {:else}
-            <!-- 未配置或编辑模式：输入框 -->
+        <!-- 配置表单：按当前后端切换 -->
+        {#if provider === "github"}
+          <section class="field">
+            <span class="field-label">{t("settings.ghRepo")}</span>
             <input
               class="form-input"
-              aria-label={t("settings.appPassword")}
-              type="password"
-              bind:value={password}
-              placeholder={t("settings.passwordPlaceholder")}
+              type="text"
+              bind:value={ghRepo}
+              aria-label={t("settings.ghRepo")}
+              placeholder={t("settings.ghRepoPlaceholder")}
               spellcheck="false"
-              autocomplete="off"
             />
-          {/if}
-          <p class="hint">
-            {t("settings.passwordHintBefore")}
-            <button class="inline-link" onclick={() => void openUrl(HELP_URL)}>
-              {t("settings.passwordHintLink")}
-            </button>
-            {t("settings.passwordHintAfter")}
-          </p>
-        </section>
+            <p class="hint">{t("settings.ghRepoHint")}</p>
+          </section>
 
-        <section class="field">
-          <label class="field-label" for="settings-remote-root">{t("settings.remoteRoot")}</label>
-          <input
-            class="form-input"
-            id="settings-remote-root"
-            type="text"
-            bind:value={remoteRoot}
-            placeholder="PromptPocket"
-            spellcheck="false"
-          />
-          <p class="hint">{t("settings.remoteRootHint")}</p>
-        </section>
+          <section class="field">
+            <span class="field-label">
+              {t("settings.ghToken")}
+              <button class="help-link" onclick={() => void openUrl(GH_HELP_URL)}>
+                {t("settings.help")}
+              </button>
+            </span>
+            {#if hasToken && !editingToken}
+              <!-- 已保存：显示状态 + 修改按钮 -->
+              <div class="pwd-saved">
+                <span class="pwd-saved-text">{t("settings.passwordSaved")}</span>
+                <button
+                  class="pwd-edit-btn"
+                  onclick={() => {
+                    editingToken = true;
+                    ghToken = "";
+                  }}
+                >
+                  {t("settings.editPassword")}
+                </button>
+              </div>
+            {:else}
+              <input
+                class="form-input"
+                type="password"
+                bind:value={ghToken}
+              aria-label={t("settings.ghToken")}
+                placeholder={t("settings.ghTokenPlaceholder")}
+                spellcheck="false"
+                autocomplete="off"
+              />
+            {/if}
+            <p class="hint">
+              {t("settings.ghTokenHintBefore")}
+              <button class="inline-link" onclick={() => void openUrl(GH_HELP_URL)}>
+                {t("settings.ghTokenHintLink")}
+              </button>
+              {t("settings.ghTokenHintAfter")}
+            </p>
+          </section>
+
+          <div class="field-row">
+            <section class="field">
+              <span class="field-label">{t("settings.ghBranch")}</span>
+              <input
+                class="form-input"
+                type="text"
+                bind:value={ghBranch}
+              aria-label={t("settings.ghBranch")}
+                placeholder="main"
+                spellcheck="false"
+              />
+              <p class="hint">{t("settings.ghBranchHint")}</p>
+            </section>
+
+            <section class="field">
+              <span class="field-label">{t("settings.ghPrefix")}</span>
+              <input
+                class="form-input"
+                type="text"
+                bind:value={ghPrefix}
+              aria-label={t("settings.ghPrefix")}
+                placeholder="archive"
+                spellcheck="false"
+              />
+              <p class="hint">{t("settings.ghPrefixHint")}</p>
+            </section>
+          </div>
+        {:else}
+          <section class="field">
+            <span class="field-label">{t("settings.account")}</span>
+            <input
+              class="form-input"
+              type="text"
+              bind:value={username}
+              aria-label={t("settings.account")}
+              placeholder={t("settings.accountPlaceholder")}
+              spellcheck="false"
+            />
+          </section>
+
+          <section class="field">
+            <span class="field-label">
+              {t("settings.appPassword")}
+              <button class="help-link" onclick={() => void openUrl(HELP_URL)}>
+                {t("settings.help")}
+              </button>
+            </span>
+            {#if hasPassword && !editingPassword}
+              <!-- 已保存：显示状态 + 修改按钮（明确告知密码已持久化）-->
+              <div class="pwd-saved">
+                <span class="pwd-saved-text">{t("settings.passwordSaved")}</span>
+                <button
+                  class="pwd-edit-btn"
+                  onclick={() => {
+                    editingPassword = true;
+                    password = "";
+                  }}
+                >
+                  {t("settings.editPassword")}
+                </button>
+              </div>
+            {:else}
+              <!-- 未配置或编辑模式：输入框 -->
+              <input
+                class="form-input"
+                type="password"
+                bind:value={password}
+              aria-label={t("settings.appPassword")}
+                placeholder={t("settings.passwordPlaceholder")}
+                spellcheck="false"
+                autocomplete="off"
+              />
+            {/if}
+            <p class="hint">
+              {t("settings.passwordHintBefore")}
+              <button class="inline-link" onclick={() => void openUrl(HELP_URL)}>
+                {t("settings.passwordHintLink")}
+              </button>
+              {t("settings.passwordHintAfter")}
+            </p>
+          </section>
+
+          <section class="field">
+            <span class="field-label">{t("settings.remoteRoot")}</span>
+            <input
+              class="form-input"
+              type="text"
+              bind:value={remoteRoot}
+              aria-label={t("settings.remoteRoot")}
+              placeholder="PromptPocket"
+              spellcheck="false"
+            />
+            <p class="hint">{t("settings.remoteRootHint")}</p>
+          </section>
+        {/if}
 
         <!-- 手动同步操作区 -->
         {#if status?.configured}
@@ -438,7 +743,7 @@
                 onclick={doUpload}
                 disabled={transferring !== null}
               >
-                {#if transferring === "upload"}{t("settings.uploading")}{:else}{t("settings.upload")}{/if}
+                {#if transferring === "upload"}{t("settings.uploading")}{:else}{uploadLabel}{/if}
               </button>
               <button
                 class="sync-btn download"
@@ -508,10 +813,10 @@
       <footer class="modal-foot">
         <div class="spacer"></div>
         <button class="ghost" onclick={close}>{t("common.close")}</button>
-        <button class="ghost" onclick={doTest} disabled={testing || saving || transferring !== null}>
+        <button class="ghost" onclick={doTest} disabled={testing || saving || providerBusy || transferring !== null}>
           {testing ? t("settings.testing") : t("settings.testConnection")}
         </button>
-        <button class="primary" onclick={doSave} disabled={saving || testing}>
+        <button class="primary" onclick={doSave} disabled={saving || testing || transferring !== null}>
           {saving ? t("settings.saving") : t("settings.saveConfig")}
         </button>
       </footer>
@@ -532,7 +837,7 @@
   }
 
   .modal {
-    width: 560px;
+    width: 500px;
     max-width: 92vw;
     max-height: 90vh;
     overflow: hidden;
@@ -545,6 +850,7 @@
   }
 
   .modal-head {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -573,9 +879,9 @@
   }
 
   .modal-body {
-    padding: 18px;
     overflow-y: auto;
     min-height: 0;
+    padding: 18px;
     display: flex;
     flex-direction: column;
     gap: 16px;
@@ -594,7 +900,7 @@
     background: var(--accent-soft);
   }
   .status-box.error {
-    background: rgba(217, 48, 37, 0.08);
+    background: var(--danger-soft);
   }
   .dot {
     width: 8px;
@@ -603,7 +909,7 @@
     flex-shrink: 0;
   }
   .ok-dot {
-    background: #22a06b;
+    background: var(--success);
   }
   .syncing-dot {
     background: var(--accent);
@@ -640,7 +946,7 @@
     align-items: center;
     justify-content: space-between;
   }
-  .language-segment {
+  .segment {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 4px;
@@ -649,7 +955,7 @@
     border-radius: 8px;
     background: var(--bg);
   }
-  .language-segment button {
+  .segment button {
     height: 28px;
     border: 1px solid transparent;
     border-radius: 6px;
@@ -659,15 +965,54 @@
     font-weight: 600;
     cursor: pointer;
   }
-  .language-segment button:hover {
+  .segment button:hover:not(:disabled) {
     color: var(--fg);
     background: var(--bg-hover);
   }
-  .language-segment button.active {
+  .segment button.active {
     border-color: var(--border);
     background: var(--bg-elevated);
     color: var(--accent);
     box-shadow: 0 1px 2px rgba(31, 42, 68, 0.06);
+  }
+  /* 双列表单行（分支 / 路径前缀） */
+  .field-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  /* 自启动开关：pill 滑块，状态即系统真实状态 */
+  .switch {
+    width: 38px;
+    height: 22px;
+    border-radius: 11px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    padding: 2px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    transition: background 0.15s, border-color 0.15s;
+    align-self: flex-start;
+  }
+  .switch:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .switch-dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: transform 0.15s, background 0.15s;
+  }
+  .switch.on {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .switch.on .switch-dot {
+    transform: translateX(16px);
+    background: #fff;
   }
   .help-link {
     background: transparent;
@@ -694,12 +1039,6 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-soft);
   }
-  .inline-controls {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px;
-    align-items: center;
-  }
   .hint {
     font-size: 11.5px;
     color: var(--muted);
@@ -721,6 +1060,107 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+  .sync-btns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  /* 密码已保存状态 */
+  .pwd-saved {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--success-soft);
+    border: 1px solid var(--success-border);
+    border-radius: 8px;
+  }
+  .pwd-saved-text {
+    font-size: 13px;
+    color: var(--success-strong);
+  }
+  .pwd-edit-btn {
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--fg);
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  .pwd-edit-btn:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .sync-btn {
+    padding: 9px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-elevated);
+    color: var(--fg);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+  .sync-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .sync-btn.upload:hover:not(:disabled) {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  .sync-btn.download:hover:not(:disabled) {
+    background: var(--success);
+    color: #fff;
+    border-color: var(--success);
+  }
+  .sync-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .msg {
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 12.5px;
+  }
+  .msg.ok {
+    background: var(--success-soft);
+    color: var(--success-strong);
+  }
+  .msg.err {
+    background: var(--danger-soft);
+    color: var(--danger);
+  }
+
+  .modal-foot {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 18px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elevated);
+    flex-shrink: 0;
+  }
+  .spacer {
+    flex: 1;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .inline-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: center;
   }
   .recovery-section {
     min-height: 0;
@@ -780,6 +1220,17 @@
     background: var(--bg-elevated);
     overflow: hidden;
   }
+  .recovery-preview pre {
+    max-height: 180px;
+    overflow: auto;
+    margin: 0;
+    padding: 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
   .recovery-preview-head {
     display: flex;
     align-items: center;
@@ -801,110 +1252,5 @@
     cursor: pointer;
     font-size: 18px;
     line-height: 1;
-  }
-  .recovery-preview pre {
-    max-height: 180px;
-    overflow: auto;
-    margin: 0;
-    padding: 10px;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .sync-btns {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-  }
-  /* 密码已保存状态 */
-  .pwd-saved {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 8px 12px;
-    background: rgba(34, 160, 107, 0.1);
-    border: 1px solid rgba(34, 160, 107, 0.3);
-    border-radius: 8px;
-  }
-  .pwd-saved-text {
-    font-size: 13px;
-    color: #1a7a52;
-  }
-  .pwd-edit-btn {
-    background: transparent;
-    border: 1px solid var(--border-strong);
-    color: var(--fg);
-    font-size: 12px;
-    padding: 3px 10px;
-    border-radius: 7px;
-    cursor: pointer;
-  }
-  .pwd-edit-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  .sync-btn {
-    padding: 9px 12px;
-    border-radius: 8px;
-    border: 1px solid var(--border-strong);
-    background: var(--bg-elevated);
-    color: var(--fg);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.12s;
-  }
-  .sync-btn:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .sync-btn.upload:hover:not(:disabled) {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
-  }
-  .sync-btn.download:hover:not(:disabled) {
-    background: #22a06b;
-    color: #fff;
-    border-color: #22a06b;
-  }
-  .sync-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .msg {
-    padding: 8px 12px;
-    border-radius: 8px;
-    font-size: 12.5px;
-  }
-  .msg.ok {
-    background: rgba(34, 160, 107, 0.1);
-    color: #1a7a52;
-  }
-  .msg.err {
-    background: rgba(217, 48, 37, 0.1);
-    color: var(--danger);
-  }
-
-  .modal-foot {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px 18px;
-    border-top: 1px solid var(--border);
-    background: var(--bg-elevated);
-    flex-shrink: 0;
-  }
-  .spacer {
-    flex: 1;
-  }
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 </style>

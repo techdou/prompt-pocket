@@ -1,14 +1,26 @@
 import type { Prompt } from "./types";
 
+const normalize = (text: string) => text.toLocaleLowerCase().replace(/\s+/g, " ");
+type SearchRow = { title: string; category: string; tags: string[]; body: string };
+const rows = new WeakMap<Prompt, SearchRow>();
+function rowOf(prompt: Prompt): SearchRow {
+  let row = rows.get(prompt);
+  if (!row) {
+    row = { title: normalize(prompt.title), category: normalize(prompt.category), tags: (prompt.meta.tags ?? []).map(normalize), body: normalize(prompt.body ?? "") };
+    rows.set(prompt, row);
+  }
+  return row;
+}
 type Usage = Record<string, { useCount?: number }>;
 const termsFor = (query: string) => query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
 function score(prompt: Prompt, term: string): number {
-  const title = prompt.title.toLocaleLowerCase();
+  const row = rowOf(prompt);
+  const title = row.title;
   if (title === term) return 2000;
   if (title.includes(term)) return 1000;
-  if (prompt.category.toLocaleLowerCase().includes(term)) return 300;
-  if (prompt.meta.tags?.some((tag) => tag.toLocaleLowerCase().includes(term))) return 200;
-  if ((prompt.body ?? "").toLocaleLowerCase().includes(term)) return 100;
+  if (row.category.includes(term)) return 300;
+  if (row.tags.some((tag) => tag.includes(term))) return 200;
+  if (row.body.includes(term)) return 100;
   let position = 0;
   for (const character of title) if (character === term[position]) position++;
   return position === term.length ? 40 : -1;
@@ -48,4 +60,36 @@ export function highlightParts(text: string, query: string): { text: string; mat
     else parts.push({ text: text[index], match });
   }
   return parts;
+}
+
+const flatCache = new WeakMap<Prompt, { flat: string; flatLower: string }>();
+
+export function bodyMatchSnippet(prompt: Prompt, query: string): string | null {
+  const terms = normalize(query.trim()).split(" ").filter(Boolean);
+  if (terms.length === 0) return null;
+
+  const row = rowOf(prompt);
+  const meta = row.title + " " + row.category;
+  let cached = flatCache.get(prompt);
+  if (!cached) {
+    // 摘录展示用折叠空白后的原文（保留大小写），索引用其小写副本定位
+    const flat = (prompt.body ?? "").replace(/\s+/g, " ").trim();
+    cached = { flat, flatLower: flat.toLowerCase() };
+    flatCache.set(prompt, cached);
+  }
+  const { flat, flatLower } = cached;
+
+  for (const t of terms) {
+    if (meta.includes(t)) continue; // 标题/分类能解释这条结果，无需摘录
+    const idx = flatLower.indexOf(t);
+    if (idx < 0) continue;
+
+    // 命中词前文最多带 20 字符、后文连词共 60 字符，两端截断处补省略号
+    const start = Math.max(0, idx - 20);
+    const end = Math.min(flat.length, idx + t.length + 40);
+    const prefix = start > 0 ? "…" : "";
+    const suffix = end < flat.length ? "…" : "";
+    return prefix + flat.slice(start, end) + suffix;
+  }
+  return null;
 }

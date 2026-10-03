@@ -1,0 +1,160 @@
+name: CI
+
+# 三平台 CI：Windows / macOS / Linux 上跑单元测试 + Tauri 构建
+# 验证前端、Rust 与桌面打包在三平台上的兼容性。
+#
+# 触发：push 到任意分支、任意 PR。tag 推送不触发
+# Release 上传由 release.yml 在版本 tag 或手动发布时执行。
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+# 最小 token 权限：CI 只需要读代码，防止第三方 action 拿到多余写权限
+permissions:
+  contents: read
+
+# 同一分支新 push 时取消旧 run，省额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os-name }})
+    strategy:
+      fail-fast: false   # 一个平台挂了不连累其它平台继续跑
+      matrix:
+        include:
+          - os: windows-latest
+            os-name: Windows
+          - os: macos-latest
+            os-name: macOS
+          - os: ubuntu-22.04
+            os-name: Linux
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          # test/build 两个 job 共享同一份依赖缓存，避免依赖编译两遍
+          shared-key: ci
+
+      # Linux：Tauri 2 需要的系统库
+      # - libwebkit2gtk-4.1-dev：Tauri 2 专用（不是 4.0）
+      # - libxdo-dev：enigo 模拟键盘输入
+      # （keyring 4 的 linux-native 后端走 zbus，编译不需要 libsecret）
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Verify frontend (tests, types, build)
+        run: npm run verify
+
+      - name: Check Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+      # Rust 单元测试：store.rs / sync.rs / lib.rs
+      # 三平台真实验证"代码层面跨平台适配"是否成立
+      - name: Run cargo test
+        working-directory: src-tauri
+        run: cargo test --locked --verbose
+
+      # 静态检查：clippy 警告视为错误
+      # 平台特定的死代码在非 Windows 上会被 clippy 抓出来（如未使用的 import）
+      - name: Run cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  build:
+    name: Build (${{ matrix.os-name }})
+    needs: test   # 测试挂了就不浪费 build 时间
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            os-name: Windows
+          - os: macos-latest
+            os-name: macOS
+          - os: ubuntu-22.04
+            os-name: Linux
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ci
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # 验证 Tauri 应用在三平台都能打包（debug 模式更快，约 1-2 分钟）
+      # release 模式留给 release.yml（签名 + 发版时用）。
+      # 前端构建由 tauri.conf.json 的 beforeBuildCommand（npm run build）自动执行，
+      # 不再单独跑一遍避免重复
+      - name: Build Tauri app (debug)
+        run: npx tauri build --debug

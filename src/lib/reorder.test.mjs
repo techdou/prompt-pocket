@@ -30,7 +30,7 @@ describe("reorder helpers", () => {
     assert.equal(canReorderPromptList("", "绘图", prompts), false);
     assert.equal(
       getReorderDisabledReason("", "绘图", prompts),
-      "至少需要 2 条提示词才能排序",
+      "needTwo",
     );
   });
 
@@ -44,7 +44,7 @@ describe("reorder helpers", () => {
     assert.equal(canReorderPromptList("", "__all__", prompts), false);
     assert.equal(
       getReorderDisabledReason("", "__all__", prompts),
-      "切到单个分类后可拖拽排序",
+      "singleCategory",
     );
   });
 
@@ -55,7 +55,7 @@ describe("reorder helpers", () => {
     ];
 
     assert.equal(canReorderPromptList("a", "写作", prompts), false);
-    assert.equal(getReorderDisabledReason("a", "写作", prompts), "搜索结果不支持拖拽排序");
+    assert.equal(getReorderDisabledReason("a", "写作", prompts), "searchDisabled");
   });
 
   it("converts a drag source and insertion point into a path order", () => {

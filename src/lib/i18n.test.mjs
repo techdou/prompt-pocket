@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   LANGUAGE_STORAGE_KEY,
   createTranslator,
+  formatRelativeTime,
   getStoredLanguage,
   isLanguage,
   nextLanguage,
@@ -58,11 +59,51 @@ describe("i18n language helpers", () => {
   });
 
   it("translates fixed labels and interpolated copy", () => {
-    assert.equal(translate("en", "app.searchPlaceholder"), "Search prompts...");
-    assert.equal(translate("zh", "app.searchPlaceholder"), "搜索提示词...");
+    assert.equal(translate("en", "app.searchPlaceholder"), "Search titles or content...");
+    assert.equal(translate("zh", "app.searchPlaceholder"), "搜索标题或内容...");
     assert.equal(
       createTranslator("en")("app.deleteConfirm", { title: "Example" }),
-      'Delete "Example"? You can restore it from Settings.',
+      'Delete "Example"? You can restore it from Settings → Recovery.',
     );
+  });
+
+  it("falls back to the raw key when the key is missing in both languages", () => {
+    // 不存在的 key：两种语言表都查不到 → 原样返回 key 本身，不抛错、不返回 undefined
+    assert.equal(translate("zh", "app.__missing__"), "app.__missing__");
+    assert.equal(translate("en", "app.__missing__"), "app.__missing__");
+  });
+
+  it("keeps unmatched placeholders as-is when values are missing", () => {
+    // 插值缺参：{title} 没有对应值 → 占位符原样保留，方便排查文案漏配
+    assert.equal(
+      translate("en", "app.deleteConfirm"),
+      'Delete "{title}"? You can restore it from Settings → Recovery.',
+    );
+  });
+});
+
+describe("formatRelativeTime", () => {
+  const now = Date.now();
+  const iso = (msAgo) => new Date(now - msAgo).toISOString();
+
+  it("buckets elapsed time into both languages", () => {
+    assert.equal(formatRelativeTime(iso(30 * 1000), "zh"), "刚刚");
+    assert.equal(formatRelativeTime(iso(30 * 1000), "en"), "just now");
+    assert.equal(formatRelativeTime(iso(5 * 60 * 1000), "zh"), "5 分钟前");
+    assert.equal(formatRelativeTime(iso(5 * 60 * 1000), "en"), "5m ago");
+    assert.equal(formatRelativeTime(iso(3 * 3600 * 1000), "zh"), "3 小时前");
+    assert.equal(formatRelativeTime(iso(3 * 3600 * 1000), "en"), "3h ago");
+    assert.equal(formatRelativeTime(iso(2 * 86400 * 1000), "zh"), "2 天前");
+    assert.equal(formatRelativeTime(iso(2 * 86400 * 1000), "en"), "2d ago");
+    assert.equal(formatRelativeTime(iso(45 * 86400 * 1000), "zh"), "1 个月前");
+    assert.equal(formatRelativeTime(iso(45 * 86400 * 1000), "en"), "1mo ago");
+    assert.equal(formatRelativeTime(iso(400 * 86400 * 1000), "zh"), "1 年前");
+    assert.equal(formatRelativeTime(iso(400 * 86400 * 1000), "en"), "1y ago");
+  });
+
+  it("returns empty string for unparseable dates", () => {
+    // 非法/缺失时间（meta.updated 为空）→ 空串，副行留白而不是渲染 NaN
+    assert.equal(formatRelativeTime("", "zh"), "");
+    assert.equal(formatRelativeTime("not-a-date", "en"), "");
   });
 });

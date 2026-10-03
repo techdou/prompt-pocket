@@ -2,8 +2,8 @@
   import type { Translator } from "./i18n";
   import { templateFields, renderTemplate, missingTemplateFields } from "./templates";
   import { dialogFocus } from "./dialog";
-  let { body, title, t, onclose, onapply }: {
-    body: string; title: string; t: Translator; onclose: () => void; onapply: (text: string) => Promise<void>;
+  let { body, title, t, onclose, onapply, onraw }: {
+    body: string; title: string; t: Translator; onclose: () => void; onapply: (text: string) => Promise<void>; onraw?: () => Promise<void>;
   } = $props();
   let fields = $derived(templateFields(body));
   let values = $state<Record<string, string>>({});
@@ -12,6 +12,11 @@
   let output = $derived(renderTemplate(body, values));
   let missing = $derived(missingTemplateFields(body, values));
   $effect(() => { values = Object.fromEntries(fields.map((field) => [field.name, field.defaultValue])); });
+  async function copyRaw() {
+    if (busy || !onraw) return;
+    busy = true;
+    try { await onraw(); } catch (e) { error = String(e); } finally { busy = false; }
+  }
   async function apply() {
     if (missing.length || busy) return;
     busy = true;
@@ -32,7 +37,7 @@
       <div class="output"><h3>{t("template.preview")}</h3><pre>{output}</pre></div>
     </div>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
-    <footer><span class="hint">{missing.length ? t("template.missing") : ""}</span><button class="ghost" disabled={busy} onclick={onclose}>{t("common.cancel")}</button><button class="primary" disabled={!!missing.length || busy} onclick={apply}>{busy ? t("editor.loading") : t("template.apply")}</button></footer>
+    <footer><span class="hint">{missing.length ? t("template.missing") : ""}</span>{#if onraw}<button class="ghost" disabled={busy} onclick={copyRaw}>{t("template.raw")}</button>{/if}<button class="ghost" disabled={busy} onclick={onclose}>{t("common.cancel")}</button><button class="primary" disabled={!!missing.length || busy} onclick={apply}>{busy ? t("editor.loading") : t("template.apply")}</button></footer>
   </div>
 </div>
 

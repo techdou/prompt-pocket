@@ -10,6 +10,7 @@ import type {
   SyncStatus,
   CopyResult,
   RecoveryEntry,
+  SyncReport,
 } from "./types";
 
 type BackendPromptMeta = Partial<Omit<PromptMeta, "copy_mode">> & {
@@ -82,12 +83,13 @@ export async function readPrompt(path: string): Promise<PromptContent> {
 }
 
 export async function savePrompt(path: string, req: SaveRequest): Promise<Prompt> {
+  const { copy_mode, ...rest } = req;
   return normalizePrompt(
     await invoke<BackendPrompt>("save_prompt", {
       path,
       req: {
-        ...req,
-        copyMode: normalizeCopyMode(req.copy_mode),
+        ...rest,
+        copyMode: normalizeCopyMode(copy_mode),
       },
     }),
   );
@@ -145,8 +147,9 @@ export async function copyText(text: string): Promise<void> {
 export async function copyOrPaste(
   text: string,
   mode: CopyMode,
+  hide = true,
 ): Promise<CopyResult> {
-  return invoke<CopyResult>("copy_or_paste", { text, mode: normalizeCopyMode(mode) });
+  return invoke<CopyResult>("copy_or_paste", { text, mode: normalizeCopyMode(mode), hide });
 }
 
 export const getHotkey = () => invoke<string>("get_hotkey");
@@ -192,15 +195,52 @@ export async function saveCloudConfig(
 }
 
 /** 上传到坚果云：本地所有文件推送到云端（只增不删） */
-export async function uploadAll(): Promise<string> {
-  return invoke<string>("upload_all");
+export async function uploadAll(): Promise<SyncReport> {
+  return invoke<SyncReport>("upload_all");
 }
 
 /** 下载到本地：从坚果云拉取并覆盖本地 */
-export async function downloadAll(): Promise<string> {
-  return invoke<string>("download_all");
+export async function downloadAll(): Promise<SyncReport> {
+  return invoke<SyncReport>("download_all");
 }
 
 export async function openUrl(url: string): Promise<void> {
   return invoke<void>("open_url", { url });
+}
+
+// ── GitHub 存档 ──
+
+export async function testGithubConnection(
+  repo: string,
+  token: string,
+  branch: string,
+  prefix: string,
+): Promise<void> {
+  return invoke<void>("test_github_connection", { repo, token, branch, prefix });
+}
+
+export async function saveGithubConfig(
+  repo: string,
+  token: string,
+  branch: string,
+  prefix: string,
+): Promise<void> {
+  return invoke<void>("save_github_config", { repo, token, branch, prefix });
+}
+
+/** 切换同步后端（"webdav" | "github"）；两侧配置互不影响，立即持久化 */
+export async function setSyncProvider(provider: string): Promise<void> {
+  return invoke<void>("set_sync_provider", { provider });
+}
+
+
+// ── 开机自启动 ──
+
+/** 读取系统真实自启动状态（注册表/LaunchAgent），不读配置文件 */
+export async function getAutostart(): Promise<boolean> {
+  return invoke<boolean>("get_autostart");
+}
+
+export async function setAutostart(enabled: boolean): Promise<void> {
+  return invoke<void>("set_autostart", { enabled });
 }
