@@ -261,11 +261,11 @@ Prompt Pocket is a lightweight desktop prompt manager: summon it from any app wi
 
 | Feature | Description |
 | --- | --- |
-| Global launcher | Open or hide with `Ctrl+Alt+P`; centers on the monitor under the cursor |
+| Global launcher | Default `Ctrl+Alt+P`, configurable in Settings; centers on the monitor under the cursor |
 | Full-text search | `Ctrl+F` matches titles and prompt bodies; body hits show a context excerpt |
 | Smart copy / paste | `Enter` copies to clipboard; auto-pastes back to the window it was launched from (Windows only) |
 | Dual copy modes | `markdown` copies the source; `plain` strips Markdown syntax before copying; `Shift+Enter` copies with the other mode temporarily |
-| Variable fill-in | Prompts with `{{placeholders}}` open a fill-in dialog before copying; empty fields keep the original text |
+| Variable fill-in | Fill required placeholders and optional defaults before copying, or use “Copy original” to copy the unchanged template |
 | Markdown storage | One prompt per `.md` file; folders are categories; filenames follow titles |
 | Rich preview | GFM tables, task lists, code blocks; Mermaid / KaTeX / highlight.js bundled locally, lazy-loaded, no CDN |
 | Prompt ordering | Drag handles within one category; saved to `.order.json` |

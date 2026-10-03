@@ -21,6 +21,7 @@
 - 保留多目标删除确认、空分类标记、分类安全合并和排序迁移；补充原生 canonical 路径与本地库别名兼容回归。
 - Tauri JavaScript API 固定在 Rust 锁定版本兼容的次版本范围，避免桌面构建的版本不一致错误。
 - 将原独立 Verify workflow 合并进上游 CI：前端测试/类型/构建、Rust 格式/测试/严格 Clippy及桌面打包覆盖三平台；Release 保留 tag / 手动发布触发，并使用锁定 Rust 依赖。
+- 首次合并 CI 的 macOS/Linux 测试与 Clippy 通过；Windows 暴露旧路径测试只从预期值去掉原生前缀的问题。改为精确比较两侧 canonical 路径，不修改生产路径校验或放宽越界保护；最终结果以对应提交的 Actions 记录为准。
 
 ## 本地检查
 

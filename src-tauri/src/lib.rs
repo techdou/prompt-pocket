@@ -1974,11 +1974,10 @@ mod tests {
         std::fs::create_dir_all(root.join("写作")).unwrap();
 
         let ok = resolve_abs(&root, "写作/a.md").unwrap();
-        // 返回值是 canonical 形式：macOS 上 temp_dir 是 /var（/private/var 的符号链接），
-        // 不能直接和原始 root 比前缀，要和 canonical 后的 root 比
-        let root_canon = strip_unc_prefix(&std::fs::canonicalize(&root).unwrap());
-        assert!(ok.starts_with(&root_canon), "正常相对路径应解析到 root 内");
-        assert!(ok.ends_with(Path::new("写作").join("a.md")));
+        // 两侧均保留 canonical 拼写：macOS 解析 /var 别名，Windows 保留 \\?\ 前缀。
+        // 仅从一侧去掉 Windows 前缀，会把同一库内路径误判为越界。
+        let root_canon = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(ok, root_canon.join("写作").join("a.md"));
 
         std::fs::remove_dir_all(&root).unwrap();
     }
