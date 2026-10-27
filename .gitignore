@@ -118,3 +118,9 @@ build/
 
 # ── 系统与临时文件 ──
 *~
+
+# ── 2026-10-27 补：本机工具状态与本机桥文件 ──
+.github-bridge.json
+*-bridge.json
+.v2c/
+.video_agent/
