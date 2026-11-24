@@ -61,7 +61,6 @@ jobs:
 
       # Linux：Tauri 2 需要的系统库
       # - libwebkit2gtk-4.1-dev：Tauri 2 专用（不是 4.0）
-      # - libxdo-dev：enigo 模拟键盘输入
       # （keyring 4 的 linux-native 后端走 zbus，编译不需要 libsecret）
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -73,7 +72,6 @@ jobs:
             curl \
             wget \
             file \
-            libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
@@ -144,7 +142,6 @@ jobs:
             curl \
             wget \
             file \
-            libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev
