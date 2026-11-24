@@ -78,7 +78,7 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 3. 搜索或用方向键选中提示词。
 4. 按 `Enter`。
 
-Windows 上经快捷键唤起时，内容写入剪贴板后自动粘贴回唤起前的原窗口（不限输入框）；其他平台只写剪贴板，手动粘贴。
+Windows 上经快捷键唤起时，内容写入剪贴板后自动粘贴回唤起前的原窗口（不限输入框）；其他平台只写剪贴板，手动粘贴。自动粘贴没能完成时（例如目标窗口以更高权限运行、调用时修饰键一直没松开），会发送系统通知（需系统允许通知）：内容已在剪贴板，回到输入框手动 `Ctrl+V` 即可。
 
 ### 两种视图
 
@@ -91,7 +91,7 @@ Prompt Pocket 有两个工作状态：
 
 ### 模板变量
 
-提示词正文可以写模板占位符。复制前会弹出填写窗口，本次生成的文本用于复制，原模板文件不会被改写。
+提示词正文可以写模板占位符。复制前会弹出填写窗口，光标直接落在第一个必填变量上；本次生成的文本用于复制，原模板文件不会被改写。
 
 ```markdown
 请帮我把下面内容改写成{{语气|自然}}风格，面向{{读者}}：
@@ -123,6 +123,7 @@ Prompt Pocket 有两个工作状态：
 | 上下选择 | `↑` / `↓` |
 | 复制选中项 | `Enter` |
 | 以另一复制模式复制 | `Shift+Enter` |
+| 应用模板并复制 | `Ctrl+Enter`（在模板填空窗口内） |
 | 清空搜索 / 隐藏窗口 | `Esc`（搜索框有词时先清空，再按才隐藏） |
 
 ### 平台说明
@@ -154,6 +155,17 @@ PromptPocket/
 ```
 
 提示词文件格式（frontmatter 由应用规范读写，正文为任意 Markdown）：
+
+```markdown
+---
+title: 改写润色
+copyMode: markdown
+created: 2026-06-27T00:00:00Z
+updated: 2026-06-27T00:00:00Z
+---
+```
+
+复制格式键应用写出 `copyMode`；手写的 `copy_mode` 也兼容读取（两种键同时存在时以 `copyMode` 为准）。以下为同一文件的可选写法：
 
 ```markdown
 ---
@@ -300,7 +312,7 @@ The first launch shows the main window; afterwards the app stays in the backgrou
 3. Search or use arrow keys to select a prompt.
 4. Press `Enter`.
 
-On Windows the prompt is pasted back automatically to the window it was launched from; on other platforms it is only copied — paste manually.
+On Windows the prompt is pasted back automatically to the window it was launched from; on other platforms it is only copied — paste manually. If the automatic paste cannot be completed (for example the target window runs with higher privileges, or a modifier key is still held down), a system notification is sent (if the system allows notifications): the content is on the clipboard, so press `Ctrl+V` in the target input yourself.
 
 ### Keyboard Shortcuts
 
@@ -313,6 +325,7 @@ On Windows the prompt is pasted back automatically to the window it was launched
 | Move selection | `↑` / `↓` |
 | Copy selected prompt | `Enter` |
 | Copy with the other mode | `Shift+Enter` |
+| Apply template and copy | `Ctrl+Enter` (inside the template dialog) |
 | Clear search / hide | `Esc` (clears the search term first when present, hides on the next press) |
 
 ### Platform Notes
@@ -344,6 +357,17 @@ PromptPocket/
 ```
 
 Prompt file format (frontmatter is read/written canonically by the app; the body is free-form Markdown):
+
+```markdown
+---
+title: Rewrite
+copyMode: markdown
+created: 2026-06-27T00:00:00Z
+updated: 2026-06-27T00:00:00Z
+---
+```
+
+The app writes the copy-format key as `copyMode`; a hand-written `copy_mode` is also accepted (when both exist, `copyMode` wins). Same file in the hand-written form:
 
 ```markdown
 ---
