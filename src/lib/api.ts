@@ -9,6 +9,7 @@ import type {
   ScanResult,
   SyncStatus,
   CopyResult,
+  PasteSessionSnapshot,
   RecoveryEntry,
   SyncReport,
 } from "./types";
@@ -141,15 +142,45 @@ export async function copyText(text: string): Promise<void> {
 }
 
 /**
- * 智能复制/注入：写剪贴板 + 隐藏窗口 + 自动判断是否注入输入框。
- * 前台有文本光标 → 模拟 Ctrl+V 注入；否则纯复制到剪贴板。
+ * 智能复制/注入：写剪贴板 + 隐藏窗口，按"快捷键唤起时记住的原窗口"判定注入。
+ * 有记忆目标 → 等焦点回原窗口后模拟 Ctrl+V 注入；否则纯复制到剪贴板。
+ *
+ * generation 是触发这次调用的那次唤起的代次（见 getPasteSession）。后端据此
+ * 识别请求是否已经过时：期间用户重新唤起或收起过窗口，请求作废且不碰任何东西。
  */
 export async function copyOrPaste(
   text: string,
   mode: CopyMode,
   hide = true,
+  generation: number | null = null,
 ): Promise<CopyResult> {
-  return invoke<CopyResult>("copy_or_paste", { text, mode: normalizeCopyMode(mode), hide });
+  return invoke<CopyResult>("copy_or_paste", {
+    text,
+    mode: normalizeCopyMode(mode),
+    hide,
+    generation,
+  });
+}
+
+/** 当前唤起会话的快照：Enter 会粘贴还是只复制，以及这次唤起的代次 */
+export const getPasteSession = () =>
+  invoke<PasteSessionSnapshot>("get_paste_session");
+
+/**
+ * 自动粘贴失败时的系统通知：主窗口此刻已隐藏，应用内 toast 用户看不到。
+ * 通知权限未授予时尝试请求一次；失败静默（剪贴板已有内容，重新唤起后
+ * 仍能看到应用内 toast 兜底）。
+ */
+export async function notifyPasteFailed(title: string, body: string): Promise<void> {
+  try {
+    const { isPermissionGranted, requestPermission, sendNotification } =
+      await import("@tauri-apps/plugin-notification");
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === "granted";
+    if (granted) sendNotification({ title, body });
+  } catch {
+    // 通知链路异常不影响主流程
+  }
 }
 
 export const getHotkey = () => invoke<string>("get_hotkey");
@@ -160,8 +191,12 @@ export const readRecovery = (id: string) => invoke<string>("read_recovery", { id
 export const setWindowMode = (mode: "quick" | "manage") => invoke<void>("set_window_mode", { mode });
 export const setInteractionLock = (locked: boolean) => invoke<void>("set_interaction_lock", { locked });
 
-export async function hideWindow(): Promise<void> {
-  return invoke<void>("hide_window");
+/**
+ * 收起主窗口（Esc）。generation 是按下 Esc 时所属的唤起代次：上一次唤起里
+ * 按下的 Esc 晚到一步时，不能收起现在这一次唤起的窗口
+ */
+export async function hideWindow(generation: number | null = null): Promise<void> {
+  return invoke<void>("hide_window", { generation });
 }
 
 export async function revealInFinder(path: string): Promise<void> {

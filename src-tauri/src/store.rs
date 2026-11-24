@@ -28,6 +28,68 @@ pub struct PromptMeta {
     pub updated: String,
 }
 
+/// 读取 frontmatter 用的形状：复制格式同时接受程序写出的 `copyMode` 与手写的
+/// `copy_mode`（README 示例就是后者）。写成两个独立字段，而不是 serde alias——
+/// alias 在两种键同时出现时会报"重复字段"，让整段元数据退回默认值。
+///
+/// 这是为了兼容而新加的读取路径，所以对"原来能读出的文件"必须逐字节等价：
+/// - 其余字段与 PromptMeta 完全一致，仍由 serde 直接反序列化成目标类型。
+///   刻意不经过 `serde_yaml::Value` 中转：那会先把 `title: 2026` 这类标量解析成
+///   数字 / 布尔，再转 String 时失败
+/// - `copyMode` 键出现时按普通 String 字段的方式读（见 string_when_present）
+/// - `copy_mode` 是新增的兼容键，读不了就当没有，不能拖累其余字段
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptMetaRead {
+    #[serde(default)]
+    title: String,
+    #[serde(default, deserialize_with = "string_when_present")]
+    copy_mode: Option<String>,
+    /// 手写 frontmatter 里的 snake_case 写法；两种键同时出现时以 `copyMode` 为准
+    #[serde(default, rename = "copy_mode", deserialize_with = "loose_string")]
+    copy_mode_handwritten: Option<String>,
+    #[serde(default)]
+    created: String,
+    #[serde(default)]
+    updated: String,
+}
+
+impl From<PromptMetaRead> for PromptMeta {
+    fn from(read: PromptMetaRead) -> Self {
+        Self {
+            title: read.title,
+            copy_mode: read
+                .copy_mode
+                .or(read.copy_mode_handwritten)
+                .unwrap_or_else(default_copy_mode),
+            created: read.created,
+            updated: read.updated,
+        }
+    }
+}
+
+/// 与普通 `String` 字段完全相同的读取方式（空值、`null`、`~` 都读成原标量文本），
+/// 只是允许字段缺失。不能用 `Option<String>`：serde_yaml 会把空值 / null 读成 None，
+/// 改变旧版对这些写法的读取结果
+fn string_when_present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+/// 只认字符串值；**完整读出来**的其他形状（序列、映射、数字……）当作没有这个键。
+/// 手写的兼容键不该因为写法古怪，就把整段元数据拖进容错分支。
+///
+/// 读取出错则必须原样抛出，不能吞掉当成 None：serde_yaml 的 Value 在出错时
+/// 可能还没读完这个值（例如映射里有重复键），吞掉错误会让外层接着在错位的
+/// 位置上读，直接 panic。抛出去之后 parse_meta 会从原文重新走改动之前的解析
+fn loose_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    Ok(value.as_str().map(str::to_owned))
+}
+
 fn default_copy_mode() -> String {
     "markdown".to_string()
 }
@@ -176,8 +238,17 @@ fn find_frontmatter_end(s: &str) -> Option<usize> {
     None
 }
 
+fn parse_meta(fm_raw: &str) -> serde_yaml::Result<PromptMeta> {
+    match serde_yaml::from_str::<PromptMetaRead>(fm_raw) {
+        Ok(read) => Ok(read.into()),
+        // 兼容读取失败（例如手写的 copy_mode 重复出现）：退回改动之前的解析方式。
+        // 它把 copy_mode 当未知键忽略——旧文件原来怎么读，现在还怎么读
+        Err(_) => serde_yaml::from_str::<PromptMeta>(fm_raw),
+    }
+}
+
 fn parse_yaml_frontmatter(fm_raw: &str) -> PromptMeta {
-    match serde_yaml::from_str::<PromptMeta>(fm_raw) {
+    match parse_meta(fm_raw) {
         Ok(m) => m,
         Err(_) => {
             // 容错：解析失败时退回默认值，至少尝试救回 title
@@ -734,7 +805,9 @@ pub fn rename_prompt(
     }
     let new_abs = new_dir.join(&file_name);
 
-    // 重写 frontmatter 的 title（保留其余字段 + 正文）
+    // 重写 frontmatter 的 title（保留其余字段 + 正文）。正文原样作为文件结尾，
+    // 既不剥也不补换行：读取和扫描本来就会 trim 尾部换行，而在这里追加的话，
+    // 文件每改一次名就多一个换行，手写时没有结尾换行的文件也会被补上
     let (mut meta, body) = {
         let content = fs::read_to_string(old_abs)?;
         parse_markdown(&content)
@@ -742,7 +815,7 @@ pub fn rename_prompt(
     meta.title = new_title.to_string();
     meta.updated = now_iso();
     let fm = serialize_frontmatter(&meta);
-    let content = format!("---\n{}\n---\n\n{}\n", fm, body);
+    let content = format!("---\n{}\n---\n\n{}", fm, body);
 
     recovery::snapshot(root, old_abs, "history")?;
     if new_abs.exists() && new_abs != old_abs {
@@ -1138,6 +1211,209 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    /// rename / 移动分类会原样重写正文：不得每次多追加一个换行
+    /// （读取时虽会剥光尾部换行、用户看不见，但磁盘文件会随改名次数膨胀）
+    #[test]
+    fn rename_does_not_accumulate_trailing_newlines_on_disk() {
+        use std::path::Path;
+        let dir = std::env::temp_dir().join("pp_test_rename_newline");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let on_disk_body = |abs: &Path| parse_markdown(&std::fs::read_to_string(abs).unwrap()).1;
+
+        let abs = create_prompt(&dir, "未分类", "尾空行").unwrap();
+        let abs = save_prompt(
+            &dir,
+            &abs,
+            &SaveRequest {
+                title: "尾空行".into(),
+                copy_mode: "markdown".into(),
+                body: "line1\n\n".into(),
+                category: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(on_disk_body(&abs), "line1\n\n\n");
+
+        // 连续改名两次、再移到别的分类：磁盘正文逐字节不变
+        let renamed = rename_prompt(&dir, &abs, "改名一", "未分类").unwrap();
+        assert_eq!(on_disk_body(&renamed), "line1\n\n\n");
+        let moved = rename_prompt(&dir, &renamed, "改名一", "工作").unwrap();
+        assert_eq!(on_disk_body(&moved), "line1\n\n\n");
+        assert_eq!(read_prompt(&moved).unwrap().body, "line1");
+
+        // 手写的文件：结尾没有换行 / 以 CRLF 结尾——改名不得改动它的结尾。
+        // （上一步把文件移走后"未分类"目录已被当成空分类清掉，这里重新建）
+        std::fs::create_dir_all(dir.join("未分类")).unwrap();
+        for (name, title, new_title, body) in [
+            ("noeol.md", "无结尾换行", "无结尾换行二", "abc"),
+            ("crlf.md", "回车结尾", "回车结尾二", "abc\r\n"),
+        ] {
+            let abs = dir.join("未分类").join(name);
+            std::fs::write(&abs, format!("---\ntitle: {title}\n---\n\n{body}")).unwrap();
+            let renamed = rename_prompt(&dir, &abs, new_title, "未分类").unwrap();
+            assert_eq!(on_disk_body(&renamed), body);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// frontmatter 的 copy_mode：接受手写的 snake_case（alias）与程序写出的
+    /// camelCase 两种键名，序列化只输出 camelCase
+    #[test]
+    fn copy_mode_accepts_both_key_spellings_and_writes_camel_case() {
+        let (snake, _) = parse_markdown("---\ntitle: t\ncopy_mode: plain\n---\n\nbody\n");
+        assert_eq!(snake.copy_mode, "plain");
+        let (camel, _) = parse_markdown("---\ntitle: t\ncopyMode: plain\n---\n\nbody\n");
+        assert_eq!(camel.copy_mode, "plain");
+        let (absent, _) = parse_markdown("---\ntitle: t\n---\n\nbody\n");
+        assert_eq!(absent.copy_mode, "markdown");
+        // 两种键同时出现：以程序写出的 copyMode 为准，且不能让整段解析失败。
+        // 被遮蔽的 copy_mode 换几种合法写法：普通、带引号的键、块标量值
+        for shadowed in [
+            "copy_mode: plain",
+            "'copy_mode': plain",
+            "copy_mode: >-\n  plain",
+        ] {
+            let (both, _) = parse_markdown(&format!(
+                "---\ntitle: t\ncreated: 2026-01-02T03:04:05Z\ncopyMode: markdown\n{shadowed}\n---\n\nbody\n"
+            ));
+            assert_eq!(both.copy_mode, "markdown", "被遮蔽的写法: {shadowed:?}");
+            assert_eq!(
+                both.created, "2026-01-02T03:04:05Z",
+                "被遮蔽的写法: {shadowed:?}"
+            );
+        }
+        // 消歧不改动原文：末尾用 |+ 保留换行的多行标题原样解析
+        let (kept, _) = parse_markdown(
+            "---\ncopyMode: markdown\ncopy_mode: plain\ntitle: |+\n  标题\n\n---\n\nbody\n",
+        );
+        assert_eq!(kept.copy_mode, "markdown");
+        assert_eq!(kept.title, "标题\n\n");
+        // 对"改动之前能读出的文件"必须逐字节等价：copyMode 键出现时按普通
+        // String 字段的方式读（空值、null 都是原标量文本）；被遮蔽的 copy_mode
+        // 写法古怪（序列、映射、重复键、非字符串）也不能拖累其余字段
+        for (name, fields, expected_mode, expected_created) in [
+            (
+                "规范键为空值",
+                "created: 2026-01-02T03:04:05Z\ncopyMode:\ncopy_mode: plain",
+                "",
+                "2026-01-02T03:04:05Z",
+            ),
+            (
+                "规范键为 null",
+                "created: 2026-01-02T03:04:05Z\ncopyMode: null",
+                "null",
+                "2026-01-02T03:04:05Z",
+            ),
+            (
+                "被遮蔽的序列",
+                "created: 2026-01-02T03:04:05Z\ncopyMode: plain\ncopy_mode: [plain]",
+                "plain",
+                "2026-01-02T03:04:05Z",
+            ),
+            (
+                "被遮蔽的映射",
+                "created: 2026-01-02T03:04:05Z\ncopyMode: plain\ncopy_mode: {format: plain}",
+                "plain",
+                "2026-01-02T03:04:05Z",
+            ),
+            (
+                "兼容键重复出现",
+                "created: 2026-01-02T03:04:05Z\ncopy_mode: plain\ncopy_mode: markdown",
+                "markdown",
+                "2026-01-02T03:04:05Z",
+            ),
+            (
+                "兼容键不是字符串",
+                "created: 2026-01-02T03:04:05Z\ncopy_mode: 2026",
+                "markdown",
+                "2026-01-02T03:04:05Z",
+            ),
+            // 兼容键的值里出了读取错误（映射内重复键）：不能 panic，
+            // 要退回旧解析把整个未知键跳过，其余字段照常保留
+            (
+                "兼容键内嵌重复键（有规范键）",
+                "created: 2026-01-02T03:04:05Z\ncopyMode: plain\ncopy_mode: {format: plain, format: markdown}",
+                "plain",
+                "2026-01-02T03:04:05Z",
+            ),
+            (
+                "兼容键内嵌重复键（无规范键）",
+                "created: 2026-01-02T03:04:05Z\ncopy_mode: {format: plain, format: markdown}",
+                "markdown",
+                "2026-01-02T03:04:05Z",
+            ),
+            // 出错字段之后还有元数据：回退到旧解析后也要读得到
+            (
+                "兼容键内嵌重复键（出错字段在前）",
+                "copy_mode: {format: plain, format: markdown}\ncreated: 2026-01-02T03:04:05Z",
+                "markdown",
+                "2026-01-02T03:04:05Z",
+            ),
+        ] {
+            let (meta, _) = parse_markdown(&format!("---\ntitle: t\n{fields}\n---\n\nbody\n"));
+            assert_eq!(meta.copy_mode, expected_mode, "{name}");
+            assert_eq!(meta.created, expected_created, "{name}");
+            assert_eq!(meta.title, "t", "{name}");
+        }
+        // 真正的危害路径是"解析降级 → 改名把降级后的元数据写回文件"。三种情形：
+        // 双键文件、数字样式的标题、布尔样式的标题（后两者必须仍按字符串读出，
+        // 与引入双键兼容之前的解析结果一致）。改名后复制格式与 created 必须保留
+        // （updated 本来就会刷新），被遮蔽的键不再出现
+        let dir = std::env::temp_dir().join("pp_test_copy_mode_alias");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("未分类")).unwrap();
+        for (name, fields, expected_title, expected_mode) in [
+            (
+                "双键.md",
+                "title: 别名\ncopyMode: markdown\n'copy_mode': plain",
+                "别名",
+                "markdown",
+            ),
+            (
+                "数字标题.md",
+                "title: 2026\ncopy_mode: plain",
+                "2026",
+                "plain",
+            ),
+            (
+                "布尔标题.md",
+                "title: true\ncopyMode: plain",
+                "true",
+                "plain",
+            ),
+        ] {
+            let abs = dir.join("未分类").join(name);
+            std::fs::write(
+                &abs,
+                format!("---\n{fields}\ncreated: 2026-01-02T03:04:05Z\n---\n\nbody\n"),
+            )
+            .unwrap();
+            let (parsed, _) = parse_markdown(&std::fs::read_to_string(&abs).unwrap());
+            assert_eq!(parsed.title, expected_title, "{name}: 标题按字符串读出");
+            assert_eq!(parsed.copy_mode, expected_mode, "{name}");
+            let renamed = rename_prompt(&dir, &abs, "改名后", "未分类").unwrap();
+            let reread = read_prompt(&renamed).unwrap();
+            assert_eq!(reread.meta.title, "改名后", "{name}");
+            assert_eq!(reread.meta.copy_mode, expected_mode, "{name}");
+            assert_eq!(reread.meta.created, "2026-01-02T03:04:05Z", "{name}");
+            let on_disk = std::fs::read_to_string(&renamed).unwrap();
+            assert!(
+                !on_disk.contains("copy_mode"),
+                "{name}: 写出只用 camelCase: {on_disk}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let yaml = serialize_frontmatter(&snake);
+        assert!(
+            yaml.contains("copyMode: plain"),
+            "序列化保持 camelCase: {yaml}"
+        );
+        assert!(!yaml.contains("copy_mode"), "不得写出 snake_case: {yaml}");
+    }
+
     /// 正文首行缩进与块标量内的水平线往返保持（#16/#17）
     #[test]
     fn body_leading_indent_and_block_scalar_fence_roundtrip() {

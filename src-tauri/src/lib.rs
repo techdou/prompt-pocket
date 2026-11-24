@@ -37,8 +37,16 @@ const GLOBAL_HOTKEY: &str = "Ctrl+Alt+P";
 /// 焦点回归轮询总预算：快路径（实测回归 30-50ms）就绪即返回零延迟；
 /// 慢机器/重负载应用（Chromium 系激活 100ms+）需要更宽的兜底窗口——
 /// 超时过窄会把可注入场景静默退化成纯复制
-const FOCUS_RESTORE_TIMEOUT_MS: u64 = 400;
+const FOCUS_RESTORE_TIMEOUT_MS: u64 = 800;
 const FOCUS_RESTORE_POLL_MS: u64 = 10;
+/// 首次命中目标前台后的稳定窗口：前台 HWND 已恢复 ≠ 应用内部焦点
+/// 已恢复（网页 activeElement / 编辑器 caret / IME 上下文），留一小段
+/// 时间让目标应用消化 WM_ACTIVATE 再注入，否则 Ctrl+V 会被过早丢弃
+const FOCUS_STABLE_DELAY_MS: u64 = 40;
+/// 注入前等待物理修饰键释放的预算：用户 Shift+Enter 调用时 Shift 往往
+/// 还按着，直接注入会变成 Ctrl+Shift+V（≠ 粘贴）；等手指松开再注入
+const MODIFIER_RELEASE_TIMEOUT_MS: u64 = 400;
+const MODIFIER_RELEASE_POLL_MS: u64 = 25;
 const CLOUD_PASSWORD_SERVICE: &str = "com.promptpocket.webdav";
 const GITHUB_TOKEN_SERVICE: &str = "com.promptpocket.github";
 
@@ -103,8 +111,13 @@ struct AppState {
     last_error: Mutex<Option<String>>,
     /// 本地写命令与同步命令的互斥闸（见 IoGate）
     io_gate: Mutex<IoGate>,
-    /// 快捷键按下瞬间记住的前台窗口句柄；copy_or_paste 消费它判定"是否注入回原窗口"
-    last_hotkey_target_window: Mutex<Option<PasteTarget>>,
+    /// 当前唤起会话：唤起代次 + 唤起前的前台窗口（粘贴目标），见 PasteSession
+    paste_session: Mutex<PasteSession>,
+    /// 粘贴请求正在隐藏主窗口：由此产生的失焦事件由请求自己负责收尾，
+    /// 失焦处理不要插手（见 hide_and_claim）
+    hiding_for_paste: AtomicBool,
+    /// 窗口此刻是否持有焦点，由焦点事件原样维护、不区分是哪一次唤起
+    window_focused: AtomicBool,
     hotkey: tokio::sync::Mutex<String>,
     preferences_file: PathBuf,
     interaction_locked: AtomicBool,
@@ -116,21 +129,44 @@ impl AppState {
         self.cloud.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn set_last_hotkey_target_window(&self, target: Option<PasteTarget>) {
-        *self
-            .last_hotkey_target_window
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = target;
+    fn paste_session(&self) -> std::sync::MutexGuard<'_, PasteSession> {
+        self.paste_session.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn take_last_hotkey_target_window(&self) -> Option<PasteTarget> {
-        let mut guard = self
-            .last_hotkey_target_window
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let target = *guard;
-        *guard = None;
-        target
+    /// 用户主动唤起主窗口（快捷键 / 托盘 / 单实例）：开启新的会话代次并登记
+    /// 粘贴目标（托盘 / 单实例唤起没有"唤起前的窗口"，传 None）。代次一变，
+    /// 还在途的旧粘贴请求就会作废。返回快照供前端记住"现在是第几次唤起"
+    fn begin_paste_session(
+        &self,
+        app: &tauri::AppHandle,
+        target: Option<PasteTarget>,
+    ) -> PasteSessionSnapshot {
+        // 只把"此刻窗口确实可见并持有焦点"算作已获焦：窗口开着时又唤起一次
+        // （单实例、托盘显示），WebView2 不会再发获焦事件，现有的获焦状态要
+        // 带进新会话，否则之后的真实失焦会被当成"还没获过焦"而忽略。
+        // 从隐藏状态唤起时窗口不可见，即使上一次隐藏留下的失焦事件还没处理
+        // （缓存的获焦位尚未清零），也一律从"等待首次获焦"开始。
+        //
+        // 判定优先直接问系统（Windows：窗口此刻就是前台窗口）。缓存的获焦位
+        // 来自 WebView2 的异步回调，拖拽 / 缩放产生的伪失焦可能让它暂时是
+        // false，而窗口其实一直在前台；非 Windows 没有等价判据，只能靠它
+        let already_focused = app.get_webview_window("main").is_some_and(|win| {
+            win.is_visible().unwrap_or(false)
+                && (is_in_foreground(&win) || self.window_focused.load(Ordering::SeqCst))
+        });
+        // 首次启动的失焦豁免只属于启动时那一次展示；之后任何一次主动唤起
+        // 都开启新的会话，豁免随之结束
+        FIRST_RUN_SUPPRESS_BLUR_HIDE.store(false, Ordering::SeqCst);
+        let mut session = self.paste_session();
+        session.begin(target, already_focused);
+        session.snapshot()
+    }
+
+    /// 用户主动收起主窗口（Esc / 快捷键 / 托盘 / 点击了别的窗口）：会话作废，
+    /// 目标不残留到下一次唤起，途中的粘贴请求也一并作废——用户既然收起了
+    /// 窗口，就不能再有内容被自动粘出去
+    fn cancel_paste_session(&self) {
+        self.paste_session().cancel();
     }
 
     fn set_cloud_config(&self, cfg: CloudConfig) -> Result<(), String> {
@@ -383,18 +419,17 @@ fn register_hotkey(app: &tauri::AppHandle, shortcut: Shortcut) -> Result<(), Str
             if event.state != ShortcutState::Pressed {
                 return;
             }
-            let visible = app
-                .get_webview_window("main")
-                .and_then(|win| win.is_visible().ok())
-                .unwrap_or(false);
-            let target = if visible {
-                None
-            } else {
-                foreground_window_handle()
-            };
-            app.state::<AppState>()
-                .set_last_hotkey_target_window(target);
-            toggle_main_window(app);
+            on_ui_thread(app, |app| {
+                if is_main_window_visible(app) {
+                    // 可见时按快捷键 = 收起
+                    hide_main_window(app);
+                    return;
+                }
+                // 隐藏时按快捷键 = 新的一次唤起。粘贴目标必须在窗口显示之前记下：
+                // 显示之后前台就是本窗口，再拿不到"唤起前在哪个应用"了
+                let target = foreground_window_handle();
+                summon_main_window(app, target);
+            });
         })
         .map_err(|e| format!("快捷键注册失败（可能被占用）: {e}"))
 }
@@ -833,33 +868,225 @@ async fn copy_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
+/// 当前唤起会话的快照：hasTarget 决定 Enter 是"隐藏并注入回原窗口"还是"仅复制"
+#[tauri::command]
+fn get_paste_session(state: tauri::State<'_, AppState>) -> PasteSessionSnapshot {
+    state.paste_session().snapshot()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PasteTarget {
     window: isize,
     process_id: u32,
 }
 
+/// 一次"唤起会话"：用户主动唤起主窗口时开启。
+///
+/// 只记窗口句柄不够：同一个窗口可以被反复唤起，只比较句柄分不清"这次请求
+/// 属于哪一次唤起"。generation 每次唤起、每次用户收起都递增；粘贴请求记住
+/// 自己发起时的代次，之后任何一处发现代次变了就立即作废——否则旧请求会在
+/// 用户已经收起窗口之后，才把内容粘回原窗口。
+///
+/// 只有两种转换会让代次变化：用户唤起（begin）、用户收起（cancel）。
+/// 粘贴请求自己隐藏窗口不算收起——那是请求在正常推进，由它认领目标后继续。
+///
+/// focused 记录"本次唤起的窗口已经获得过焦点"。Windows 上 tauri 的失焦事件来自
+/// WebView2 的 LostFocus 回调、经事件循环异步送达，一条上一次隐藏留下的失焦
+/// 可能晚于新一次显示才到。新会话在真正获焦之前不响应失焦收起，旧事件就
+/// 伤不到它
+#[derive(Debug, Default)]
+struct PasteSession {
+    generation: u64,
+    /// 唤起前的前台窗口；托盘 / 单实例唤起、已被认领或会话已作废时为 None
+    target: Option<PasteTarget>,
+    focused: bool,
+}
+
+impl PasteSession {
+    /// 新的一次唤起：代次递增，登记本次的粘贴目标。
+    ///
+    /// window_already_focused：唤起的那一刻窗口是否已经可见并持有焦点（窗口
+    /// 开着时又触发了一次单实例 / 托盘显示）。是则把现成的获焦状态带进新会话
+    /// ——对已获焦的窗口再 set_focus 不会再产生获焦事件，从 false 开始的话之后
+    /// 真实的失焦会被当成"还没获过焦"忽略，窗口不再自动收起。从隐藏状态唤起
+    /// 时传 false，等显示之后的首次获焦
+    fn begin(&mut self, target: Option<PasteTarget>, window_already_focused: bool) {
+        self.generation += 1;
+        self.target = target;
+        self.focused = window_already_focused;
+    }
+
+    /// 用户主动收起窗口：会话作废。代次也递增——途中的粘贴请求必须一起作废，
+    /// 否则用户按了 Esc 之后，还没走完的请求仍会把内容粘出去
+    fn cancel(&mut self) {
+        self.generation += 1;
+        self.target = None;
+        self.focused = false;
+    }
+
+    /// 粘贴请求隐藏了窗口之后认领目标，从此只有它可以注入。只有代次与目标
+    /// 都还是它发起时读到的那一份才成功；失败说明期间用户收起过窗口、
+    /// 重新唤起过、或目标已被别的请求认领，调用方必须就此停下
+    fn claim(&mut self, target: PasteTarget, generation: u64) -> bool {
+        if self.generation == generation && self.target == Some(target) {
+            self.target = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
+    /// 窗口获得了焦点（本次唤起以来的第一次，或用户点回窗口）
+    fn note_focused(&mut self) {
+        self.focused = true;
+    }
+
+    /// 本次唤起的窗口是否获得过焦点。没有获过焦就收到的失焦，不是本次的
+    fn been_focused(&self) -> bool {
+        self.focused
+    }
+
+    fn snapshot(&self) -> PasteSessionSnapshot {
+        PasteSessionSnapshot {
+            generation: self.generation,
+            has_target: self.target.is_some(),
+        }
+    }
+}
+
+/// 给前端的会话快照。前端把 generation 随粘贴请求带回：用户在第 N 次唤起的
+/// 窗口里按的 Enter，即使指令晚到一步，也不会被当成第 N+1 次唤起的请求
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PasteSessionSnapshot {
+    generation: u64,
+    has_target: bool,
+}
+
 #[derive(Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "status", rename_all = "snake_case")]
 enum CopyStatus {
+    /// 纯复制（无注入目标，或 hide=false 的界面内复制按钮）
     Copied,
-    Pasted,
-    PasteFailed,
+    /// 注入指令已完整发出（SendInput 4 事件全部送达系统队列）。
+    /// 不代表目标应用已插入——UIPI / 目标忽略快捷键不可观测
+    PasteSent,
+    /// 自动粘贴失败，剪贴板里已有内容，可手动 Ctrl+V
+    PasteFailed { reason: PasteFailReason },
+    /// 等待期间发生了新的唤起，本请求作废：未注入，也无需提示
+    Superseded,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PasteFailReason {
+    /// 隐藏主窗口失败（极少见）
+    HideFailed,
+    /// 注入瞬间无法确认前台是目标窗口：等焦点回归超时，或等修饰键期间又切走了
+    FocusLost,
+    /// 物理修饰键（Ctrl/Alt/Shift/Win）一直未释放，放弃注入防误触
+    ModifiersHeld,
+    /// SendInput 未完整送出 4 个事件
+    InjectFailed,
 }
 
 #[derive(Debug, serde::Serialize)]
 struct CopyResult {
+    /// flatten + 内部 tag：JSON 形状为 {"status":"copied"} /
+    /// {"status":"paste_failed","reason":"focus_lost"}，与前端
+    /// CopyResult 联合类型逐字段对齐（externally tagged 会嵌套一层
+    /// {"status":{"paste_failed":…}}，前端判不出失败）
+    #[serde(flatten)]
     status: CopyStatus,
 }
 
-/// 智能复制/注入：写剪贴板 → 隐藏窗口 → 等焦点回到快捷键按下时的前台窗口 → 注入。
-/// - 快捷键唤起时记住外部前台窗口：隐藏后焦点一旦回到该窗口，模拟 Ctrl+V 注入回去。
+/// 粘贴请求隐藏主窗口这一步的结果
+enum HidePhase {
+    /// 请求已过时（期间用户重新唤起或收起过窗口）：不再碰任何东西
+    Superseded,
+    /// 窗口没能隐藏：会话保持，用户可以重试
+    HideFailed,
+    /// 没有粘贴目标：隐藏窗口后纯复制
+    Copied,
+    /// 已认领目标，接下来等待注入
+    Claimed(PasteTarget),
+}
+
+/// 在 UI 线程里一口气完成"核对代次 → 隐藏窗口 → 认领目标"，并等它执行完。
+///
+/// 快捷键、托盘、失焦这些同样会改变会话的处理都跑在 UI 线程上，排不进这一步
+/// 的中间：过时的请求不会把新唤起的窗口藏掉，也认领不到别的会话的目标。
+/// 之所以必须去 UI 线程：在后台线程调 hide() 只是把隐藏消息排队，实际执行
+/// 可以晚于其后的一次唤起。
+async fn hide_and_claim(app: tauri::AppHandle, generation: u64) -> HidePhase {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let ui_thread_app = app.clone();
+    let dispatched = app.run_on_main_thread(move || {
+        let _ = tx.send(hide_and_claim_on_ui_thread(&ui_thread_app, generation));
+    });
+    if dispatched.is_err() {
+        return HidePhase::HideFailed;
+    }
+    // 闭包没跑（应用正在退出）或中途 panic，接收端都会得到 Err
+    rx.await.unwrap_or(HidePhase::HideFailed)
+}
+
+/// hide_and_claim 的 UI 线程部分，同步执行
+fn hide_and_claim_on_ui_thread(app: &tauri::AppHandle, generation: u64) -> HidePhase {
+    let state = app.state::<AppState>();
+    let target = {
+        let session = state.paste_session();
+        if !session.is_current(generation) {
+            return HidePhase::Superseded;
+        }
+        session.target
+    };
+    // 窗口会因这次隐藏而失焦：告诉失焦处理"这是粘贴请求造成的"，它只负责
+    // 用户主动离开的情形，不要在这里结束会话。标志用守卫复位——hide() 万一
+    // panic，也不能让失焦处理从此永远被跳过
+    struct ResetOnDrop<'a>(&'a AtomicBool);
+    impl Drop for ResetOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _reset_hiding = ResetOnDrop(&state.hiding_for_paste);
+    state.hiding_for_paste.store(true, Ordering::SeqCst);
+    let hidden = app
+        .get_webview_window("main")
+        .is_some_and(|win| win.hide().is_ok());
+    drop(_reset_hiding);
+    if !hidden {
+        return HidePhase::HideFailed;
+    }
+    let Some(target) = target else {
+        return HidePhase::Copied;
+    };
+    if state.paste_session().claim(target, generation) {
+        HidePhase::Claimed(target)
+    } else {
+        HidePhase::Superseded
+    }
+}
+
+/// 智能复制/注入：写剪贴板 → 隐藏窗口 → 等焦点回到唤起前的前台窗口 → 注入。
+/// - 注入目标来自唤起会话（PasteSession）：快捷键唤起时记下的外部前台窗口。
 ///   按窗口身份判定而非检测"是否文本输入"——UIA/caret 探测对 Chromium/WinUI3/
 ///   Electron 应用恒 false，会把可注入场景误判为纯复制
-/// - 未记住目标（窗口可见时按快捷键 toggle 隐藏、托盘/单实例唤起、非 Windows）：
-///   纯复制到剪贴板，不注入
+/// - 无目标（托盘/单实例唤起、非 Windows）：隐藏窗口后纯复制
 /// - hide=false（主窗口内按钮触发）：只写剪贴板，窗口保持可见，也不注入——
-///   焦点还在本窗口，注入会粘错地方
+///   焦点还在本窗口，注入会粘错地方；且不触碰会话
+/// - 请求绑定发起时的会话代次（generation 由前端带回）：此后只要用户重新
+///   唤起或收起过窗口，请求立即作废（Superseded）——既不会把新唤起的窗口
+///   藏起来，也不会在用户收起之后才把内容粘出去
+///
+/// 注入链路（有目标时）：UI 线程里核对代次 + 隐藏 + 认领 → 等前台回归
+/// （≤800ms，首次命中后 +40ms 稳定复核）→ 等物理修饰键释放（≤400ms，防
+/// Shift+Enter 注成 Ctrl+Shift+V）→ 持会话锁做最终核对并原子注入。
 ///
 /// mode 参数当前未区分转换（前端传 editingBody 原文），保留以兼容现有调用契约。
 #[tauri::command]
@@ -867,69 +1094,211 @@ async fn copy_or_paste(
     text: String,
     mode: String,
     hide: Option<bool>,
+    generation: Option<u64>,
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<CopyResult, String> {
     let _ = mode;
-    app.clipboard()
-        .write_text(&text)
-        .map_err(|e| e.to_string())?;
-    let target = state.take_last_hotkey_target_window();
     if !hide.unwrap_or(true) {
+        // 界面内的纯复制（以及快照未到时的退化路径）不涉及会话：
+        // 不需要代次，也不核对
+        app.clipboard()
+            .write_text(&text)
+            .map_err(|e| e.to_string())?;
         return Ok(CopyResult {
             status: CopyStatus::Copied,
         });
     }
-    let hidden = app
-        .get_webview_window("main")
-        .is_some_and(|win| win.hide().is_ok());
-    let restored = if let Some(target) = target.filter(|_| hidden) {
-        wait_for_foreground_window(
-            target,
-            std::time::Duration::from_millis(FOCUS_RESTORE_TIMEOUT_MS),
-            std::time::Duration::from_millis(FOCUS_RESTORE_POLL_MS),
+    // 会收起窗口的请求必须说明自己属于哪一次唤起。说不清（没带代次）的一律
+    // 不作数——否则旧窗口里按的 Enter 晚到一步，就会认领到新一次唤起的目标
+    let Some(generation) = generation else {
+        return Ok(CopyResult {
+            status: CopyStatus::Superseded,
+        });
+    };
+    // 代次对不上：按下 Enter 之后用户已经重新唤起或收起过，这次请求只属于上一次
+    if !state.paste_session().is_current(generation) {
+        return Ok(CopyResult {
+            status: CopyStatus::Superseded,
+        });
+    }
+    let superseded = || !state.paste_session().is_current(generation);
+    app.clipboard()
+        .write_text(&text)
+        .map_err(|e| e.to_string())?;
+    let target = match hide_and_claim(app.clone(), generation).await {
+        HidePhase::Superseded => {
+            return Ok(CopyResult {
+                status: CopyStatus::Superseded,
+            })
+        }
+        HidePhase::HideFailed => {
+            // 窗口没藏起来：会话未结束，目标保留供用户重试。有没有目标都按
+            // hide_failed 报——用户需要知道"窗口没按预期收起"
+            eprintln!("[粘贴] 隐藏主窗口失败");
+            return Ok(CopyResult {
+                status: CopyStatus::PasteFailed {
+                    reason: PasteFailReason::HideFailed,
+                },
+            });
+        }
+        HidePhase::Copied => {
+            return Ok(CopyResult {
+                status: CopyStatus::Copied,
+            })
+        }
+        HidePhase::Claimed(target) => target,
+    };
+    let focus_returned = wait_for_foreground_window(
+        target,
+        std::time::Duration::from_millis(FOCUS_RESTORE_TIMEOUT_MS),
+        std::time::Duration::from_millis(FOCUS_RESTORE_POLL_MS),
+        &superseded,
+    )
+    .await;
+    let Some(focus_returned) = focus_returned else {
+        return Ok(CopyResult {
+            status: CopyStatus::Superseded,
+        });
+    };
+    let modifiers_released = if focus_returned {
+        wait_for_modifier_release(
+            std::time::Duration::from_millis(MODIFIER_RELEASE_TIMEOUT_MS),
+            std::time::Duration::from_millis(MODIFIER_RELEASE_POLL_MS),
+            &superseded,
         )
         .await
     } else {
-        false
+        Some(false)
     };
-    Ok(finish_copy(target.is_some(), hidden, restored, || {
-        simulate_paste().map_err(|e| e.to_string())
-    }))
+    let Some(modifiers_released) = modifiers_released else {
+        return Ok(CopyResult {
+            status: CopyStatus::Superseded,
+        });
+    };
+    // 最终提交：核对代次、核对前台与修饰键、发出按键，全程持有会话锁。新的
+    // 唤起要么排在这之前（被 is_current 发现，请求作废），只能排在这之后——
+    // 不会夹在"核对完"和"发出去"之间
+    let mut inject_error = None;
+    let (session_current, focus_on_target, modifiers_ok, status) = {
+        let session = state.paste_session();
+        let session_current = session.is_current(generation);
+        // SendInput 无法定向到 HWND，只能发给此刻的前台窗口，所以注入前最后
+        // 核对一次：等修饰键期间用户切走了就放弃——宁可让用户手动 Ctrl+V，
+        // 也不粘进别的窗口。修饰键同样紧贴注入再查一次
+        let focus_on_target = foreground_is_target_window(target);
+        let modifiers_ok = modifiers_released && physical_modifiers_released();
+        let status = final_verdict(
+            session_current,
+            focus_returned,
+            modifiers_ok,
+            focus_on_target,
+            // 锁内只记下错误文本，日志到锁外面再写
+            || {
+                simulate_paste().map_err(|e| {
+                    inject_error = Some(e.to_string());
+                    e.to_string()
+                })
+            },
+        );
+        (session_current, focus_on_target, modifiers_ok, status)
+    };
+    // 诊断日志（tauri dev 控制台可见）：只记原因与预算，不记提示词内容
+    if let Some(error) = inject_error {
+        eprintln!("[粘贴] {error}");
+    } else if !session_current {
+        eprintln!("[粘贴] 等待期间用户重新唤起或收起了窗口，本请求作废");
+    } else if !focus_returned {
+        eprintln!("[粘贴] 焦点未在 {FOCUS_RESTORE_TIMEOUT_MS}ms 内回到目标窗口，未注入");
+    } else if !modifiers_released {
+        eprintln!("[粘贴] 物理修饰键 {MODIFIER_RELEASE_TIMEOUT_MS}ms 内未释放，未注入");
+    } else if !modifiers_ok {
+        // 等待时松开了、注入前又被按下（比如用户开始按下一次快捷键）
+        eprintln!("[粘贴] 注入前修饰键又被按下，未注入");
+    } else if !focus_on_target {
+        eprintln!("[粘贴] 等待修饰键期间前台窗口已切换，未注入");
+    }
+    Ok(CopyResult { status })
 }
 
-fn finish_copy(
-    should_paste: bool,
-    hidden: bool,
-    restored: bool,
+/// 注入前的最终裁定（纯函数，覆盖真实流程里窗口隐藏之后的全部归因）。
+/// 按发生顺序短路：请求已过时 → 焦点没回来 → 修饰键没松 → 注入瞬间前台已不是
+/// 目标 → 才真正注入。"已过时"排在最前：用户都已经重新操作了，这个请求的
+/// 超时与否不值得再提示
+fn final_verdict(
+    session_current: bool,
+    focus_returned: bool,
+    modifiers_released: bool,
+    focus_on_target: bool,
     inject: impl FnOnce() -> Result<(), String>,
-) -> CopyResult {
-    let status = if !should_paste {
-        CopyStatus::Copied
-    } else if !hidden || !restored || inject().is_err() {
-        CopyStatus::PasteFailed
-    } else {
-        CopyStatus::Pasted
-    };
-    CopyResult { status }
+) -> CopyStatus {
+    if !session_current {
+        return CopyStatus::Superseded;
+    }
+    if !focus_returned {
+        return CopyStatus::PasteFailed {
+            reason: PasteFailReason::FocusLost,
+        };
+    }
+    if !modifiers_released {
+        return CopyStatus::PasteFailed {
+            reason: PasteFailReason::ModifiersHeld,
+        };
+    }
+    if !focus_on_target {
+        return CopyStatus::PasteFailed {
+            reason: PasteFailReason::FocusLost,
+        };
+    }
+    match inject() {
+        Ok(()) => CopyStatus::PasteSent,
+        Err(_) => CopyStatus::PasteFailed {
+            reason: PasteFailReason::InjectFailed,
+        },
+    }
 }
 
 /// 轮询等待系统前台窗口回到 target（或其子窗口）。
+/// - 首次命中后等满 FOCUS_STABLE_DELAY_MS 再复核一次：前台 HWND 恢复只代表
+///   窗口激活，应用内部焦点（网页 activeElement / 编辑器 caret）可能尚未
+///   就绪；复核失败回到轮询，避免注入过早被目标丢弃
+/// - 剩余预算不够一次完整复核时按超时处理，不拿缩短的复核冒充成功
+/// - superseded() 为 true 表示等待期间发生了新的唤起：立即放弃，返回 None
 async fn wait_for_foreground_window(
     target: PasteTarget,
     timeout: std::time::Duration,
     poll: std::time::Duration,
-) -> bool {
-    let started = std::time::Instant::now();
+    superseded: impl Fn() -> bool,
+) -> Option<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    let stable = std::time::Duration::from_millis(FOCUS_STABLE_DELAY_MS);
     loop {
+        if superseded() {
+            return None;
+        }
+        let now = std::time::Instant::now();
         if foreground_is_target_window(target) {
-            return true;
+            if deadline.saturating_duration_since(now) < stable {
+                return Some(false);
+            }
+            tokio::time::sleep(stable).await;
+            if superseded() {
+                return None;
+            }
+            // 复核通过且没有因调度延迟越过截止时间才算恢复
+            if foreground_is_target_window(target) && std::time::Instant::now() <= deadline {
+                return Some(true);
+            }
+            // 复核失败（前台闪到别的窗口又回来）：继续轮询，不重置计时
+        } else if now >= deadline {
+            return Some(false);
         }
-        let elapsed = started.elapsed();
-        if elapsed >= timeout {
-            return false;
-        }
-        tokio::time::sleep(std::cmp::min(poll, timeout - elapsed)).await;
+        tokio::time::sleep(
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(poll),
+        )
+        .await;
     }
 }
 
@@ -994,19 +1363,38 @@ fn foreground_is_target_window(_target: PasteTarget) -> bool {
 /// 这种情况下不应该 hide，否则窗口会"闪一下消失"。
 #[cfg(windows)]
 fn is_window_in_foreground(win: &tauri::Window) -> bool {
+    // hwnd() 在 Windows 上返回 Result<HWND>，Err 说明窗口未就绪
+    win.hwnd().is_ok_and(hwnd_is_foreground)
+}
+
+/// 该窗口句柄（或其子窗口）当前是否为系统前台窗口
+#[cfg(windows)]
+fn hwnd_is_foreground(hwnd: windows::Win32::Foundation::HWND) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsChild};
 
-    // hwnd() 在 Windows 上返回 Result<HWND>，Err 说明窗口未就绪
-    let Ok(our_hwnd) = win.hwnd() else {
-        return false;
-    };
     let foreground = unsafe { GetForegroundWindow() };
     if foreground.is_invalid() {
         return false;
     }
-    let is_same = foreground == our_hwnd;
-    let is_child = unsafe { IsChild(our_hwnd, foreground).as_bool() };
+    let is_same = foreground == hwnd;
+    let is_child = unsafe { IsChild(hwnd, foreground).as_bool() };
     foreground_matches_window(is_same, is_child)
+}
+
+/// 主窗口此刻是否就是系统前台窗口。开启新会话时用它判断"窗口是否已经获焦"：
+/// 这是不受 WebView 异步焦点回调影响的实时判据——拖拽 / 缩放造成的伪失焦
+/// 可能让缓存的获焦位暂时是 false，而窗口其实一直在前台。
+/// 非 Windows 没有等价的可靠判据，恒为 false（调用方会回退到缓存的获焦位）
+fn is_in_foreground(win: &tauri::WebviewWindow) -> bool {
+    #[cfg(windows)]
+    {
+        win.hwnd().is_ok_and(hwnd_is_foreground)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = win;
+        false
+    }
 }
 
 #[cfg(not(windows))]
@@ -1019,68 +1407,160 @@ fn foreground_matches_window(is_same_window: bool, is_child_window: bool) -> boo
     is_same_window || is_child_window
 }
 
-/// 用 enigo 模拟一次 Ctrl+V 粘贴（跨平台，macOS 需改 Meta，此处先支持 Windows/Linux）。
-/// 修饰键用 RAII guard 持有：V 敲击失败或 panic 时 Drop 无条件释放修饰键——
-/// 否则系统级 VK_CONTROL 卡在按下态，鼠标点选变多选、滚轮变缩放，只能手动敲物理键解救。
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+/// Windows 键盘注入（Win32 SendInput）。
+///
+/// 独立成模块是为了让"发出去的到底是什么事件"成为可单测的纯函数：
+/// 事件 type 填错时 SendInput 照样返回成功，运行期根本发现不了。
+///
+/// 为什么不用 enigo 的 `Key::Unicode('v')`：它映射成功时强制附加
+/// KEYEVENTF_SCANCODE（按前台窗口的键盘布局解释扫描码），映射失败时回退
+/// KEYEVENTF_UNICODE / VK_PACKET（多数应用不认 Ctrl+VK_PACKET）——两种情况
+/// 都会被部分应用整次吞掉。这里只发显式 VK_V 虚拟键码。
+#[cfg(target_os = "windows")]
+mod paste_input {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        VIRTUAL_KEY, VK_CONTROL, VK_V,
+    };
 
-    struct ModifierGuard(Enigo);
-    impl ModifierGuard {
-        fn press(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            self.0.key(Key::Control, Direction::Press)?;
-            Ok(())
-        }
-        fn tap(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            self.0.key(Key::Unicode('v'), Direction::Click)?;
-            Ok(())
+    /// 一个键盘事件。INPUT_KEYBOARD = 1（INPUT_MOUSE 才是 0）：类型错填会被
+    /// 系统按鼠标事件解释，返回值照样是 4，但按键从未发生
+    fn keyboard_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: vk,
+                    wScan: 0,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
         }
     }
-    impl Drop for ModifierGuard {
-        fn drop(&mut self) {
-            let _ = self.0.key(Key::Control, Direction::Release);
-        }
+
+    /// 一次 Ctrl+V 的完整序列：Ctrl↓ V↓ V↑ Ctrl↑
+    pub(super) fn paste_events() -> [INPUT; 4] {
+        [
+            keyboard_input(VK_CONTROL, KEYBD_EVENT_FLAGS::default()),
+            keyboard_input(VK_V, KEYBD_EVENT_FLAGS::default()),
+            keyboard_input(VK_V, KEYEVENTF_KEYUP),
+            keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
+        ]
     }
 
-    // Enigo::new 失败时修饰键尚未按下，无需 guard
-    let mut guard = ModifierGuard(Enigo::new(&Settings::default())?);
-    guard.press()?;
-    guard.tap()?;
-    Ok(())
+    /// 提交整批按键并按送达数善后。`send` 可替换，便于单测 0~4 各种送达数。
+    ///
+    /// 返回值 < 4 说明有事件没进系统队列（典型是 UIPI：目标进程权限更高）：
+    /// - 0 个送达：没有键被按下，直接报错
+    /// - 部分送达：已送达的是数组前缀，补发其中还没抬起的键。先放 Ctrl 再放 V
+    ///   ——Ctrl 卡在按下态的后果（点选变多选、滚轮变缩放）比 V 严重
+    pub(super) fn dispatch(send: impl Fn(&[INPUT]) -> u32) -> Result<(), String> {
+        let events = paste_events();
+        let sent = send(&events) as usize;
+        if sent == events.len() {
+            return Ok(());
+        }
+        if sent == 0 {
+            return Err("SendInput 0/4：注入被系统拒绝（目标进程权限更高？）".into());
+        }
+        let release = [
+            keyboard_input(VK_CONTROL, KEYEVENTF_KEYUP),
+            keyboard_input(VK_V, KEYEVENTF_KEYUP),
+        ];
+        // 已送达的是数组前缀，按其中还按着的键补发释放：
+        // 1 个 = 只有 Ctrl↓；2 个 = Ctrl↓ V↓；3 个 = V 已抬起，只差 Ctrl↑
+        let to_release = if sent == 2 { 2 } else { 1 };
+        let released = send(&release[..to_release]) as usize;
+        Err(format!(
+            "SendInput 仅送达 {sent}/{} 个事件，补发释放 {released}/{to_release}",
+            events.len()
+        ))
+    }
+
+    /// 在同一次 SendInput 调用里提交整个序列（原子）：分批注入会被目标应用的
+    /// 消息循环 / 全局钩子交错，出现"只按了 Ctrl"的半序列
+    pub(super) fn send_paste() -> Result<(), String> {
+        let size = std::mem::size_of::<INPUT>() as i32;
+        dispatch(|batch| unsafe { SendInput(batch, size) })
+    }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "windows")]
 fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+    paste_input::send_paste().map_err(Into::into)
+}
 
-    struct ModifierGuard(Enigo);
-    impl ModifierGuard {
-        fn press(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            self.0.key(Key::Meta, Direction::Press)?;
-            Ok(())
-        }
-        fn tap(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-            self.0.key(Key::Meta, Direction::Click)?;
-            Ok(())
-        }
-    }
-    impl Drop for ModifierGuard {
-        fn drop(&mut self) {
-            let _ = self.0.key(Key::Meta, Direction::Release);
-        }
-    }
+/// 非 Windows 平台不可达：foreground_window_handle 恒返回 None，
+/// copy_or_paste 永远走纯复制分支。保留签名让主流程无条件编译。
+#[cfg(not(target_os = "windows"))]
+fn simulate_paste() -> Result<(), Box<dyn std::error::Error>> {
+    Err("自动粘贴仅支持 Windows".into())
+}
 
-    let mut guard = ModifierGuard(Enigo::new(&Settings::default())?);
-    guard.press()?;
-    guard.tap()?;
-    Ok(())
+/// 物理修饰键（Ctrl/Alt/Shift/Win）当前是否全部处于释放态。
+/// 用 GetAsyncKeyState 而非消息队列：注入前的物理键状态只有异步状态表知道。
+#[cfg(target_os = "windows")]
+fn physical_modifiers_released() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+    let pressed = |vk: i32| unsafe { GetAsyncKeyState(vk) as u16 & 0x8000 != 0 };
+    !(pressed(VK_CONTROL.0 as i32)
+        || pressed(VK_MENU.0 as i32)
+        || pressed(VK_SHIFT.0 as i32)
+        || pressed(VK_LWIN.0 as i32)
+        || pressed(VK_RWIN.0 as i32))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn physical_modifiers_released() -> bool {
+    true
+}
+
+/// 注入前等待物理修饰键释放：Shift+Enter 调用时 Shift 常仍按着，
+/// 直接注入会变成 Ctrl+Shift+V（部分应用 = 无格式粘贴，部分 = 无动作）。
+/// 超时放弃注入，绝不替用户释放物理键；超过截止时间才松开的不算数。
+/// superseded() 为 true 表示等待期间发生了新的唤起：立即放弃，返回 None。
+async fn wait_for_modifier_release(
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+    superseded: impl Fn() -> bool,
+) -> Option<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if superseded() {
+            return None;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Some(false);
+        }
+        if physical_modifiers_released() {
+            return Some(true);
+        }
+        tokio::time::sleep(
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(poll),
+        )
+        .await;
+    }
 }
 
 #[tauri::command]
-fn hide_window(app: tauri::AppHandle) -> Result<(), String> {
+fn hide_window(generation: Option<u64>, app: tauri::AppHandle) -> Result<(), String> {
+    // Esc 必须说明自己是哪一次唤起里按下的，说不清的不执行：一次晚到的旧 Esc
+    // 不能把现在这一次唤起的窗口收起
+    let state = app.state::<AppState>();
+    if !generation.is_some_and(|seen| state.paste_session().is_current(seen)) {
+        return Ok(());
+    }
     if let Some(win) = app.get_webview_window("main") {
         win.hide().map_err(|e| e.to_string())?;
+        // Esc 收起 = 用户主动结束会话：清掉粘贴目标（下次托盘/单实例唤起不得
+        // 把内容注进早已不相关的旧窗口），途中的粘贴请求一并作废
+        state.cancel_paste_session();
     }
     Ok(())
 }
@@ -1528,31 +2008,57 @@ fn seed_sample_prompts(dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// 唤起主窗口：显示 + 聚焦 + 通知前端（前端把焦点放进搜索框，兑现
-/// 「唤出→直接打字」的核心链路；普通点击窗口获得焦点不发此事件，不抢焦点）
-fn show_main_window(app: &tauri::AppHandle) {
+/// 把"唤起 / 收起"的判定与执行放到 UI 线程。各平台回调快捷键、单实例的线程
+/// 并不相同（Windows 上两者都在 UI 线程；Linux 的快捷键、Linux / macOS 的
+/// 单实例不在），统一排到这里，会话变更与窗口显隐才不会互相交错。
+/// 调用方已在 UI 线程时立即执行，没有延迟
+fn on_ui_thread(app: &tauri::AppHandle, task: impl FnOnce(&tauri::AppHandle) + Send + 'static) {
+    let task_app = app.clone();
+    let _ = app.run_on_main_thread(move || task(&task_app));
+}
+
+/// 唤起主窗口：开启新的唤起会话 → 显示 + 聚焦 + 通知前端（前端把焦点放进
+/// 搜索框，兑现「唤出→直接打字」的核心链路；普通点击窗口获得焦点不发此事件）。
+///
+/// target 是唤起前的前台窗口（快捷键唤起时记录）；托盘 / 单实例唤起传 None。
+/// 开启新会话的同时，上一轮还在等待的粘贴请求就此作废
+fn show_main_window(app: &tauri::AppHandle, target: Option<PasteTarget>) {
+    let snapshot = app.state::<AppState>().begin_paste_session(app, target);
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
     let _ = win.show();
     let _ = win.set_focus();
-    let _ = app.emit("window-shown", ());
+    // 快照随事件带给前端：这次唤起的代次（之后发起粘贴请求时带回）与
+    // "Enter 会粘贴还是只复制"
+    let _ = app.emit("window-shown", snapshot);
 }
 
-fn toggle_main_window(app: &tauri::AppHandle) {
+/// 快捷键、托盘左键的唤起：先定位到鼠标所在屏幕再显示
+fn summon_main_window(app: &tauri::AppHandle, target: Option<PasteTarget>) {
+    // 多屏跟随鼠标定位：找到鼠标所在的显示器，在该屏居中显示
+    if let Some(win) = app.get_webview_window("main") {
+        position_window_at_cursor(&win);
+    }
+    show_main_window(app, target);
+}
+
+/// 收起主窗口：隐藏成功才结束当前唤起会话。失败时窗口仍可见、会话保持，
+/// 用户可以重试——不能在还不知道结果的时候就先把粘贴目标清掉
+fn hide_main_window(app: &tauri::AppHandle) {
     let Some(win) = app.get_webview_window("main") else {
         return;
     };
-    match win.is_visible() {
-        Ok(true) => {
-            let _ = win.hide();
-        }
-        _ => {
-            // 多屏跟随鼠标定位：找到鼠标所在的显示器，在该屏居中显示
-            position_window_at_cursor(&win);
-            show_main_window(app);
-        }
+    if win.hide().is_err() {
+        eprintln!("[窗口] 隐藏主窗口失败");
+        return;
     }
+    app.state::<AppState>().cancel_paste_session();
+}
+
+fn is_main_window_visible(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main")
+        .is_some_and(|win| win.is_visible().unwrap_or(false))
 }
 
 /// 把窗口定位到鼠标光标所在的显示器中央（支持多屏）
@@ -1636,11 +2142,16 @@ pub fn run() {
     tauri::Builder::default()
         // 单实例锁必须最先注册：第二实例启动时唤起已有窗口，而不是新开进程
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // 用户再次双击 exe 时走到这里：聚焦到已有窗口
-            show_main_window(app);
+            // 用户再次双击 exe 时走到这里：聚焦到已有窗口。
+            // 双击唤起没有"唤起前前台窗口"语义：不开粘贴目标（Enter 只纯复制）。
+            // Windows 上这个回调就在 UI 线程，Linux / macOS 上不在：统一交给
+            // on_ui_thread，两种情况都排进同一顺序
+            on_ui_thread(app, |app| show_main_window(app, None));
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        // 自动粘贴失败时发系统通知：主窗口已隐藏，应用内 toast 用户看不到
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // 开机自启动：Windows 写注册表 Run 键 / macOS LaunchAgent；参数 None = 不带参数启动
         .plugin(tauri_plugin_autostart::init(
@@ -1666,7 +2177,9 @@ pub fn run() {
                 last_sync: Mutex::new(None),
                 last_error: Mutex::new(None),
                 io_gate: Mutex::new(IoGate::default()),
-                last_hotkey_target_window: Mutex::new(None),
+                paste_session: Mutex::new(PasteSession::default()),
+                hiding_for_paste: AtomicBool::new(false),
+                window_focused: AtomicBool::new(false),
                 hotkey: tokio::sync::Mutex::new(hotkey.clone()),
                 preferences_file,
                 interaction_locked: AtomicBool::new(false),
@@ -1700,12 +2213,22 @@ pub fn run() {
                         ..
                     } = event
                     {
-                        toggle_main_window(tray.app_handle());
+                        // 左键单击切换窗口显隐。显隐只在这里判定一次：收起要等
+                        // 隐藏成功才结束会话，唤起才登记新会话（托盘唤起无原窗口）
+                        on_ui_thread(tray.app_handle(), |app| {
+                            if is_main_window_visible(app) {
+                                hide_main_window(app);
+                            } else {
+                                summon_main_window(app, None);
+                            }
+                        });
                     }
                 })
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
-                        "show" => show_main_window(app),
+                        "show" => {
+                            on_ui_thread(app, |app| show_main_window(app, None));
+                        }
                         "quit" => {
                             app.exit(0);
                         }
@@ -1741,21 +2264,58 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::Focused(false) = event {
-                if window.app_handle().state::<AppState>().interaction_locked.load(Ordering::SeqCst) {
-                    return;
+            let state = window.app_handle().state::<AppState>();
+            match event {
+                WindowEvent::Focused(true) => {
+                    state.window_focused.store(true, Ordering::SeqCst);
+                    // 窗口可见时的获焦，才算"本次唤起的窗口已经获焦"
+                    if window.is_visible().unwrap_or(false) {
+                        state.paste_session().note_focused();
+                    }
                 }
-                // 首次启动豁免：第一次失焦不隐藏，让用户看清界面、可以自由点别处。
-                // 之后的失焦恢复正常的"贴入式"行为（点外部即收起）。
-                if FIRST_RUN_SUPPRESS_BLUR_HIDE.swap(false, Ordering::SeqCst) {
-                    return;
+                WindowEvent::Focused(false) => {
+                    if state.interaction_locked.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    // 粘贴请求正在隐藏窗口：这次失焦是它自己造成的，会话由它
+                    // 接着认领，这里不插手
+                    if state.hiding_for_paste.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    // 本次唤起的窗口还没获得过焦点：这条失焦是上一次隐藏留下的
+                    // 旧事件。tauri 在 Windows 上的失焦来自 WebView2 的回调、经
+                    // 事件循环异步送达，可能晚于其后的新一次显示才到这里
+                    if !state.paste_session().been_focused() {
+                        return;
+                    }
+                    // 以下两种是"伪失焦"，不算用户离开，也不消耗首次启动的豁免。
+                    // 拖拽 / 缩放窗口时 WebView 会误报失焦，但此时窗口仍为前台窗口
+                    // （系统处于 move/size 模态）。这种情况不能 hide，否则窗口闪一下消失。
+                    if is_window_in_foreground(window) {
+                        return;
+                    }
+                    // 窗口已经不可见：这次失焦来自本进程自己的某次隐藏（Esc、快捷键
+                    // 收起等），那条路径已经结束了会话
+                    if !window.is_visible().unwrap_or(true) {
+                        return;
+                    }
+                    // 走到这里说明是一次真实的失焦，才清掉缓存的获焦位。上面那些
+                    // 提前返回的都是"不算用户离开"的事件（粘贴请求自己隐藏、旧事件、
+                    // 拖拽 / 缩放的伪失焦、窗口已不可见），窗口此刻多半仍在前台，
+                    // 清掉会让下一次"窗口开着时再唤起"误判成还没获焦
+                    state.window_focused.store(false, Ordering::SeqCst);
+                    // 首次启动豁免：第一次失焦不隐藏，让用户看清界面、可以自由点别处。
+                    // 之后的失焦恢复正常的"贴入式"行为（点外部即收起）。
+                    if FIRST_RUN_SUPPRESS_BLUR_HIDE.swap(false, Ordering::SeqCst) {
+                        return;
+                    }
+                    // 用户点了别的窗口：自动收起并结束会话——目标不残留，
+                    // 途中的粘贴请求也一并作废
+                    if window.hide().is_ok() {
+                        state.cancel_paste_session();
+                    }
                 }
-                // 拖拽 / 缩放窗口时 WebView 会误报失焦，但此时窗口仍为前台窗口
-                // （系统处于 move/size 模态）。这种情况不能 hide，否则窗口闪一下消失。
-                if is_window_in_foreground(window) {
-                    return;
-                }
-                let _ = window.hide();
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1772,6 +2332,7 @@ pub fn run() {
             reorder_categories,
             copy_text,
             copy_or_paste,
+            get_paste_session,
             hide_window,
             get_hotkey,
             set_hotkey,
@@ -1875,28 +2436,228 @@ mod tests {
         assert!(parse_hotkey(GLOBAL_HOTKEY).is_ok());
     }
 
+    /// 注入内容的契约：4 个键盘类型事件、顺序 Ctrl↓ V↓ V↑ Ctrl↑、只带虚拟键码。
+    /// 事件 type 填错（INPUT_MOUSE 而非 INPUT_KEYBOARD）时 SendInput 照样返回
+    /// "成功"，实机上也只是"没粘贴"——这个单测是唯一能确定拦住它的地方
     #[test]
-    fn copy_success_is_preserved_when_hiding_focus_or_injection_fails() {
+    #[cfg(windows)]
+    fn paste_sequence_is_four_keyboard_events_with_virtual_key_codes_only() {
+        use super::paste_input::paste_events;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_KEYBOARD, INPUT_MOUSE, KEYEVENTF_KEYUP,
+        };
+        assert_eq!(INPUT_MOUSE.0, 0);
+        assert_eq!(INPUT_KEYBOARD.0, 1);
+
+        let detail = |event: &INPUT| unsafe {
+            (
+                event.r#type,
+                event.Anonymous.ki.wVk.0,
+                event.Anonymous.ki.wScan,
+                event.Anonymous.ki.dwFlags.0,
+            )
+        };
+        let events = paste_events();
+        let (vk_control, vk_v, released) = (0x11u16, 0x56u16, KEYEVENTF_KEYUP.0);
+        assert_eq!(detail(&events[0]), (INPUT_KEYBOARD, vk_control, 0, 0));
+        assert_eq!(detail(&events[1]), (INPUT_KEYBOARD, vk_v, 0, 0));
+        assert_eq!(detail(&events[2]), (INPUT_KEYBOARD, vk_v, 0, released));
         assert_eq!(
-            finish_copy(false, false, false, || panic!("must not paste")).status,
-            CopyStatus::Copied
+            detail(&events[3]),
+            (INPUT_KEYBOARD, vk_control, 0, released)
+        );
+    }
+
+    #[test]
+    fn copy_result_json_matches_frontend_contract() {
+        // 前端 CopyResult 是联合类型 {status:"copied"} | {status:"paste_sent"} |
+        // {status:"paste_failed", reason:...}：serde 的 tag+flatten 输出必须
+        // 逐字符对齐，任何嵌套形状（externally tagged 默认）前端都判不出失败
+        let json = serde_json::to_string(&CopyResult {
+            status: CopyStatus::Copied,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"status":"copied"}"#);
+        let json = serde_json::to_string(&CopyResult {
+            status: CopyStatus::PasteSent,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"status":"paste_sent"}"#);
+        let json = serde_json::to_string(&CopyResult {
+            status: CopyStatus::PasteFailed {
+                reason: PasteFailReason::FocusLost,
+            },
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"status":"paste_failed","reason":"focus_lost"}"#);
+        let json = serde_json::to_string(&CopyResult {
+            status: CopyStatus::Superseded,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"status":"superseded"}"#);
+        // 给前端的会话快照同样是 IPC 契约：字段名 camelCase，generation 是数字
+        let json = serde_json::to_string(&PasteSessionSnapshot {
+            generation: 7,
+            has_target: true,
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"generation":7,"hasTarget":true}"#);
+    }
+
+    /// 窗口隐藏之后的归因顺序：任何一步不通过都不注入
+    #[test]
+    fn paste_verdict_short_circuits_in_order() {
+        use PasteFailReason::{FocusLost, InjectFailed, ModifiersHeld};
+        fn never() -> Result<(), String> {
+            panic!("must not paste")
+        }
+        let verdict = |session_current, focus_returned, modifiers_released, focus_on_target| {
+            final_verdict(
+                session_current,
+                focus_returned,
+                modifiers_released,
+                focus_on_target,
+                never,
+            )
+        };
+        // 请求已过时优先于一切超时归因：用户都已经重新操作了，
+        // 这个请求当时是超时还是没松键都不值得再提示
+        assert_eq!(verdict(false, false, false, false), CopyStatus::Superseded);
+        assert_eq!(verdict(false, true, false, true), CopyStatus::Superseded);
+        // 焦点没在预算内回到原窗口（此时不会再去等修饰键）
+        assert_eq!(
+            verdict(true, false, false, true),
+            CopyStatus::PasteFailed { reason: FocusLost }
+        );
+        // 焦点回来了，但物理修饰键没松（或松开后、注入前又被按下）
+        assert_eq!(
+            verdict(true, true, false, true),
+            CopyStatus::PasteFailed {
+                reason: ModifiersHeld
+            }
+        );
+        // 会话仍在，但注入瞬间前台已经不是目标窗口
+        assert_eq!(
+            verdict(true, true, true, false),
+            CopyStatus::PasteFailed { reason: FocusLost }
+        );
+        // 全部通过才注入；注入指令没完整发出要如实上报
+        assert_eq!(
+            final_verdict(true, true, true, true, || Err("send failed".into())),
+            CopyStatus::PasteFailed {
+                reason: InjectFailed
+            }
         );
         assert_eq!(
-            finish_copy(true, false, true, || panic!("must not paste")).status,
-            CopyStatus::PasteFailed
+            final_verdict(true, true, true, true, || Ok(())),
+            CopyStatus::PasteSent
         );
+    }
+
+    /// 会话代次要能分清三件事：用户收起窗口、同一个窗口被再次唤起、
+    /// 粘贴请求自己隐藏窗口。前两者让在途请求作废，第三种不算
+    #[test]
+    fn paste_session_distinguishes_cancel_reinvoke_and_own_hide() {
+        let a = PasteTarget {
+            window: 42,
+            process_id: 7,
+        };
+        let mut session = PasteSession::default();
+
+        // 从 A 唤起，粘贴请求记下此时的代次与目标
+        session.begin(Some(a), false);
+        let request = session.generation;
         assert_eq!(
-            finish_copy(true, true, false, || panic!("must not paste")).status,
-            CopyStatus::PasteFailed
+            session.snapshot(),
+            PasteSessionSnapshot {
+                generation: request,
+                has_target: true,
+            }
         );
-        assert_eq!(
-            finish_copy(true, true, true, || Err("injection failed".into())).status,
-            CopyStatus::PasteFailed
-        );
-        assert_eq!(
-            finish_copy(true, true, true, || Ok(())).status,
-            CopyStatus::Pasted
-        );
+
+        // 情形一：请求还在写剪贴板，用户就按 Esc 收起了窗口。
+        // 请求之后必须发现自己已过时——认领不了，更不能注入
+        session.cancel();
+        assert!(!session.is_current(request), "用户收起后，在途请求必须作废");
+        assert!(!session.claim(a, request), "收起后目标已清，认领必须失败");
+
+        // 情形二：再从 A 唤起（同一个窗口，句柄完全相同）。旧代次来认领要被拒，
+        // 且不能误删新会话的目标；新请求可以认领，且只认领一次
+        session.begin(Some(a), false);
+        let fresh = session.generation;
+        assert!(fresh > request, "每次唤起 / 收起代次都递增");
+        assert!(!session.claim(a, request), "旧代次不得认领新会话的目标");
+        assert!(session.snapshot().has_target);
+        assert!(session.claim(a, fresh), "本次唤起的请求可以认领");
+        assert!(!session.snapshot().has_target, "目标只认领一次");
+        // 请求自己隐藏窗口不是收起：认领之后代次不变，请求仍然有效
+        assert!(session.is_current(fresh));
+        assert!(!session.claim(a, fresh), "同一目标不能被认领两次");
+
+        // 情形三：请求等待期间用户又按了快捷键（还是从 A）：旧请求作废，
+        // 新会话带着自己的目标
+        session.begin(Some(a), false);
+        assert!(!session.is_current(fresh));
+        assert!(session.snapshot().has_target);
+
+        // 情形四：上一次隐藏留下的失焦事件，晚于新一次显示才被处理。
+        // 新会话的窗口还没获过焦，这条失焦不是它的，不能据此把新窗口收起；
+        // 获焦之后的失焦才算是本次的
+        session.cancel();
+        assert!(!session.been_focused());
+        session.begin(Some(a), false);
+        assert!(!session.been_focused(), "从隐藏状态唤起：窗口还没获焦");
+        session.note_focused();
+        assert!(session.been_focused(), "获焦之后，失焦才是本次的");
+
+        // 情形五：窗口开着且已获焦时又唤起一次（单实例 / 托盘显示）。
+        // WebView2 不会再发获焦事件，现成的获焦状态要带进新会话——
+        // 否则之后真实的失焦会被当成"还没获过焦"忽略
+        session.begin(Some(a), true);
+        assert!(session.been_focused(), "已获焦的窗口再次唤起，获焦状态保留");
+    }
+
+    /// SendInput 只送达一部分时的善后：按已送达的前缀补发释放，Ctrl 优先
+    #[test]
+    #[cfg(windows)]
+    fn partial_delivery_releases_ctrl_first() {
+        use super::paste_input::{dispatch, paste_events};
+        use std::cell::RefCell;
+        let total = paste_events().len();
+        for (delivered, expected_follow_up) in [
+            // 全被拒：没有键按下，不补发
+            (0, vec![]),
+            // 只送达 Ctrl↓：只补 Ctrl↑
+            (1, vec![(0x11u16, 2u32)]),
+            // Ctrl↓ V↓ 已送达：补 Ctrl↑ V↑（先放 Ctrl）
+            (2, vec![(0x11, 2), (0x56, 2)]),
+            // V 已经抬起，只差 Ctrl↑：不重复发 V↑
+            (3, vec![(0x11, 2)]),
+        ] {
+            let follow_up = RefCell::new(Vec::new());
+            let result = dispatch(|batch| {
+                if batch.len() == total {
+                    return delivered as u32;
+                }
+                *follow_up.borrow_mut() = batch
+                    .iter()
+                    .map(|event| unsafe {
+                        (event.Anonymous.ki.wVk.0, event.Anonymous.ki.dwFlags.0)
+                    })
+                    .collect();
+                batch.len() as u32
+            });
+            assert!(result.is_err(), "送达 {delivered} 个应报错");
+            assert_eq!(follow_up.into_inner(), expected_follow_up);
+        }
+        // 整批送达：成功，且不再补发任何键
+        let sent_events = RefCell::new(0);
+        assert!(dispatch(|batch| {
+            *sent_events.borrow_mut() += batch.len();
+            batch.len() as u32
+        })
+        .is_ok());
+        assert_eq!(sent_events.into_inner(), total);
     }
 
     #[test]
@@ -2068,7 +2829,9 @@ mod tests {
         let poll_ms = FOCUS_RESTORE_POLL_MS;
         let timeout_ms = FOCUS_RESTORE_TIMEOUT_MS;
         assert!(poll_ms <= 10);
-        assert!(timeout_ms <= 500);
+        // 800ms：Chromium 系大应用激活可能超 400ms，预算过窄会把可注入
+        // 场景静默退化为纯复制（吞字根因 R5）；上限仍需有界防无限等
+        assert!(timeout_ms <= 1000);
         assert!(timeout_ms >= poll_ms);
     }
 

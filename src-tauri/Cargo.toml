@@ -39,17 +39,17 @@ base64 = "0.22"
 keyring = "4"
 # async runtime（Tauri 自带，这里显式声明用于 spawn 后台同步）
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
-# 模拟系统级键盘输入（注入 Ctrl+V 到原输入框）
-enigo = "0.6"
+# 自动粘贴失败时的系统通知（窗口已隐藏，应用内 toast 不可见）
+tauri-plugin-notification = "2"
 
-# Windows API：前台窗口判定（注入判据）/ 在资源管理器中显示
+# Windows API：前台窗口判定（注入判据）/ 在资源管理器中显示 / SendInput 注入
 # 仅 Windows 需要，放 target-specific 避免在 macOS/Linux 拉取无用的 windows crate
 [target.'cfg(windows)'.dependencies]
-# 版本与 enigo 传递依赖一致（0.61），避免双版本拉取
 windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [profile.release]

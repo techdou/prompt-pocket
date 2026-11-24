@@ -4,7 +4,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { fly } from "svelte/transition";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import type { CategoryCount, Prompt, PromptMeta, SyncStatus } from "./lib/types";
+  import type { CategoryCount, Prompt, PromptMeta, PasteSessionSnapshot, SyncStatus } from "./lib/types";
   import {
     copyOrPaste,
     createCategory,
@@ -28,7 +28,7 @@
   import { markdownToPlain } from "./lib/plain-text";
   import { dialogFocus } from "./lib/dialog";
   import TemplateDialog from "./lib/TemplateDialog.svelte";
-  import { setWindowMode, setInteractionLock } from "./lib/api";
+  import { setWindowMode, setInteractionLock, notifyPasteFailed, getPasteSession } from "./lib/api";
   import { filterPrompts } from "./lib/search";
   import CategoryTabs from "./lib/CategoryTabs.svelte";
   import PromptList from "./lib/PromptList.svelte";
@@ -72,6 +72,18 @@
   let windowMode = $state<"quick" | "manage">("quick");
   let loadedPath = $state<string | null>(null);
   let contentLoading = $state(false);
+  /** 当前唤起会话：hasPasteTarget 决定 Enter 是隐藏+粘贴还是仅复制；
+   *  generation 随粘贴 / 收起请求带回后端，过时的请求据此作废 */
+  let hasPasteTarget = $state(false);
+  let pasteSession: PasteSessionSnapshot | null = null;
+  /** 应用会话快照，返回它是否属于比已知更新的唤起。快照只按代次前进：
+   *  启动时的查询结果和唤起事件可能乱序到达，旧快照不能覆盖已经应用的新快照 */
+  function applyPasteSession(snapshot: PasteSessionSnapshot): boolean {
+    if (pasteSession && snapshot.generation < pasteSession.generation) return false;
+    pasteSession = snapshot;
+    hasPasteTarget = snapshot.hasTarget;
+    return true;
+  }
   let saving = $state(false);
   let copying = $state(false);
   let baseline = $state<Draft>({ title: "", body: "", category: "", copy_mode: "markdown" });
@@ -314,19 +326,72 @@
     void refresh();
   }
 
+  let viewGone = false;
+  let copyToastTimer: ReturnType<typeof setTimeout> | undefined;
+  function showCopyToast(message: string) {
+    // 组件已卸载：异步回来的结果不再需要提示，也别再重建计时器
+    if (viewGone) return;
+    copyMessage = message;
+    copiedFlash = true;
+    clearTimeout(copyToastTimer);
+    copyToastTimer = setTimeout(() => (copiedFlash = false), 2200);
+  }
+  /** 上次自动粘贴没成功、且当时窗口已隐藏（应用内提示条看不到）。系统通知
+   *  可能被关闭或漏看，所以留一条到窗口下一次可见时补显——失败不能被完全吞掉 */
+  let pendingPasteFailure = $state(false);
+  /** 待显的失败提示只消费一次：唤起事件和"窗口此刻是否可见"的查询结果
+   *  谁先到谁显示，另一边不会再重复显示 */
+  function consumePendingPasteFailure() {
+    if (!pendingPasteFailure) return;
+    pendingPasteFailure = false;
+    showCopyToast(t("app.pasteFailedToast"));
+  }
+
   async function completeCopy(text: string, mode: "markdown" | "plain", path: string, hideAfter = true) {
     if (copying) return;
+    // 以按下按键那一刻已经收到的会话快照为准，之后不再去查：查回来的可能是
+    // 期间新一次唤起的代次，旧按键就成了新会话的请求
+    const generation = pasteSession?.generation ?? null;
+    // 按下按键时还没有快照（只可能是启动后的最初片刻）：退化为纯复制，
+    // 不收起窗口——后端同样不接受没带代次的收起请求
+    const hide = hideAfter && generation !== null;
+    const payload = mode === "plain" ? markdownToPlain(text) : text;
+    // 只护住后端这一次调用：之后的反馈查询不该再挡住新一次唤起里的 Enter
     copying = true;
-    try {
-      const result = await copyOrPaste(mode === "plain" ? markdownToPlain(text) : text, mode, hideAfter);
-      persistLibrary(recordUse(library, path));
-      copyMessage = t(result.status === "pasted" ? "app.pastedToast" : result.status === "paste_failed" ? "app.pasteFailedToast" : "app.copiedToast");
-      copiedFlash = true;
-      setTimeout(() => (copiedFlash = false), 2200);
-    } finally { copying = false; }
+    const result = await copyOrPaste(payload, mode, hide, generation).finally(() => { copying = false; });
+    // superseded：按下 Enter 之后用户重新唤起或收起了窗口，这次没有注入，也不需要提示
+    if (result.status === "superseded") return;
+    persistLibrary(recordUse(library, path));
+    if (result.status === "paste_failed" && result.reason !== "hide_failed") {
+      void notifyPasteFailed(t("notify.pasteFailedTitle"), t("notify.pasteFailedBody"));
+      // 失败发生在窗口隐藏之后，提示条本来看不见。但等待期间用户可能已经把窗口
+      // 重新唤起：先置待显标志（唤起事件会消费它），再查窗口此刻是否可见
+      pendingPasteFailure = true;
+      const visible = await getCurrentWindow().isVisible().catch(() => false);
+      if (visible) consumePendingPasteFailure();
+      return;
+    }
+    // hide_failed 时窗口仍可见，提示条直接可读，内容是"可重试"
+    showCopyToast(t(
+      result.status === "paste_sent" ? "app.pastedToast"
+        : result.status === "copied" ? "app.copiedToast"
+        : "app.pasteHideFailedToast",
+    ));
+  }
+  /** 行内 Enter 的调用入口：复用全局键盘处理的弹层守卫——菜单 / 对话框 /
+   *  模板填空打开时，行上冒出来的 Enter 不能触发复制或注入 */
+  function confirmFromList(shift: boolean) {
+    if (templateSession || settingsOpen || renameDialog.open || catRenameDialog.open || contextMenu.open || catContextMenu.open) return;
+    if (editorMode === "edit") return;
+    void doCopy(shift ? (editingCopyMode === "plain" ? "markdown" : "plain") : editingCopyMode);
   }
   async function doCopy(mode: "markdown" | "plain", hideAfter = true) {
-    if (!selectedPrompt || !ready || copying || editorMode === "edit") return;
+    if (!selectedPrompt || copying || editorMode === "edit") return;
+    if (!ready) {
+      // 正文还在读取/保存：无声丢弃会让用户以为 Enter 失灵，给一句提示
+      showCopyToast(t("app.loadingToast"));
+      return;
+    }
     const path = selectedPrompt.path;
     if (templateFields(editingBody).length) {
       templateSession = { body: editingBody, title: selectedPrompt.title, path, mode, hideAfter };
@@ -642,7 +707,9 @@
       if (settingsOpen) { settingsOpen = false; return; }
       if (editorMode === "edit") { cancelEdit(); return; }
       if (query.trim()) { query = ""; return; }
-      void hideWindow();
+      // 带上按下 Esc 时的唤起代次：晚到一步的旧 Esc 不能收起新一次唤起的窗口。
+      // 还没有会话快照时不发收起命令（后端同样会拒绝没带代次的请求）
+      if (pasteSession) void hideWindow(pasteSession.generation);
       return;
     }
     if (settingsOpen || renameDialog.open || catRenameDialog.open || contextMenu.open || catContextMenu.open) return;
@@ -657,7 +724,12 @@
       e.preventDefault();
       const next = Math.max(0, Math.min(selectedIndex + (e.key === "ArrowDown" ? 1 : -1), visiblePrompts.length - 1));
       if (visiblePrompts[next]) void selectPath(visiblePrompts[next].path);
-    } else if (e.key === "Enter") { e.preventDefault(); void doCopy(e.shiftKey ? (editingCopyMode === "plain" ? "markdown" : "plain") : editingCopyMode); }
+    } else if (e.key === "Enter") {
+      // 按住不放的自动重复不重复调用（方向键保留连发）
+      if (e.repeat) return;
+      e.preventDefault();
+      void doCopy(e.shiftKey ? (editingCopyMode === "plain" ? "markdown" : "plain") : editingCopyMode);
+    }
   }
 
   // 无边框窗口自定义 resize：8 个边缘热区，mousedown 触发系统缩放手柄。
@@ -711,8 +783,28 @@
     let disposed = false;
     const cleanups: (() => void)[] = [];
     void listen("sync-finished", () => { void guardedRefresh().catch((e) => showError(String(e))); void getSyncStatus().then((status) => (syncStatus = status)).catch(() => {}); }).then((stop) => { if (disposed) stop(); else cleanups.push(stop); }).catch(() => {});
-    void listen("window-shown", focusSearch).then((stop) => { if (disposed) stop(); else cleanups.push(stop); }).catch(() => {});
-    return () => { disposed = true; cleanups.forEach((stop) => stop()); requestGate.invalidate(); };
+    // 唤起事件自带这次会话的快照：Enter 会粘贴还是只复制，以及这次唤起的代次
+    void listen<PasteSessionSnapshot>("window-shown", (event) => {
+      // 比已知更旧的快照不是这次唤起（事件晚到了）：不抢焦点，也不消费待显提示
+      if (!applyPasteSession(event.payload)) return;
+      focusSearch();
+      // 上次自动粘贴没成功（当时窗口已隐藏）：一唤起就补一次应用内提示
+      consumePendingPasteFailure();
+    })
+      .then((stop) => {
+        if (disposed) { stop(); return; }
+        cleanups.push(stop);
+        // 首次启动直接显示窗口、不发 window-shown：注册成功后拉一次快照兜底
+        void getPasteSession().then(applyPasteSession).catch(() => {});
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      viewGone = true;
+      clearTimeout(copyToastTimer);
+      cleanups.forEach((stop) => stop());
+      requestGate.invalidate();
+    };
   });
 </script>
 
@@ -824,6 +916,13 @@
         onreorder={doReorder}
         ondragstart={onDragGestureStart}
         ondragend={onDragGestureEnd}
+        onconfirm={(_p, shift) => confirmFromList(shift)}
+        onclearsearch={() => {
+          query = "";
+          // 「清空搜索」按钮随空态一起卸载，焦点会丢：等列表更新完放回搜索框，
+          // 用户可以直接接着输入下一组词
+          void tick().then(focusSearch);
+        }}
         subMode={selectedCategory === "__all__" ? "category" : "time"}
         {language}
         {t}
@@ -856,7 +955,7 @@
       {/if}
     </main>
     {#if windowMode === "quick"}
-      <footer class="quick-footer"><span>{t("view.keyboard")}</span><button class="ghost" disabled={!ready} onclick={startEditing}>{t("editor.edit")}</button><button class="primary" disabled={!ready || copying} onclick={() => doCopy(editingCopyMode)}>{contentLoading ? t("editor.loading") : templateFields(editingBody).length ? t("template.title") : t("editor.copyLabel")} ↵</button></footer>
+      <footer class="quick-footer"><span>{t("view.footerHint", { action: t(hasPasteTarget ? "view.enterPaste" : "view.enterCopy"), mode: t(editingCopyMode === "plain" ? "editor.modePlain" : "editor.modeMarkdown") })}</span><button class="ghost" disabled={!ready} onclick={startEditing}>{t("editor.edit")}</button><button class="primary" disabled={!ready || copying} onclick={() => doCopy(editingCopyMode)}>{contentLoading ? t("editor.loading") : templateFields(editingBody).length ? t("template.title") : t("editor.copyLabel")} ↵</button></footer>
     {/if}
 
     {#if copiedFlash}

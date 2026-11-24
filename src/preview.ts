@@ -40,6 +40,7 @@ export function installPreview() {
         await new Promise((resolve) => setTimeout(resolve, prompt.category === "写作" ? 140 : 30));
         return { meta: prompt.meta, body: prompt.body };
       }
+      if (command === "get_paste_session") return { generation: 0, hasTarget: false };
       if (command === "copy_or_paste") return { status: "copied" };
       if (command === "get_sync_status") return { configured: false, enabled: false, lastSync: null, lastError: null, syncing: false };
       if (command === "get_cloud_config") return { username: "", remoteRoot: "PromptPocket", enabled: false, hasPassword: false, provider, ghRepo: "", ghBranch: "main", ghPrefix: "PromptPocket", ghEnabled: false, hasToken: false };

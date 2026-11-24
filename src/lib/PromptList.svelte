@@ -17,6 +17,12 @@
     onmounted,
     ondragstart,
     ondragend,
+    /** 行内 Enter 调用：已选中的行再按 Enter = 调用该行（与搜索框 Enter
+     *  语义统一，shift=true 时切另一格式）；未选中的行 Enter 仍只是选中——
+     *  此时正文尚未加载，直接调用会把上一条的内容粘错地方 */
+    onconfirm = (_path: string, _shift: boolean) => {},
+    /** 空态「清空搜索」动作：App 层持有 query 状态，回调里清词 */
+    onclearsearch = () => {},
     draggable = true,
     disabledReason = "",
     query = "",
@@ -41,6 +47,8 @@
     /** 拖拽手势开始/结束（父组件借此挂起 refresh，防列表被重绘打断手势） */
     ondragstart?: () => void;
     ondragend?: () => void;
+    onconfirm?: (path: string, shift: boolean) => void;
+    onclearsearch?: () => void;
     draggable?: boolean;
     disabledReason?: string;
     /** 当前搜索词：正文命中时列表项展示命中摘录 */
@@ -233,9 +241,24 @@
       draggable="false"
       onclick={() => onselect(p.path)}
       onkeydown={(e) => {
-        if (e.key === " " || e.key === "Enter") {
+        // 只处理行本身的按键：行内按钮（收藏/更多）聚焦时 Enter/Space
+        // 是按钮的原生激活，冒泡到行会被抢走
+        if (e.target !== e.currentTarget) return;
+        // 按住不放的自动重复不重复触发调用
+        if (e.repeat) return;
+        // 与全局处理器同规则：输入法组合态的按键不当作 Enter 调用
+        if (e.isComposing || e.keyCode === 229) return;
+        if (e.key === " ") {
           e.preventDefault();
           onselect(p.path);
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          // 已选中的行：调用（与搜索框 Enter 统一，Shift 换格式同样生效）；
+          // 未选中：先选中——此时正文尚未加载，直接调用会粘错内容
+          if (p.path === selectedPath) onconfirm(p.path, e.shiftKey);
+          else onselect(p.path);
         }
       }}
       oncontextmenu={(e) => {
@@ -303,6 +326,7 @@
       {#if query.trim()}
         <p>{t("prompt.emptySearch", { query: query.trim() })}</p>
         <p class="empty-hint">{t("prompt.emptySearchHint")}</p>
+        <button class="ghost empty-action" onclick={() => onclearsearch()}>{t("prompt.clearSearch")}</button>
       {:else}
         <p>{t("prompt.empty")}</p>
         <p class="empty-hint">{t("prompt.emptyHint")}</p>
@@ -482,6 +506,9 @@
     margin-top: 6px;
     font-size: 12px;
     opacity: 0.8;
+  }
+  .empty .empty-action {
+    margin-top: 10px;
   }
   .favorite-btn {
     flex-shrink: 0;

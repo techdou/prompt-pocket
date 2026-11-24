@@ -6,6 +6,9 @@
     body: string; title: string; t: Translator; onclose: () => void; onapply: (text: string) => Promise<void>; onraw?: () => Promise<void>;
   } = $props();
   let fields = $derived(templateFields(body));
+  /** 打开即聚焦的变量：第一个没有默认值的（用户必须亲手填的那个）；
+   *  全部带默认值时取第一个，方便直接修改 */
+  let initialFocus = $derived(Math.max(fields.findIndex((field) => !field.defaultValue.trim()), 0));
   let values = $state<Record<string, string>>({});
   let busy = $state(false);
   let error = $state("");
@@ -24,14 +27,21 @@
   }
 </script>
 
-<div class="overlay" role="presentation" onclick={(event) => { if (event.target === event.currentTarget && !busy) onclose(); }} onkeydown={(event) => { if (event.key === 'Escape' && !busy) { event.stopPropagation(); onclose(); } }}>
-  <div class="template-dialog" role="dialog" aria-modal="true" aria-labelledby="template-title" tabindex="-1" use:dialogFocus>
+<div class="overlay" role="presentation" onclick={(event) => { if (event.target === event.currentTarget && !busy) onclose(); }} onkeydown={(event) => {
+  // 与全局键盘处理同规则：输入法组合态的按键属于输入法（Esc 是取消组字），不处理
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Escape' && !busy) { event.stopPropagation(); onclose(); }
+  // Ctrl+Enter 直接提交：填完模板后的最快路径；普通 Enter 在多行
+  // textarea 里保留换行语义，不承担提交
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !busy && !event.repeat) { event.preventDefault(); void apply(); }
+}}>
+  <div class="template-dialog" role="dialog" aria-modal="true" aria-labelledby="template-title" tabindex="-1" use:dialogFocus={{ initial: "[data-autofocus]" }}>
     <header><div><h2 id="template-title">{t("template.title")}</h2><p>{title}</p></div><button class="ghost" onclick={onclose} disabled={busy} aria-label={t("common.close")}>×</button></header>
     <p class="hint">{t("template.hint")}</p>
     <div class="contents">
       <div class="fields">
         {#each fields as field, index}
-          <label for={`variable-${index}`}>{field.name}<textarea id={`variable-${index}`} rows="3" bind:value={values[field.name]} disabled={busy} required></textarea></label>
+          <label for={`variable-${index}`}>{field.name}<textarea id={`variable-${index}`} data-autofocus={index === initialFocus ? "" : null} rows="3" bind:value={values[field.name]} disabled={busy} required></textarea></label>
         {/each}
       </div>
       <div class="output"><h3>{t("template.preview")}</h3><pre>{output}</pre></div>

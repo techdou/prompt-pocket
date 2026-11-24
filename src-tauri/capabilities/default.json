@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "主窗口的默认权限集合",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-show",
@@ -12,6 +14,7 @@
     "core:window:allow-center",
     "core:window:allow-start-dragging",
     "core:window:allow-start-resize-dragging",
-    "dialog:allow-message"
+    "dialog:allow-message",
+    "notification:default"
   ]
 }

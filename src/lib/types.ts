@@ -109,4 +109,29 @@ export interface RecoveryEntry {
   createdAt: string;
   kind: string;
 }
-export interface CopyResult { status: "copied" | "pasted" | "paste_failed" }
+/**
+ * 唤起会话快照。hasTarget 决定 Enter 是"隐藏并注入回原窗口"还是"仅复制"；
+ * generation 标识"这是第几次唤起"，发起粘贴请求时原样带回后端——用户在
+ * 第 N 次唤起的窗口里按的 Enter，即使指令晚到一步，也不会被算到第 N+1 次唤起头上。
+ */
+export interface PasteSessionSnapshot {
+  generation: number;
+  hasTarget: boolean;
+}
+
+/**
+ * paste_sent：注入指令已完整发出（SendInput 4 事件全部送达），不代表目标
+ * 应用已插入——UIPI / 目标忽略快捷键不可观测。
+ * superseded：等待期间发生了新的唤起（用户又按了快捷键），本次未注入，无需提示。
+ * paste_failed：自动粘贴失败，剪贴板里已有内容，可手动 Ctrl+V。
+ */
+export type PasteFailReason =
+  | "hide_failed"
+  | "focus_lost"
+  | "modifiers_held"
+  | "inject_failed";
+export type CopyResult =
+  | { status: "copied" }
+  | { status: "paste_sent" }
+  | { status: "superseded" }
+  | { status: "paste_failed"; reason: PasteFailReason };
