@@ -28,7 +28,7 @@
   import { markdownToPlain } from "./lib/plain-text";
   import { dialogFocus } from "./lib/dialog";
   import TemplateDialog from "./lib/TemplateDialog.svelte";
-  import { setWindowMode, setInteractionLock, notifyPasteFailed, getPasteSession } from "./lib/api";
+  import { setWindowMode, setInteractionLock, notifyPasteFailed, getPasteSession, activatePasteWindow } from "./lib/api";
   import { filterPrompts } from "./lib/search";
   import CategoryTabs from "./lib/CategoryTabs.svelte";
   import PromptList from "./lib/PromptList.svelte";
@@ -82,6 +82,7 @@
     if (pasteSession && snapshot.generation < pasteSession.generation) return false;
     pasteSession = snapshot;
     hasPasteTarget = snapshot.hasTarget;
+    void activatePasteWindow(snapshot.generation).catch((e) => showError(String(e)));
     return true;
   }
   let saving = $state(false);
@@ -338,13 +339,13 @@
   }
   /** 上次自动粘贴没成功、且当时窗口已隐藏（应用内提示条看不到）。系统通知
    *  可能被关闭或漏看，所以留一条到窗口下一次可见时补显——失败不能被完全吞掉 */
-  let pendingPasteFailure = $state(false);
+  let pendingPasteFailure = $state<"app.pasteFailedToast" | "app.pasteClipboardChangedToast" | null>(null);
   /** 待显的失败提示只消费一次：唤起事件和"窗口此刻是否可见"的查询结果
    *  谁先到谁显示，另一边不会再重复显示 */
   function consumePendingPasteFailure() {
     if (!pendingPasteFailure) return;
-    pendingPasteFailure = false;
-    showCopyToast(t("app.pasteFailedToast"));
+    showCopyToast(t(pendingPasteFailure));
+    pendingPasteFailure = null;
   }
 
   async function completeCopy(text: string, mode: "markdown" | "plain", path: string, hideAfter = true) {
@@ -363,10 +364,14 @@
     if (result.status === "superseded") return;
     persistLibrary(recordUse(library, path));
     if (result.status === "paste_failed" && result.reason !== "hide_failed") {
-      void notifyPasteFailed(t("notify.pasteFailedTitle"), t("notify.pasteFailedBody"));
+      const clipboardChanged = result.reason === "clipboard_changed";
+      void notifyPasteFailed(
+        t("notify.pasteFailedTitle"),
+        t(clipboardChanged ? "notify.pasteClipboardChangedBody" : "notify.pasteFailedBody"),
+      );
       // 失败发生在窗口隐藏之后，提示条本来看不见。但等待期间用户可能已经把窗口
       // 重新唤起：先置待显标志（唤起事件会消费它），再查窗口此刻是否可见
-      pendingPasteFailure = true;
+      pendingPasteFailure = clipboardChanged ? "app.pasteClipboardChangedToast" : "app.pasteFailedToast";
       const visible = await getCurrentWindow().isVisible().catch(() => false);
       if (visible) consumePendingPasteFailure();
       return;
@@ -794,7 +799,7 @@
       .then((stop) => {
         if (disposed) { stop(); return; }
         cleanups.push(stop);
-        // 首次启动直接显示窗口、不发 window-shown：注册成功后拉一次快照兜底
+        // 首次启动的唤起事件可能早于监听注册，读取快照后同样确认。
         void getPasteSession().then(applyPasteSession).catch(() => {});
       })
       .catch(() => {});

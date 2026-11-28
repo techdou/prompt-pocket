@@ -215,7 +215,7 @@ pub async fn push_all_to_remote<S: RemoteStore>(
                     if let Some(latest) = store.fetch(&rel).await? {
                         if remote
                             .as_ref()
-                            .map_or(true, |old| old.content != latest.content)
+                            .is_none_or(|old| old.content != latest.content)
                         {
                             record_conflict(local_dir, &rel, &latest.content, &mut report)?;
                             return Ok(());

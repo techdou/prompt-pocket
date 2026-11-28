@@ -1163,7 +1163,7 @@
     align-items: center;
   }
   .recovery-section {
-    min-height: 0;
+    flex-shrink: 0;
   }
   .recovery-list {
     max-height: 220px;

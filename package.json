@@ -12,7 +12,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "verify": "npm test && npm run check && npm run build"
+    "verify": "npm test && npm run check && npm run build",
+    "test:browser": "playwright test"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.11.0",
@@ -26,6 +27,7 @@
     "mermaid": "^11.16.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.1",
     "@sveltejs/vite-plugin-svelte": "^5.1.1",
     "@tauri-apps/cli": "^2",
     "svelte": "^5.56.9",

@@ -78,7 +78,7 @@ Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere wit
 3. 搜索或用方向键选中提示词。
 4. 按 `Enter`。
 
-Windows 上经快捷键唤起时，内容写入剪贴板后自动粘贴回唤起前的原窗口（不限输入框）；其他平台只写剪贴板，手动粘贴。自动粘贴没能完成时（例如目标窗口以更高权限运行、调用时修饰键一直没松开），会发送系统通知（需系统允许通知）：内容已在剪贴板，回到输入框手动 `Ctrl+V` 即可。
+Windows 上经快捷键唤起时，内容写入剪贴板后自动粘贴回唤起前的原窗口（不限输入框）；其他平台只写剪贴板，手动粘贴。自动粘贴没能完成时（例如目标窗口以更高权限运行、调用时修饰键一直没松开），会发送系统通知（需系统允许通知）：提示词仍在剪贴板时，回到输入框手动 `Ctrl+V` 即可。等待期间如果剪贴板被改写，应用会取消粘贴并提示重新复制。
 
 ### 两种视图
 
@@ -129,7 +129,7 @@ Prompt Pocket 有两个工作状态：
 ### 平台说明
 
 - **自动粘贴仅 Windows 生效**：macOS / Linux 的自动注入尚未实现，经快捷键唤起后也只写入剪贴板，请手动 `Cmd+V` / `Ctrl+V` 粘贴。
-- **快捷键冲突**：`Ctrl+Alt+P` 若被其它软件占用，全局唤出会失效（应用会弹窗提示），请先在占用方里改键。当前版本快捷键为固定值。
+- **快捷键冲突**：`Ctrl+Alt+P` 若被其它软件占用，应用会弹窗提示。可以从托盘打开主界面，在设置里修改全局快捷键。
 
 ### 数据结构
 
@@ -225,7 +225,7 @@ updated: 2026-06-27T00:00:00Z
 前置依赖：
 
 - Node.js 22+
-- Rust 1.77+
+- Rust 1.89+
 - Tauri v2 平台工具链：<https://v2.tauri.app/start/prerequisites/>
 
 ```bash
@@ -312,7 +312,7 @@ The first launch shows the main window; afterwards the app stays in the backgrou
 3. Search or use arrow keys to select a prompt.
 4. Press `Enter`.
 
-On Windows the prompt is pasted back automatically to the window it was launched from; on other platforms it is only copied — paste manually. If the automatic paste cannot be completed (for example the target window runs with higher privileges, or a modifier key is still held down), a system notification is sent (if the system allows notifications): the content is on the clipboard, so press `Ctrl+V` in the target input yourself.
+On Windows the prompt is pasted back automatically to the window it was launched from; on other platforms it is only copied — paste manually. If the automatic paste cannot be completed (for example the target window runs with higher privileges, or a modifier key is still held down), the app sends a system notification if notifications are enabled. If the prompt is still on the clipboard, press `Ctrl+V` in the target input. If the clipboard changes while the app waits, it cancels the paste and asks you to copy the prompt again.
 
 ### Keyboard Shortcuts
 
@@ -331,7 +331,7 @@ On Windows the prompt is pasted back automatically to the window it was launched
 ### Platform Notes
 
 - **Auto-paste works on Windows only**: auto-paste injection is not yet implemented on macOS / Linux, so the prompt is only copied to the clipboard — paste manually with `Cmd+V` / `Ctrl+V`.
-- **Hotkey conflicts**: if another app owns `Ctrl+Alt+P`, the global hotkey will not register (the app shows a warning dialog). The hotkey is fixed in this version.
+- **Hotkey conflicts**: if another app owns `Ctrl+Alt+P`, Prompt Pocket shows a warning. Open it from the tray and change the global hotkey in Settings.
 
 ### Data Layout
 
@@ -415,7 +415,7 @@ Sync rules (identical for both backends):
 Prerequisites:
 
 - Node.js 22+
-- Rust 1.77+
+- Rust 1.89+
 - Tauri v2 platform prerequisites: <https://v2.tauri.app/start/prerequisites/>
 
 ```bash

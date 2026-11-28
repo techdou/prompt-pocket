@@ -33,7 +33,7 @@ export function installPreview() {
     unregisterCallback: () => {},
     invoke: async (command: string, args: Record<string, unknown> = {}): Promise<unknown> => {
       if (command.startsWith("plugin:event|")) return ++sequence;
-      if (["init_app", "set_window_mode", "set_interaction_lock", "hide_window", "reveal_in_finder", "reorder", "reorder_categories"].includes(command)) return;
+      if (["init_app", "activate_paste_window", "notify_paste_failed", "set_window_mode", "set_interaction_lock", "hide_window", "reveal_in_finder", "reorder", "reorder_categories"].includes(command)) return;
       if (command === "scan_prompts") return { prompts: structuredClone(prompts), categories: [...new Set(prompts.map((prompt) => prompt.category))].map((name) => ({ name, count: prompts.filter((prompt) => prompt.category === name).length })) };
       if (command === "read_prompt") {
         const prompt = structuredClone(find(args.path));

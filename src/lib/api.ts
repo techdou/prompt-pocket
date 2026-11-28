@@ -166,6 +166,9 @@ export async function copyOrPaste(
 export const getPasteSession = () =>
   invoke<PasteSessionSnapshot>("get_paste_session");
 
+export const activatePasteWindow = (generation: number) =>
+  invoke<void>("activate_paste_window", { generation });
+
 /** 窗口隐藏后由桌面端发送通知，应用内提示仍独立兜底。 */
 export const notifyPasteFailed = (title: string, body: string) =>
   invoke<void>("notify_paste_failed", { title, body }).catch(() => {});

@@ -82,6 +82,12 @@ jobs:
       - name: Verify frontend (tests, types, build)
         run: npm run verify
 
+      - name: Run browser regressions
+        if: runner.os == 'Windows'
+        run: |
+          npx playwright install --only-shell chromium
+          npm run test:browser
+
       - name: Check Rust formatting
         working-directory: src-tauri
         run: cargo fmt --all -- --check
@@ -155,7 +161,7 @@ jobs:
       # 不再单独跑一遍避免重复
       - name: Build Tauri app (debug)
         if: runner.os != 'Linux'
-        run: npx tauri build --debug
+        run: npx tauri build --debug -- --locked
 
       # Linux 调试符号会显著放大安装包压缩开销。保留 debug 应用逻辑，
       # 仅在打包前删除调试符号；所有 DEB/RPM/AppImage 目标仍由配置决定。
@@ -163,7 +169,7 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 20
         run: |
-          npx tauri build --debug --no-bundle
+          npx tauri build --debug --no-bundle -- --locked
           ls -lh src-tauri/target/debug/prompt-pocket
           strip --strip-debug src-tauri/target/debug/prompt-pocket
           ls -lh src-tauri/target/debug/prompt-pocket

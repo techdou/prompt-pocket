@@ -123,12 +123,13 @@ export interface PasteSessionSnapshot {
  * paste_sent：注入指令已完整发出（SendInput 4 事件全部送达），不代表目标
  * 应用已插入——UIPI / 目标忽略快捷键不可观测。
  * superseded：等待期间发生了新的唤起（用户又按了快捷键），本次未注入，无需提示。
- * paste_failed：自动粘贴失败，剪贴板里已有内容，可手动 Ctrl+V。
+ * paste_failed：自动粘贴失败，按 reason 区分是否还能手动粘贴。
  */
 export type PasteFailReason =
   | "hide_failed"
   | "focus_lost"
   | "modifiers_held"
+  | "clipboard_changed"
   | "inject_failed";
 export type CopyResult =
   | { status: "copied" }
