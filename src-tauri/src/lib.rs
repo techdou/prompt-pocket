@@ -17,6 +17,7 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_notification::NotificationExt;
 
 mod recovery;
 mod store;
@@ -869,6 +870,16 @@ async fn copy_text(text: String, app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 当前唤起会话的快照：hasTarget 决定 Enter 是"隐藏并注入回原窗口"还是"仅复制"
+#[tauri::command]
+fn notify_paste_failed(title: String, body: String, app: tauri::AppHandle) -> Result<(), String> {
+    app.notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn get_paste_session(state: tauri::State<'_, AppState>) -> PasteSessionSnapshot {
     state.paste_session().snapshot()
@@ -2332,6 +2343,7 @@ pub fn run() {
             reorder_categories,
             copy_text,
             copy_or_paste,
+            notify_paste_failed,
             get_paste_session,
             hide_window,
             get_hotkey,

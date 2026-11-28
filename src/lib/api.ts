@@ -166,22 +166,9 @@ export async function copyOrPaste(
 export const getPasteSession = () =>
   invoke<PasteSessionSnapshot>("get_paste_session");
 
-/**
- * 自动粘贴失败时的系统通知：主窗口此刻已隐藏，应用内 toast 用户看不到。
- * 通知权限未授予时尝试请求一次；失败静默（剪贴板已有内容，重新唤起后
- * 仍能看到应用内 toast 兜底）。
- */
-export async function notifyPasteFailed(title: string, body: string): Promise<void> {
-  try {
-    const { isPermissionGranted, requestPermission, sendNotification } =
-      await import("@tauri-apps/plugin-notification");
-    let granted = await isPermissionGranted();
-    if (!granted) granted = (await requestPermission()) === "granted";
-    if (granted) sendNotification({ title, body });
-  } catch {
-    // 通知链路异常不影响主流程
-  }
-}
+/** 窗口隐藏后由桌面端发送通知，应用内提示仍独立兜底。 */
+export const notifyPasteFailed = (title: string, body: string) =>
+  invoke<void>("notify_paste_failed", { title, body }).catch(() => {});
 
 export const getHotkey = () => invoke<string>("get_hotkey");
 export const setHotkey = (shortcut: string) => invoke<void>("set_hotkey", { shortcut });
