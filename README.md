@@ -1,448 +1,91 @@
 # Prompt Pocket
 
-<p align="center">
-  <img src="docs/screenshots/list.png" alt="Prompt Pocket main window" width="720" />
-</p>
+用全局快捷键唤出桌面提示词库，搜索、填写模板并复制。提示词保存为本地 Markdown 文件，可选手动同步到 GitHub 或坚果云。支持 Windows、macOS 和 Linux。
 
-<p align="center">
-  <a href="https://github.com/techdou/prompt-pocket/releases/latest">
-    <img alt="Latest release" src="https://img.shields.io/github/v/release/techdou/prompt-pocket?sort=semver" />
-  </a>
-  <a href="LICENSE">
-    <img alt="License" src="https://img.shields.io/github/license/techdou/prompt-pocket" />
-  </a>
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-2563eb" />
-  <img alt="Built with Tauri" src="https://img.shields.io/badge/Tauri-v2-24c8db" />
-  <a href="https://github.com/techdou/prompt-pocket/actions/workflows/ci.yml">
-    <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/techdou/prompt-pocket/ci.yml?branch=main&label=CI" />
-  </a>
-</p>
+[下载安装](https://github.com/techdou/prompt-pocket/releases/latest) · [项目网站](https://techdou.github.io/prompt-pocket/) · [反馈问题](https://github.com/techdou/prompt-pocket/issues) · [English](#english)
 
-<p align="center">
-  <a href="#简体中文">简体中文</a>
-  ·
-  <a href="#english">English</a>
-  ·
-  <a href="https://techdou.github.io/prompt-pocket/">Website</a>
-  ·
-  <a href="https://github.com/techdou/prompt-pocket/releases/latest">Download</a>
-</p>
+![Prompt Pocket 快速调用窗口](site/assets/quick-search.png)
 
-Prompt Pocket 是一个轻量级桌面提示词管理工具。`Ctrl+Alt+P` 从任意应用快速唤出，提示词以本地 Markdown 文件保存，支持通过坚果云 WebDAV 或 GitHub 仓库手动同步。
+## 下载安装
 
-Prompt Pocket is a lightweight desktop prompt manager. Open it from anywhere with `Ctrl+Alt+P`, store prompts as local Markdown files, and sync manually through Jianguoyun WebDAV or a GitHub repository.
+从 [最新版 Release](https://github.com/techdou/prompt-pocket/releases/latest) 选择安装包。
 
----
-
-## 简体中文
-
-### 功能特性
-
-| 功能 | 说明 |
+| 平台 | 安装包 |
 | --- | --- |
-| 全局秒唤 | 默认 `Ctrl+Alt+P`，可在设置中修改；从任意应用唤出或隐藏，多屏下在鼠标所在屏居中 |
-| 全文搜索 | `Ctrl+F` 同时匹配标题与正文；正文命中时列表显示上下文摘录 |
-| 智能复制 / 粘贴 | `Enter` 写入剪贴板；快捷键唤起后自动粘贴回唤起前的窗口（仅 Windows） |
-| 双复制模式 | `markdown` 复制原文；`plain` 自动剥离 Markdown 标记后复制；`Shift+Enter` 临时用另一模式复制 |
-| 模板填空 | `{{name}}` 必填、`{{name\|default}}` 带默认值、`\{{name}}` 保留字面量；复制前填写，原稿保持不变 |
-| 双视图 | 680×500 快速调用 / 960×640 整理提示词，加载和未保存草稿有保护 |
-| 收藏与最近使用 | 收藏常用项、记录最近使用与次数，本地偏好不参加云同步 |
-| 恢复记录 | 保存、改名、删除和同步覆盖前保留 `.recovery` 快照；恢复不覆盖已有文件 |
-| Markdown 存储 | 一条提示词一个 `.md` 文件，文件夹就是分类，文件名跟随标题 |
-| 富 Markdown 预览 | GFM 表格、任务列表、代码块；Mermaid、KaTeX、highlight.js 全部本地内置、按需加载，无 CDN 依赖 |
-| 提示词排序 | 单个分类内拖动列表项手柄，顺序写入 `.order.json` |
-| 分类排序 | 横向拖动分类标签手柄，顺序写入 `.category-order.json` |
-| 开机自启动 | 设置页一键开关，读写系统真实状态（注册表 / LaunchAgent） |
-| 手动云同步 | 坚果云 WebDAV 或 GitHub 仓库存档二选一，上传 / 下载均由用户显式触发，避免自动同步误覆盖 |
-| 安全凭据存储 | WebDAV 应用密码 / GitHub PAT 存系统凭据库，不落明文 JSON |
-| 轻量桌面壳 | Tauri v2 + Rust 后端，无 Electron |
+| Windows x64 | `.msi` 或 `-setup.exe` |
+| macOS Apple Silicon | `.dmg` |
+| Linux x64 | `.deb`、`.rpm` 或 `.AppImage` |
 
-### 下载安装
+## 快速上手
 
-从 [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest) 下载最新版 `v2.3.0`，安装包由 GitHub Actions 三平台构建：
+1. 打开 Prompt Pocket。关闭窗口后可通过托盘或全局快捷键再次打开。
+2. 在任意应用中按默认快捷键 `Ctrl+Alt+P`，输入标题或正文里的关键词。
+3. 用上下方向键选择结果，按 `Enter`。Windows 会尝试粘贴回唤起前的窗口。macOS 和 Linux 写入剪贴板，再手动粘贴。
+4. 用 `Shift+Enter` 临时切换复制格式。快捷键冲突时，可从托盘进入设置并改键。
 
-| 平台 | 文件 |
-| --- | --- |
-| macOS Apple Silicon | `Prompt.Pocket_2.3.0_aarch64.dmg` |
-| Windows x64 | `Prompt.Pocket_2.3.0_x64-setup.exe`（NSIS 安装器）或 `Prompt.Pocket_2.3.0_x64_en-US.msi` |
-| Linux x64 | `Prompt.Pocket_2.3.0_amd64.deb`、`Prompt.Pocket-2.3.0-1.x86_64.rpm` 或 `Prompt.Pocket_2.3.0_amd64.AppImage`（免安装） |
+Windows 自动粘贴失败时，应用会发送系统通知，并在下次唤起时补显提示。剪贴板发生变化时，请重新复制提示词。
 
-安装包未做代码签名：Windows 首次运行可能弹 SmartScreen 警告（选「仍要运行」）；macOS 首次打开需右键 →「打开」绕过 Gatekeeper。
+切换到「整理提示词」可编辑正文、管理分类、收藏、排序和预览 Markdown。删除或覆盖前的内容可以在设置页的恢复记录中找回。
 
-首次启动显示主窗口；之后默认隐藏到后台，用快捷键或托盘图标唤起。
+### 模板
 
-### 快速开始
-
-1. 在任意应用的输入框里放好光标。
-2. 按 `Ctrl+Alt+P` 唤出 Prompt Pocket。
-3. 搜索或用方向键选中提示词。
-4. 按 `Enter`。
-
-Windows 上经快捷键唤起时，内容写入剪贴板后自动粘贴回唤起前的原窗口（不限输入框）；其他平台只写剪贴板，手动粘贴。自动粘贴没能完成时（例如目标窗口以更高权限运行、调用时修饰键一直没松开），会发送系统通知（需系统允许通知）：提示词仍在剪贴板时，回到输入框手动 `Ctrl+V` 即可。等待期间如果剪贴板被改写，应用会取消粘贴并提示重新复制。
-
-### 两种视图
-
-Prompt Pocket 有两个工作状态：
-
-- 快速调用：紧凑窗口，适合搜索、收藏/最近使用筛选、键盘选择和一键复制
-- 整理提示词：较大窗口，适合编辑正文和元数据、调整分类、创建副本、插入已有提示词片段、管理同步与恢复记录
-
-从快速调用进入编辑会切到整理提示词视图。存在未保存编辑时，切换提示词、切换视图或退出编辑会要求确认；加载或保存未完成时不能复制。
-
-### 模板变量
-
-提示词正文可以写模板占位符。复制前会弹出填写窗口，光标直接落在第一个必填变量上；本次生成的文本用于复制，原模板文件不会被改写。
+在正文里写 `{{变量}}` 或 `{{变量|默认值}}`。调用时填写本次参数，用 `Ctrl+Enter` 应用并复制。原模板不会被改写。
 
 ```markdown
-请帮我把下面内容改写成{{语气|自然}}风格，面向{{读者}}：
+请用{{语气|自然}}的语气，面向{{读者}}总结以下内容：
 
 {{原文}}
 ```
 
-规则：
+### 数据与同步
 
-- `{{name}}`：必填变量，填写为空时不能应用
-- `{{name|default}}`：带默认值的变量，可以直接使用默认值
-- 重复变量只填写一次
-- `\{{name}}`：转义后输出字面量 `{{name}}`
-- 变量值按原样插入，不会递归解析其中的新模板语法
-
-<p align="center">
-  <img src="docs/screenshots/upgrade/template.png" alt="Prompt Pocket template dialog" width="720" />
-</p>
-
-
-### 快捷键
-
-| 操作 | 快捷键 |
+| 平台 | 默认提示词目录 |
 | --- | --- |
-| 全局唤出 / 隐藏 | `Ctrl+Alt+P` |
-| 新建提示词 | `Ctrl+N` |
-| 聚焦搜索框 | `Ctrl+F` |
-| 保存编辑 | `Ctrl+S` |
-| 上下选择 | `↑` / `↓` |
-| 复制选中项 | `Enter` |
-| 以另一复制模式复制 | `Shift+Enter` |
-| 应用模板并复制 | `Ctrl+Enter`（在模板填空窗口内） |
-| 清空搜索 / 隐藏窗口 | `Esc`（搜索框有词时先清空，再按才隐藏） |
+| Windows | `%APPDATA%/com.promptpocket.app/PromptPocket/` |
+| macOS | `~/Library/Application Support/com.promptpocket.app/PromptPocket/` |
+| Linux | `~/.config/com.promptpocket.app/PromptPocket/` |
 
-### 平台说明
+提示词按分类目录保存为 `.md` 文件。可用文本编辑器维护，程序兼容 `copyMode` 和 `copy_mode` 两种 frontmatter 键。
 
-- **自动粘贴仅 Windows 生效**：macOS / Linux 的自动注入尚未实现，经快捷键唤起后也只写入剪贴板，请手动 `Cmd+V` / `Ctrl+V` 粘贴。
-- **快捷键冲突**：`Ctrl+Alt+P` 若被其它软件占用，应用会弹窗提示。可以从托盘打开主界面，在设置里修改全局快捷键。
+同步在设置中手动发起。可以选择 GitHub 存档或坚果云 WebDAV，发生分歧时保留冲突副本。GitHub 令牌和 WebDAV 应用密码由系统凭据库管理，请在应用内配置。
 
-### 数据结构
+## 本地开发
 
-默认数据目录：
-
-```text
-Windows: %APPDATA%/com.promptpocket.app/PromptPocket/
-macOS:   ~/Library/Application Support/com.promptpocket.app/PromptPocket/
-Linux:   ~/.config/com.promptpocket.app/PromptPocket/
-```
-
-目录示例：
-
-```text
-PromptPocket/
-├── 写作/
-│   ├── 改写润色.md
-│   └── 周报模板.md
-├── 编程/
-│   └── 代码审查.md
-├── .order.json          # 每个分类内的提示词排序
-└── .category-order.json # 分类排序
-```
-
-提示词文件格式（frontmatter 由应用规范读写，正文为任意 Markdown）：
-
-```markdown
----
-title: 改写润色
-copyMode: markdown
-created: 2026-06-27T00:00:00Z
-updated: 2026-06-27T00:00:00Z
----
-```
-
-复制格式键应用写出 `copyMode`；手写的 `copy_mode` 也兼容读取（两种键同时存在时以 `copyMode` 为准）。以下为同一文件的可选写法：
-
-```markdown
----
-title: 改写润色
-copy_mode: markdown
-created: 2026-06-27T00:00:00Z
-updated: 2026-06-27T00:00:00Z
----
-
-请把下面这段文字改写得更简洁、专业：
-
-> 待改写内容
-```
-
-删除的提示词会先备份到数据目录的 `.trash/` 再移除，误删可从那里找回。
-
-### 拖拽排序
-
-- 提示词排序只在单个分类视图可用；搜索结果和「全部」视图禁用排序。
-- 分类排序中「全部」固定首位不可拖；其他分类可横向重排。
-- 前端先乐观更新，再由 Rust 后端原子写入排序 JSON；拖拽期间挂起列表刷新，写盘完成后补刷，顺序不会被旧数据冲掉。
-
-### Markdown 预览
-
-- 离线内置 GitHub Flavored Markdown（GFM）：表格、引用、删除线、任务列表、代码块。
-- Mermaid、KaTeX、highlight.js 本地打包、按需加载，无网络也可用。
-- raw HTML 一律转义显示，危险协议的链接/图片被拦截；渲染失败降级显示源码。
-
-### 云同步
-
-同步后端二选一（设置页顶部切换），两侧配置各自独立保存、互不影响。
-
-**坚果云 WebDAV**：
-
-1. 登录坚果云，打开「账户信息 → 安全选项 → 第三方应用管理」。
-2. 添加应用并生成应用密码。
-3. 在 Prompt Pocket 设置中填写账号、应用密码和远程目录，可先「测试连接」。
-4. 需要同步时显式点「上传」或「下载」。
-
-**GitHub 仓库存档**：
-
-1. 在 GitHub 创建一个仓库（建议私有；需已有至少一个提交，创建时勾选初始化 README 即可）。
-2. 创建 fine-grained PAT（GitHub → Settings → Developer settings → Personal access tokens），只授权这一个仓库的 **Contents 读写**权限。
-3. 在设置页切换到「GitHub 存档」，填写 `owner/repo`、PAT，可选分支（默认 `main`）与仓库内路径前缀（默认根目录），先「测试连接」再保存。
-4. 同步操作与坚果云一致，每条提示词的变更在仓库里体现为独立提交。
-
-同步规则（两种后端一致）：
-
-- **上传**：以本地为准推送变更；本地删除过的文件会同步删除远端对应文件（删除传播）。
-- **下载**：以远端为准拉取；本地已删除的文件不会被远端「复活」，被覆盖的本地旧文件自动备份到 `.trash/`。
-- `.trash`、隐藏文件和同步元数据不参与同步；排序文件（`.order.json` / `.category-order.json`）随同步传输。
-- 同步进行中编辑操作会被暂时拒绝，结束后自动恢复。
-- 应用密码 / PAT 保存到系统凭据库；旧版本明文 JSON 中的密码会在读取时自动迁移出去。
-
-### 开发
-
-前置依赖：
-
-- Node.js 22+
-- Rust 1.89+
-- Tauri v2 平台工具链：<https://v2.tauri.app/start/prerequisites/>
+需要 Node.js 22.6+、Rust 1.89+ 和对应平台的 [Tauri v2 工具链](https://v2.tauri.app/start/prerequisites/)。
 
 ```bash
-npm install
-npm run tauri dev    # 开发调试
-npm run tauri build  # 打包安装包
+npm ci
+npm run tauri:dev
 ```
 
-验证（提交前全绿）：
+| 路径 | 内容 |
+| --- | --- |
+| `src/` | Svelte 桌面前端 |
+| `src-tauri/` | Rust 后端和 Tauri 配置 |
+| `tests/` | 浏览器回归测试 |
+| `site/` | GitHub Pages 的公开静态资源 |
+| `.github/workflows/` | 自动测试、Release 打包和 Pages 发布 |
 
 ```bash
-npm run check        # svelte-check + tsc
-npm test             # 前端单测（node:test）
-npm run build        # vite 构建
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+npm run verify
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+npx playwright install --only-shell chromium
+npm run test:browser
 ```
 
-### 发布
-
-- 打 `vX.Y.Z` tag 并推送触发 [release.yml](.github/workflows/release.yml)：发布前自动跑完整质量门（check / test / clippy），通过后三平台构建并上传 GitHub Release。
-- GitHub Pages 落地页位于 `docs/`，推送到 `main` 后自动发布。
-
-### 技术栈
-
-| 层 | 技术 |
-| --- | --- |
-| 桌面壳 | Tauri v2 |
-| 后端 | Rust |
-| 前端 | Svelte 5 + Vite + TypeScript |
-| Markdown | marked + marked-highlight |
-| 富内容增强 | Mermaid / KaTeX / highlight.js 本地内置、按需加载 |
-| 快捷键 / 剪贴板 / 托盘 / 单实例 / 自启动 | tauri-plugin-global-shortcut / clipboard-manager / tray icon / single-instance / autostart |
-| 凭据存储 | keyring + 系统凭据库 |
-| 云同步 | reqwest_dav（坚果云 WebDAV）/ GitHub Contents API |
-| 数据格式 | Markdown + YAML frontmatter |
-
----
+Push 和 Pull Request 会在 GitHub Actions 自动运行桌面测试与打包。版本标签 `vX.Y.Z` 触发 Release，三平台安装包齐备后自动发布。`site/` 的变更推送到 `main` 后发布到 Pages。
 
 ## English
 
-Prompt Pocket is a lightweight desktop prompt manager: summon it from any app with `Ctrl+Alt+P`, keep prompts as local Markdown files, and sync on demand through Jianguoyun WebDAV or a GitHub repository.
+Prompt Pocket is a local-first desktop prompt library. Press `Ctrl+Alt+P` to open it, search your library, then press `Enter` to use the selected prompt. Windows can paste back into the original app. macOS and Linux copy to the clipboard.
 
-### Features
+- Manage categories, favorites, and recent prompts, with Markdown previews and recoverable edits.
+- Reuse templates with `{{variable}}` and `{{variable|default}}`.
+- Store prompts as local Markdown and optionally sync manually through GitHub or Nutstore WebDAV.
+- Get the installer for your platform from [Releases](https://github.com/techdou/prompt-pocket/releases/latest).
 
-| Feature | Description |
-| --- | --- |
-| Global launcher | Default `Ctrl+Alt+P`, configurable in Settings; centers on the monitor under the cursor |
-| Full-text search | `Ctrl+F` matches titles and prompt bodies; body hits show a context excerpt |
-| Smart copy / paste | `Enter` copies to clipboard; auto-pastes back to the window it was launched from (Windows only) |
-| Dual copy modes | `markdown` copies the source; `plain` strips Markdown syntax before copying; `Shift+Enter` copies with the other mode temporarily |
-| Variable fill-in | Fill required placeholders and optional defaults before copying, or use “Copy original” to copy the unchanged template |
-| Markdown storage | One prompt per `.md` file; folders are categories; filenames follow titles |
-| Rich preview | GFM tables, task lists, code blocks; Mermaid / KaTeX / highlight.js bundled locally, lazy-loaded, no CDN |
-| Prompt ordering | Drag handles within one category; saved to `.order.json` |
-| Category ordering | Drag category tabs horizontally; saved to `.category-order.json` |
-| Launch at login | One toggle in Settings, backed by the real system state (registry / LaunchAgent) |
-| Manual cloud sync | Jianguoyun WebDAV or GitHub repository archive; upload / download only when explicitly triggered |
-| Secure credentials | App passwords / GitHub PATs live in the system credential store, never plaintext JSON |
-| Lightweight shell | Tauri v2 + Rust backend, no Electron |
-
-### Workflow upgrade
-
-Quick mode and management mode support favorites, recent usage, full-text snippets, protected drafts and recovery snapshots. Template variables support required values (`{{name}}`), defaults (`{{name|default}}`) and escaped literals (`\{{name}}`). The global shortcut is configurable in Settings. GitHub archive sync, WebDAV sync, autostart and local Markdown rendering remain available.
-
-### Download
-
-Grab the latest `v2.3.0` from [GitHub Releases](https://github.com/techdou/prompt-pocket/releases/latest):
-
-| Platform | File |
-| --- | --- |
-| macOS Apple Silicon | `Prompt.Pocket_2.3.0_aarch64.dmg` |
-| Windows x64 | `Prompt.Pocket_2.3.0_x64-setup.exe` (NSIS installer) or `Prompt.Pocket_2.3.0_x64_en-US.msi` |
-| Linux x64 | `Prompt.Pocket_2.3.0_amd64.deb`, `Prompt.Pocket-2.3.0-1.x86_64.rpm`, or `Prompt.Pocket_2.3.0_amd64.AppImage` (portable) |
-
-Installers are unsigned: Windows may show a SmartScreen warning (choose "Run anyway"); on macOS, right-click → Open to bypass Gatekeeper on first launch.
-
-The first launch shows the main window; afterwards the app stays in the background, summoned via the hotkey or tray icon.
-
-### Quick Start
-
-1. Put the caret in any text input.
-2. Press `Ctrl+Alt+P` to open Prompt Pocket.
-3. Search or use arrow keys to select a prompt.
-4. Press `Enter`.
-
-On Windows the prompt is pasted back automatically to the window it was launched from; on other platforms it is only copied — paste manually. If the automatic paste cannot be completed (for example the target window runs with higher privileges, or a modifier key is still held down), the app sends a system notification if notifications are enabled. If the prompt is still on the clipboard, press `Ctrl+V` in the target input. If the clipboard changes while the app waits, it cancels the paste and asks you to copy the prompt again.
-
-### Keyboard Shortcuts
-
-| Action | Shortcut |
-| --- | --- |
-| Open / hide globally | `Ctrl+Alt+P` |
-| Create prompt | `Ctrl+N` |
-| Focus search | `Ctrl+F` |
-| Save editing | `Ctrl+S` |
-| Move selection | `↑` / `↓` |
-| Copy selected prompt | `Enter` |
-| Copy with the other mode | `Shift+Enter` |
-| Apply template and copy | `Ctrl+Enter` (inside the template dialog) |
-| Clear search / hide | `Esc` (clears the search term first when present, hides on the next press) |
-
-### Platform Notes
-
-- **Auto-paste works on Windows only**: auto-paste injection is not yet implemented on macOS / Linux, so the prompt is only copied to the clipboard — paste manually with `Cmd+V` / `Ctrl+V`.
-- **Hotkey conflicts**: if another app owns `Ctrl+Alt+P`, Prompt Pocket shows a warning. Open it from the tray and change the global hotkey in Settings.
-
-### Data Layout
-
-Default data directories:
-
-```text
-Windows: %APPDATA%/com.promptpocket.app/PromptPocket/
-macOS:   ~/Library/Application Support/com.promptpocket.app/PromptPocket/
-Linux:   ~/.config/com.promptpocket.app/PromptPocket/
-```
-
-Example:
-
-```text
-PromptPocket/
-├── Writing/
-│   ├── Rewrite.md
-│   └── Weekly-report.md
-├── Coding/
-│   └── Code-review.md
-├── .order.json          # prompt order inside each category
-└── .category-order.json # category order
-```
-
-Prompt file format (frontmatter is read/written canonically by the app; the body is free-form Markdown):
-
-```markdown
----
-title: Rewrite
-copyMode: markdown
-created: 2026-06-27T00:00:00Z
-updated: 2026-06-27T00:00:00Z
----
-```
-
-The app writes the copy-format key as `copyMode`; a hand-written `copy_mode` is also accepted (when both exist, `copyMode` wins). Same file in the hand-written form:
-
-```markdown
----
-title: Rewrite
-copy_mode: markdown
-created: 2026-06-27T00:00:00Z
-updated: 2026-06-27T00:00:00Z
----
-
-Rewrite the following text to be concise and professional:
-
-> Text to rewrite
-```
-
-Deleted prompts are backed up to `.trash/` inside the data directory before removal.
-
-### Cloud Sync
-
-Pick one sync backend (switch at the top of Settings); both configurations are kept independently.
-
-**Jianguoyun WebDAV**:
-
-1. Sign in to Jianguoyun, open "Account Info → Security Options → Third-party App Management".
-2. Create an app password.
-3. Enter the account, app password, and remote directory in Settings; "Test connection" first.
-4. Click "Upload" or "Download" explicitly when you want to sync.
-
-**GitHub repository archive**:
-
-1. Create a GitHub repository (private recommended; it must have at least one commit — check "Initialize with README").
-2. Create a fine-grained PAT (GitHub → Settings → Developer settings → Personal access tokens) with **Contents read/write** on that repository only.
-3. Switch to "GitHub archive" in Settings, enter `owner/repo` and the PAT; optionally set a branch (default `main`) and a path prefix (default repo root). Test the connection, then save.
-4. Sync works the same as WebDAV; each prompt change becomes its own commit in the repository.
-
-Sync rules (identical for both backends):
-
-- **Upload** treats local as the source of truth; files deleted locally are also deleted remotely (deletion propagation).
-- **Download** treats remote as the source of truth; locally deleted files are not resurrected, and local files about to be overwritten are backed up to `.trash/` first.
-- `.trash`, hidden files, and sync metadata are excluded; ordering files (`.order.json` / `.category-order.json`) travel with sync.
-- Editing is briefly rejected while a sync is in flight.
-- App passwords / PATs are stored in the system credential store; legacy plaintext JSON secrets are migrated on read.
-
-### Development
-
-Prerequisites:
-
-- Node.js 22+
-- Rust 1.89+
-- Tauri v2 platform prerequisites: <https://v2.tauri.app/start/prerequisites/>
-
-```bash
-npm install
-npm run tauri dev    # dev session
-npm run tauri build  # package installers
-```
-
-Verification (all green before committing):
-
-```bash
-npm run check
-npm test
-npm run build
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-```
-
-### Publishing
-
-- Push a `vX.Y.Z` tag to trigger [release.yml](.github/workflows/release.yml): a full quality gate (check / test / clippy) runs first, then installers are built and uploaded to GitHub Release for all three platforms.
-- The GitHub Pages landing page lives in `docs/` and republishes on pushes to `main`.
+For development, install Node.js 22.6+, Rust 1.89+, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), then run `npm ci` and `npm run tauri:dev`. Use `npm run verify`, `cargo test --manifest-path src-tauri/Cargo.toml --locked`, and `npm run test:browser` for checks.
 
 ## License
 
 [Apache License 2.0](LICENSE)
-
-## 升级设计与验证
-
-[设计](DESIGN.md) · [实施计划](docs/upgrade/plan.md) · [验收记录](docs/upgrade/verification.md)。开发预览：`npm run dev` 后打开 `http://127.0.0.1:1420/?preview`，使用内存示例数据。

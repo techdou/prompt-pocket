@@ -21,11 +21,55 @@ on:
         type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-${{ inputs.tagName || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tagName || github.ref_name }}
 
 jobs:
-  publish:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release_id: ${{ steps.draft.outputs.id }}
+    steps:
+      - name: Validate tag
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - name: Verify package versions
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, tomllib
+          expected = os.environ["RELEASE_TAG"][1:]
+          for file in ["package.json", "package-lock.json", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml"]:
+              text = pathlib.Path(file).read_text()
+              version = tomllib.loads(text)["package"]["version"] if file.endswith(".toml") else json.loads(text)["version"]
+              if version != expected:
+                  raise SystemExit(f"{file}: expected {expected}, found {version}")
+          PY
+      - name: Prepare one draft
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" --json apiUrl,isDraft > "$RUNNER_TEMP/release.json"; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG — Prompt Pocket" --notes-from-tag
+            gh release view "$RELEASE_TAG" --json apiUrl,isDraft > "$RUNNER_TEMP/release.json"
+          fi
+          jq -e '.isDraft' "$RUNNER_TEMP/release.json" >/dev/null
+          echo "id=$(jq -r '.apiUrl | split("/") | last' "$RUNNER_TEMP/release.json")" >> "$GITHUB_OUTPUT"
+
+  package:
+    needs: prepare
     permissions:
       contents: write   # tauri-action 需要写权限创建 Release
     strategy:
@@ -34,30 +78,20 @@ jobs:
         include:
           # macOS Apple Silicon（M1+，覆盖当前主流 Mac）
           - platform: 'macos-latest'
-            args: '--target aarch64-apple-darwin'
+            args: '--target aarch64-apple-darwin -- --locked'
           # Windows x64
           - platform: 'windows-latest'
-            args: ''
+            args: '-- --locked'
           # Linux x64
           - platform: 'ubuntu-22.04'
-            args: ''
+            args: '-- --locked'
     runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      # 质量门：tag 推送不触发 ci.yml，发布前在本 job 里把测试跑一遍，
-      # 防止未过 CI 的提交被直接打包发给用户。
-      # shell: bash——矩阵含 Windows（默认 pwsh 解析不了 [[ =~ ]] 语法）
-      - name: Validate tag name
-        shell: bash
-        run: |
-          TAG="${{ inputs.tagName || github.ref_name }}"
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::发布 tag 必须形如 v2.0.4，当前: $TAG"
-            exit 1
-          fi
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
 
       - name: Install Node.js
         uses: actions/setup-node@v7
@@ -104,17 +138,28 @@ jobs:
           cargo test --locked --verbose
           cargo clippy --locked --all-targets -- -D warnings
 
-      # tauri-action：build + 自动创建/上传 GitHub Release
-      # tagName 用 git 推上来的 tag 本身（v2.0.3），releaseName/releaseBody 自定义。
-      # action 按 commit SHA pin（tag 可被移动重指向，SHA 不可），升级时更新 SHA 并
-      # 在注释中保留版本号对照
-      - name: Build and publish
+      - name: Build and upload to draft
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ inputs.tagName || github.ref_name }}
-          releaseName: '${{ inputs.tagName || github.ref_name }} — Prompt Pocket'
-          releaseDraft: false
-          prerelease: false
+
+          releaseId: ${{ needs.prepare.outputs.release_id }}
           args: ${{ matrix.args }}
+
+  publish:
+    needs: [prepare, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Verify packages and publish
+        run: |
+          gh release view "$RELEASE_TAG" --json isDraft,assets > "$RUNNER_TEMP/release.json"
+          jq -e '.isDraft and ([.assets[] | select(.size > 0) | .name] as $names
+            | all([".dmg", ".app.tar.gz", "-setup.exe", ".msi", ".deb", ".rpm", ".AppImage"][];
+                . as $suffix | any($names[]; endswith($suffix))))' "$RUNNER_TEMP/release.json" > /dev/null
+          gh release edit "$RELEASE_TAG" --draft=false --latest
